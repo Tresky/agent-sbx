@@ -1,0 +1,36 @@
+#!/usr/bin/env zsh
+# sbx-recipe-run <project-dir> <setup-script> [env-file]
+#
+# Runs a project recipe the way a developer's shell would: zsh has already read
+# ~/.zshenv, so rvm, nvm and the template's toolchains are present. The env file holds
+# the `env` inputs that the CLI sent; its variables are exported for the recipe.
+# Output goes to the terminal and to a log that survives the SSH session.
+# No -u: ~/.zshenv loads rvm into this shell, rvm hooks every `cd`, and its
+# hook reads unset variables. With -u the `cd` into a project that has a
+# .ruby-version dies with "gemset_name: parameter not set" before the
+# recipe starts.
+set -e
+project="$1"; setup="$2"; envfile="${3:-}"
+
+logdir="$HOME/.local/state/sbx"
+mkdir -p "$logdir"
+cd "$project"
+
+if [[ -n "$envfile" && -f "$envfile" ]]; then
+  set -a
+  source "./$envfile"
+  set +a
+fi
+
+[[ -f "$setup" ]] || { echo "sbx: recipe $setup does not exist in $project" >&2; exit 66; }
+
+echo "sbx: running $setup in $project"
+set +e
+# A recipe is a bash script, and bash does not inherit zsh FUNCTIONS: PATH
+# carries the default ruby and node across, but `nvm install` and `rvm use`
+# would be "command not found". BASH_ENV makes bash load them first.
+BASH_ENV=/usr/local/lib/sbx/bash_env bash "./$setup" 2>&1 | tee "$logdir/recipe.log"
+code=${pipestatus[1]}
+set -e
+echo "sbx: recipe exit code $code (log: $logdir/recipe.log)"
+exit "$code"

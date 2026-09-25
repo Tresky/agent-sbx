@@ -1,0 +1,39 @@
+# The values of ONE setup. Copy this file to host/local.conf, or let
+# `sbx setup` write it for you. host/local.conf is not in git.
+#
+# The host scripts and the Mac tool both read host/defaults.conf, then this
+# file on top. Set here only what differs from host/defaults.conf, which
+# explains each key. Keep every value a plain literal.
+
+# The DNS zone for the sandboxes. Never a .local name.
+#SBX_DOMAIN=sbx.internal
+
+# The bridge that carries your LAN on the Proxmox host.
+#SBX_LAN_BRIDGE=vmbr0
+
+# The sandbox bridges and subnets. The subnets must not collide with your
+# LAN, a VPN, or a network that you visit.
+#SBX_AGENT_BRIDGE=vmbr77
+#SBX_PERSONAL_BRIDGE=vmbr78
+#SBX_AGENT_NET=10.77.0
+#SBX_PERSONAL_NET=10.78.0
+
+# Proxmox IDs. They must not collide with a VM or a container that exists.
+#SBX_TEMPLATE_VMID=9000
+#SBX_GW_CTID=9001
+#SBX_VMID_MIN=9100
+#SBX_VMID_MAX=9199
+
+# Storage. Linked clones need LVM-thin, ZFS, or a directory storage with qcow2.
+#SBX_VM_STORAGE=local-lvm
+#SBX_GW_STORAGE=local-lvm
+#SBX_GW_TEMPLATE_STORAGE=local
+#SBX_SNIPPET_STORAGE=local
+
+# The gateway's LAN address: "dhcp", or a static address with its router.
+#SBX_GW_LAN_IP=192.168.1.2/24
+#SBX_GW_LAN_GW=192.168.1.1
+
+# Optional parts of the template (template/extras/), and more apt packages.
+#SBX_TEMPLATE_EXTRAS="odin gis"
+#SBX_EXTRA_APT_PACKAGES=""

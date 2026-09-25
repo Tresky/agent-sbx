@@ -1,0 +1,42 @@
+# DHCP and DNS for the two sandbox subnets.
+#
+# A VM sends its hostname in the DHCP request, and dnsmasq then answers for
+# <hostname>.@SBX_DOMAIN@ while the lease lives. That is the whole naming
+# mechanism: nothing is written when a VM is made, nothing is removed when it
+# goes away.
+
+# bind-dynamic, not bind-interfaces: tailscale0 does not exist yet when dnsmasq
+# starts at boot, and a query from the tailnet arrives on that interface.
+bind-dynamic
+interface=sbxa0
+interface=sbxp0
+interface=tailscale0
+no-dhcp-interface=tailscale0
+except-interface=lan0
+
+domain=@SBX_DOMAIN@
+# The zone is answered here and nowhere else: an unknown name in it is
+# NXDOMAIN, never a query to the upstream servers.
+local=/@SBX_DOMAIN@/
+# Never read the gateway's own /etc/hosts: Proxmox writes "127.0.1.1 <hostname>"
+# there, and dnsmasq would then answer for the gateway's name with a loopback
+# address beside the real one. A DHCP name gets the domain from `domain=`
+# above; it does not need expand-hosts, which only concerns /etc/hosts.
+no-hosts
+domain-needed
+bogus-priv
+
+no-resolv
+@SBX_DNSMASQ_SERVERS@
+
+dhcp-authoritative
+dhcp-range=set:agent,@SBX_AGENT_NET@.50,@SBX_AGENT_NET@.250,255.255.255.0,@SBX_DHCP_LEASE@
+dhcp-option=tag:agent,option:router,@SBX_AGENT_NET@.1
+dhcp-option=tag:agent,option:dns-server,@SBX_AGENT_NET@.1
+dhcp-range=set:personal,@SBX_PERSONAL_NET@.50,@SBX_PERSONAL_NET@.250,255.255.255.0,@SBX_DHCP_LEASE@
+dhcp-option=tag:personal,option:router,@SBX_PERSONAL_NET@.1
+dhcp-option=tag:personal,option:dns-server,@SBX_PERSONAL_NET@.1
+dhcp-option=option:domain-search,@SBX_DOMAIN@
+
+# The gateway's own name, so `sbx-gw.@SBX_DOMAIN@` resolves for diagnostics.
+host-record=@SBX_GW_HOSTNAME@.@SBX_DOMAIN@,@SBX_AGENT_NET@.1

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+# A real key must never land in an example.
+examples/**/config/master.key
+examples/**/.env*
+# Each setup's own values. host/local.conf.example shows what goes in it.
+host/local.conf

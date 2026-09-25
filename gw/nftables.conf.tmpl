@@ -1,0 +1,73 @@
+#!/usr/sbin/nft -f
+# The sandbox boundary. Interfaces: lan0 = your LAN, sbxa0 = agent subnet,
+# sbxp0 = personal subnet, tailscale0 = the tailnet.
+#
+# These tables are SEPARATE from the rules Tailscale installs, on purpose. In
+# nftables a drop in any base chain is final, while an accept only ends the
+# chain it is in. Tailscale accepts forwarded traffic toward tailscale0 in its
+# own chain; that accept cannot undo a drop made here. The priority of -10 only
+# decides order, not the outcome.
+
+table inet sbx_guard
+delete table inet sbx_guard
+table inet sbx_guard {
+	set private4 {
+		type ipv4_addr
+		flags interval
+		# RFC 1918, link-local, and the Tailscale CGNAT range.
+		elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+		             169.254.0.0/16, 100.64.0.0/10 }
+	}
+
+	chain input {
+		type filter hook input priority -10; policy accept;
+		iifname { "sbxa0", "sbxp0" } jump from_sandbox
+	}
+
+	# What a sandbox may ask of the gateway itself: an address, a name, a ping.
+	chain from_sandbox {
+		ct state established,related accept
+		udp dport { 53, 67 } accept
+		tcp dport 53 accept
+		icmp type echo-request accept
+		drop
+	}
+
+	chain forward {
+		type filter hook forward priority -10; policy accept;
+
+		# The sandbox subnets carry no routed IPv6.
+		meta nfproto ipv6 iifname { "sbxa0", "sbxp0" } drop
+		meta nfproto ipv6 oifname { "sbxa0", "sbxp0" } drop
+
+		# Replies to a connection that a tailnet device opened.
+		ct state established,related accept
+
+		# No sandbox opens a connection into the tailnet. Without this rule
+		# the default gateway of every VM is a working path to every tailnet
+		# device, because an approved subnet route counts as a tailnet source.
+		iifname { "sbxa0", "sbxp0" } oifname "tailscale0" drop
+
+		# An agent sandbox reaches the internet and nothing private.
+		iifname "sbxa0" ip daddr @private4 drop
+		iifname "sbxa0" oifname "sbxp0" drop
+
+		# A personal sandbox may use the LAN and may reach an agent sandbox.
+		# The tailnet range stays shut even if traffic to it would leave
+		# through lan0 and not through tailscale0.
+		iifname "sbxp0" ip daddr 100.64.0.0/10 drop
+
+		# Entry is through the tailnet only. A LAN device has no route here
+		# unless you add one, and this keeps it shut if you do.
+		iifname "lan0" oifname { "sbxa0", "sbxp0" } drop
+	}
+}
+
+table ip sbx_nat
+delete table ip sbx_nat
+table ip sbx_nat {
+	chain postrouting {
+		type nat hook postrouting priority 100; policy accept;
+		oifname "lan0" ip saddr { @SBX_AGENT_NET@.0/24, @SBX_PERSONAL_NET@.0/24 } masquerade
+	}
+}

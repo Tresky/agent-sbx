@@ -1,0 +1,17 @@
+[Unit]
+Description=sbx-mirror: loopback listeners on the routed address, same port
+After=network-online.target caddy.service
+Wants=network-online.target caddy.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/lib/sbx/sbx_mirror.py
+Restart=always
+RestartSec=2
+# Needs nothing but /proc/net/tcp, unprivileged binds, and the local Caddy API.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

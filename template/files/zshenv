@@ -1,0 +1,31 @@
+# ~/.zshenv is the ONE file zsh reads for every shell, including the
+# non-interactive shell that `ssh host command` and an agent tool call start.
+# rvm and nvm are shell functions, so a shell that skips this file has no
+# `ruby` and no `node`. Keep this file fast: every tool call pays for it.
+
+export PATH="$HOME/.local/bin:$HOME/go/bin:/usr/local/go/bin:/opt/odin:$PATH"
+
+# The Claude subscription token that `sbx claude-token` writes. Every shell
+# reads it, so a renewed token reaches each new shell at once.
+[[ -r "$HOME/.config/sbx/claude.env" ]] && source "$HOME/.config/sbx/claude.env"
+
+# --no-use skips the slow `nvm use` at startup; the default version goes on the
+# PATH directly, and the `nvm` function is still there when a recipe calls it.
+export NVM_DIR="$HOME/.nvm"
+if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+  source "$NVM_DIR/nvm.sh" --no-use
+  if [[ -r "$NVM_DIR/alias/default" ]]; then
+    _sbx_node="$(nvm version default 2>/dev/null)"
+    [[ -d "$NVM_DIR/versions/node/$_sbx_node/bin" ]] && PATH="$NVM_DIR/versions/node/$_sbx_node/bin:$PATH"
+    unset _sbx_node
+  fi
+fi
+
+[[ -s "$HOME/.rvm/scripts/rvm" ]] && source "$HOME/.rvm/scripts/rvm"
+
+# rvm runs `exec 6>&2` for its log output, and every child inherits fd 6. In
+# `ssh host command` that is the session's stderr pipe, so a daemon started
+# there (the herdr server that `herdr machine add` starts) holds the session
+# open and the command never returns. An interactive shell keeps fd 6: there
+# it is the terminal, and rvm prints its messages through it.
+[[ -o interactive ]] || exec 6>&-

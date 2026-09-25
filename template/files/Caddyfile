@@ -1,0 +1,7 @@
+# Caddy starts empty. sbx-mirror loads the real config through the admin API
+# and loads it again if Caddy restarts. The admin API stays on loopback, and
+# sbx-mirror never mirrors port 2019.
+{
+	admin 127.0.0.1:2019
+	auto_https off
+}

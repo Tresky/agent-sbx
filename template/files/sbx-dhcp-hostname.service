@@ -1,0 +1,21 @@
+[Unit]
+Description=Ask for the DHCP lease again after cloud-init, with the final hostname
+# dnsmasq names a VM from the hostname in its DHCP request. The FIRST request of
+# a boot leaves before cloud-init sets the hostname, so it carries the image's
+# own name, "ubuntu". Until this unit runs, the sandbox has the wrong DNS name.
+# The sbx CLI connects by name, so it waits for this unit through the name.
+#
+# NOT WantedBy=multi-user.target: cloud-final.service runs AFTER that target,
+# and a target orders itself after every unit it wants. That closes a cycle
+# (multi-user -> this unit -> cloud-init.target -> cloud-final -> multi-user),
+# and systemd breaks it by deleting THIS unit's job, silently. cloud-init's own
+# target is the right owner: it wants this unit and comes after cloud-final.
+After=cloud-final.service
+
+[Service]
+Type=oneshot
+# A script, not an inline command: systemd expands $VAR in ExecStart itself.
+ExecStart=/usr/local/lib/sbx/dhcp-renew.sh
+
+[Install]
+WantedBy=cloud-init.target

@@ -1,0 +1,19 @@
+# The herdr panes of a Rails sandbox: `sbx new` builds them after the recipe,
+# `sbx layout <name>` builds them again. The server on the left, a console and
+# a free shell stacked on the right.
+#
+# The server binds 127.0.0.1:3000. The sandbox's port mirror adds TLS, so
+# https://sbx-<name>.<domain>:3000 reaches it from your Mac.
+tab = "app"
+
+[[row]]
+height = 1.0
+panes  = ["server", ["console", "shell"]]
+widths = [0.6, 0.4]
+
+[pane.server]
+# bin/dev also runs the CSS and JS watchers of Procfile.dev.
+run = "if [ -x bin/dev ]; then bin/dev; else bin/rails server; fi"
+
+[pane.console]
+run = "bin/rails console"

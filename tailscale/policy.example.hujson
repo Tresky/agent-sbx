@@ -1,0 +1,36 @@
+// The part of a tailnet policy that sbx needs. MERGE it into your policy; do
+// not paste it over a policy that has other rules.
+//
+// Why "*" must not be a source: Tailscale documents "*" as "all traffic
+// originating from Tailscale devices in your tailnet, ANY APPROVED SUBNETS and
+// autogroup:shared". The sandbox subnets are approved subnets, and the default
+// gateway of every sandbox is the subnet router. With the default allow-all
+// policy, every sandbox can therefore open a connection to every device in the
+// tailnet. The nftables guard in the gateway stops that first; this policy
+// stops it a second time, at the receiving device.
+{
+	"tagOwners": {
+		// The gateway runs as a tagged node: it has no user identity, and a
+		// tagged node's key does not expire by default (check the Machines
+		// page: an expired key stops the route with no message).
+		"tag:sbx-gw": ["autogroup:admin"],
+	},
+
+	"acls": [
+		// autogroup:member = devices of human users. It excludes tagged nodes
+		// and it excludes traffic that arrives from a subnet route. This one
+		// rule keeps every device-to-device path you have today and lets your
+		// devices reach the sandbox subnets.
+		{"action": "accept", "src": ["autogroup:member"], "dst": ["*:*"]},
+
+		// NEVER add a rule whose src is "*", "tag:sbx-gw", "10.77.0.0/24" or
+		// "10.78.0.0/24".
+	],
+
+	"autoApprovers": {
+		"routes": {
+			"10.77.0.0/24": ["tag:sbx-gw"],
+			"10.78.0.0/24": ["tag:sbx-gw"],
+		},
+	},
+}

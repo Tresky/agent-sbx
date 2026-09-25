@@ -1,0 +1,25 @@
+# Interactive shells only. Everything a non-interactive shell needs is in
+# ~/.zshenv; do not move tool setup here.
+HISTFILE=~/.zsh_history
+HISTSIZE=50000
+SAVEHIST=50000
+setopt share_history hist_ignore_dups auto_cd
+autoload -Uz compinit && compinit -C
+bindkey -e
+
+PROMPT='%F{cyan}%m%f %F{blue}%~%f %# '
+
+# Switches node when a directory has an .nvmrc, the way rvm already does for
+# .ruby-version. Only here: a hook on every `cd` is too slow for tool calls.
+autoload -U add-zsh-hook
+_sbx_nvmrc() { [[ -f .nvmrc ]] && nvm use --silent >/dev/null 2>&1; }
+add-zsh-hook chpwd _sbx_nvmrc
+
+command -v direnv >/dev/null && eval "$(direnv hook zsh)"
+command -v fzf >/dev/null && source <(fzf --zsh 2>/dev/null)
+
+# A shell that STARTS inside a project has had no `cd`, so neither hook has
+# chosen its ruby, gemset or node: a herdr pane opened in ~/code/myapp sat
+# on ruby-3.3.6 with no gems, while `cd .` gave it ruby-3.3.6@myapp. One
+# `cd .` fires every chpwd hook for the directory the shell began in.
+cd .

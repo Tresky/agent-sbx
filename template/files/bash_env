@@ -1,0 +1,6 @@
+# Loaded through BASH_ENV by sbx-recipe-run, so a bash recipe has the `nvm` and
+# `rvm` shell functions. bash reads this file BEFORE the recipe's own `set`
+# line, so a recipe that uses `set -u` does not break the load itself.
+export NVM_DIR="$HOME/.nvm"
+[[ -s "$NVM_DIR/nvm.sh" ]] && source "$NVM_DIR/nvm.sh" --no-use
+[[ -s "$HOME/.rvm/scripts/rvm" ]] && source "$HOME/.rvm/scripts/rvm"

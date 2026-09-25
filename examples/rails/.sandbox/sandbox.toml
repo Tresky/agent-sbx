@@ -1,0 +1,32 @@
+# What a typical Rails recipe needs. Copy this directory to the root of the
+# application and edit it. A manifest holds NO values and NO paths on your Mac:
+# it only names what the recipe wants. See docs/projects.md.
+
+[recipe]
+setup    = ".sandbox/setup.sh"
+# dotenv-rails and Vite both read this file, so the app sees the env inputs
+# with no `source` step.
+env_file = ".env.local"
+
+[[input]]
+name     = "rails-master-key"
+kind     = "file"
+dest     = "config/master.key"
+required = false
+secret   = true
+about    = "Decrypts config/credentials.yml.enc; needed only when development reads credentials"
+
+[[input]]
+name        = "STRIPE_SECRET_KEY"
+kind        = "env"
+required    = false
+secret      = true
+placeholder = "sk_test_placeholder"
+about       = "Only the checkout flow needs it"
+
+[[input]]
+name     = "seed-dump"
+kind     = "file"
+dest     = "db/seed.sql.gz"
+required = false
+about    = "A sample database; setup.sh loads it when it is present"
