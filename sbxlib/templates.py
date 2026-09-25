@@ -41,7 +41,7 @@ _REQUIRES_RE = re.compile(r"^#\s*requires:\s*(.*)$", re.M)
 
 # Parts of every template that take settings, like a component does.
 CORE_TABLES = ("node", "docker")
-_TOP_KEYS = {"description", "components", "apt", "cores", "memory_mb", "disk_gb", "image_url"}
+_TOP_KEYS = {"description", "components", "apt", "cores", "memory_mb", "disk_gb", "image_url", "bare"}
 # Files that `sbx new` copies into each new sandbox from the checkout. A
 # change to them needs no rebuild, so they do not count in the fingerprint.
 _REFRESHED = {"zshenv", "zshrc", "sbx_mirror.py"}
@@ -62,6 +62,10 @@ class Definition:
     memory_mb: int = 8192
     disk_gb: int = 60
     image_url: str = ""
+    # A bare template skips the core (Docker, Node, Chrome, Claude Code, herdr,
+    # the mirror): the base packages, the user and the components only. The
+    # sidecar template is bare.
+    bare: bool = False
     settings: dict[str, dict[str, object]] = field(default_factory=dict)
 
     @property
@@ -166,8 +170,11 @@ def parse(text: str, name: str, path: Path, root: Path | None = None) -> Definit
     for key in ("description", "image_url"):
         if not isinstance(data.get(key, ""), str):
             raise TemplateError(f"{where}: {key} must be a string")
+    if not isinstance(data.get("bare", False), bool):
+        raise TemplateError(f"{where}: bare must be true or false")
     return Definition(name, path, data.get("description", ""), tuple(comps), tuple(apt),
-                      image_url=data.get("image_url", ""), settings=settings, **sizes)
+                      image_url=data.get("image_url", ""), bare=data.get("bare", False),
+                      settings=settings, **sizes)
 
 
 def definition_paths(root: Path | None = None) -> dict[str, Path]:
@@ -270,6 +277,7 @@ def build_env(defn: Definition, root: Path | None = None) -> dict[str, str]:
         "SBX_TEMPLATE_CORES": str(defn.cores),
         "SBX_TEMPLATE_MEMORY_MB": str(defn.memory_mb),
         "SBX_TEMPLATE_DISK_GB": str(defn.disk_gb),
+        "SBX_TEMPLATE_BARE": "1" if defn.bare else "0",
     }
     if defn.image_url:
         env["SBX_UBUNTU_IMAGE_URL"] = defn.image_url
@@ -290,6 +298,10 @@ def fingerprint(defn: Definition, root: Path | None = None) -> str:
     files += sorted(p for p in (tdir / "files").iterdir() if p.is_file() and p.name not in _REFRESHED) \
         if (tdir / "files").is_dir() else []
     files += [component_path(c, root) for c in defn.components]
+    if "sidecar" in defn.components and (root / "sidecar").is_dir():
+        # The sidecar component installs these; a change to them is a change
+        # to the template.
+        files += sorted(p for p in (root / "sidecar").iterdir() if p.is_file() and p.suffix != ".md")
     for p in files:
         h.update(p.name.encode() + b"\0" + p.read_bytes() + b"\0")
     return h.hexdigest()[:12]

@@ -26,32 +26,45 @@ trap 'echo "PROVISION FAILED at line $LINENO: $BASH_COMMAND"; touch /var/lib/sbx
 trap 'code=$?; [[ $code -eq 0 || -e /var/lib/sbx/provision.ok || -e /var/lib/sbx/provision.failed ]] \
       || { echo "PROVISION FAILED (exit $code)"; touch /var/lib/sbx/provision.failed; }' EXIT
 
+# A BARE template (bare = true in the definition) gets the base packages, the
+# user and its components, and none of the core. The sidecar template is bare.
+BARE="${SBX_TEMPLATE_BARE:-0}"
 # The tools that the final check requires. A component adds its own.
 CHECK_TOOLS="node claude herdr agent-browser"
+[[ "$BARE" == 1 ]] && CHECK_TOOLS=""
 
 step() { printf '\n\033[1m=== %s ===\033[0m\n' "$*"; }
 as_user() { sudo -u "$U" -H zsh -c "$1"; }
 
 export DEBIAN_FRONTEND=noninteractive
 
-step "template ${SBX_TEMPLATE_NAME:-?}: the core, then ${SBX_COMPONENTS:-no components}"
+if [[ "$BARE" == 1 ]]; then
+  step "template ${SBX_TEMPLATE_NAME:-?}: bare, then ${SBX_COMPONENTS:-no components}"
+else
+  step "template ${SBX_TEMPLATE_NAME:-?}: the core, then ${SBX_COMPONENTS:-no components}"
+fi
 
 step "base packages"
 # The CORE: what every template has, whatever its components. Language
 # toolchains and the libraries of one kind of app are components.
 apt-get update -q
-apt-get install -y -q --no-install-recommends \
-  qemu-guest-agent ca-certificates curl wget gnupg unzip zip git git-lfs make pkg-config \
-  build-essential clang lld g++ python3 python3-venv \
-  zsh tmux htop jq ripgrep fd-find fzf direnv rsync openssh-client \
-  libssl-dev zlib1g-dev libffi-dev \
-  fonts-liberation fonts-dejavu fonts-noto-color-emoji
+if [[ "$BARE" == 1 ]]; then
+  apt-get install -y -q --no-install-recommends \
+    qemu-guest-agent ca-certificates curl gnupg jq zsh python3 openssh-client
+else
+  apt-get install -y -q --no-install-recommends \
+    qemu-guest-agent ca-certificates curl wget gnupg unzip zip git git-lfs make pkg-config \
+    build-essential clang lld g++ python3 python3-venv \
+    zsh tmux htop jq ripgrep fd-find fzf direnv rsync openssh-client \
+    libssl-dev zlib1g-dev libffi-dev \
+    fonts-liberation fonts-dejavu fonts-noto-color-emoji
+fi
 if [[ -n "${SBX_APT_PACKAGES:-}" ]]; then
   # shellcheck disable=SC2086  # a space-separated list
   apt-get install -y -q --no-install-recommends $SBX_APT_PACKAGES
 fi
 systemctl enable --now qemu-guest-agent || true
-ln -sf "$(command -v fdfind)" /usr/local/bin/fd
+[[ "$BARE" == 1 ]] || ln -sf "$(command -v fdfind)" /usr/local/bin/fd
 
 step "system settings"
 # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor, which
@@ -91,6 +104,10 @@ install -d -o "$U" -g "$U" "/home/$U/code" \
   "/home/$U/.local" "/home/$U/.local/bin" "/home/$U/.local/share" "/home/$U/.local/state"
 # herdr and an agent run for hours with no login session attached.
 loginctl enable-linger "$U" || true
+
+if [[ "$BARE" == 1 ]]; then
+  install -d -m 0755 /etc/sbx /usr/local/lib/sbx
+else
 
 step "docker"
 install -m 0755 -d /etc/apt/keyrings
@@ -155,6 +172,8 @@ as_user 'curl -fsSL --retry 5 --retry-delay 5 https://claude.ai/install.sh | bas
 # remote PATH and starts the server side itself; no service is needed.
 as_user 'curl -fsSL --retry 5 --retry-delay 5 https://herdr.dev/install.sh | sh'
 
+fi  # the core
+
 # The components, in the order of the definition. A local component (not in
 # git) wins over a shared one of the same name.
 for comp in ${SBX_COMPONENTS:-}; do
@@ -170,14 +189,16 @@ printf 'SBX_TEMPLATE_NAME=%s\nSBX_TEMPLATE_HASH=%s\nSBX_COMPONENTS="%s"\n' \
   "${SBX_TEMPLATE_NAME:-}" "${SBX_TEMPLATE_HASH:-}" "${SBX_COMPONENTS:-}" > /etc/sbx/template
 
 step "checks"
-docker --version; caddy version
+[[ "$BARE" == 1 ]] || { docker --version; caddy version; }
 for tool in $CHECK_TOOLS; do
   as_user "command -v $tool >/dev/null && echo \"$tool: \$(command -v $tool)\""
 done
 # The check that matters: a NON-interactive ssh-style command, with no tty and
 # no rc files but ~/.zshenv, still finds the tools.
-# shellcheck disable=SC2086
-sudo -u "$U" -H env -i HOME="/home/$U" USER="$U" SHELL=/usr/bin/zsh /usr/bin/zsh -c "command -v $CHECK_TOOLS >/dev/null"
+if [[ -n "$CHECK_TOOLS" ]]; then
+  # shellcheck disable=SC2086
+  sudo -u "$U" -H env -i HOME="/home/$U" USER="$U" SHELL=/usr/bin/zsh /usr/bin/zsh -c "command -v $CHECK_TOOLS >/dev/null"
+fi
 
 step "seal"
 # Not under /run: that file system is mounted noexec, and systemd then refuses

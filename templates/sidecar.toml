@@ -1,0 +1,9 @@
+# The sidecar of an agent sandbox: a bare VM with nftables and the sidecar
+# service, and none of the core. `sbx new` clones one beside each agent
+# sandbox; host/defaults.conf names this definition in SBX_SIDECAR_TEMPLATE.
+description = "the sidecar of an agent sandbox: firewall, credential proxy, port policy"
+bare        = true
+components  = ["sidecar"]
+cores       = 1
+memory_mb   = 1024
+disk_gb     = 20

@@ -23,7 +23,7 @@ path, a git URL, or a name that `sbx projects` lists.
 |---|---|
 | `sbx new <name> [options]` | makes a sandbox. The options are below. |
 | `sbx list` | every sandbox: name, profile, project, status, VM ID, expiry, address |
-| `sbx ssh <name> [-- command]` | a shell in the sandbox, or one command |
+| `sbx ssh <name> [--sidecar] [-- command]` | a shell in the sandbox, or one command. `--sidecar`: the sandbox's sidecar instead (the sandbox's name, port 2222). |
 | `sbx snap <name> [label]` | takes a snapshot. The default label is `clean`. |
 | `sbx rollback <name> [label]` | returns to a snapshot. The default label is `clean`. |
 | `sbx rm <name> [-y]` | destroys the sandbox and its snapshots |
@@ -137,6 +137,8 @@ layer 2: sbx stops with an error.
 | `SBX_POOL` | `pve_pool` | `sbx` | the Proxmox pool of the sandboxes. The token is scoped to it. |
 | `SBX_GPU_MAPPING` | `gpu_mapping` | | the name of a PCI Resource Mapping. Empty refuses `--gpu`. |
 | `SBX_VM_USER` | `vm_user` | `dev` | the user in each sandbox |
+| `SBX_SIDECAR_LINK` | `sidecar_link` | `10.79.0` | the first three octets of the /30 wire between an agent sandbox and its sidecar: the sidecar is `.1`, the sandbox `.2`. Every pair uses it, on its own VLAN. |
+| `SBX_SIDECAR_TEMPLATE` | `sidecar_template` | `sidecar` | the template definition that the sidecars are cloned from |
 | `SBX_UBUNTU_IMAGE_URL` | | Ubuntu 24.04 cloud image | the image that each template starts from. A definition can name another. |
 
 ### Mac settings (`~/.config/sbx/config.toml`)
@@ -158,6 +160,9 @@ layer 2: sbx stops with an error.
 | `git_token_host` | `github.com` | the host of that token |
 | `remote_control_mode` | `acceptEdits` | the permission mode of Remote Control sessions. `""` turns the server off. |
 | `ssh_key` | `~/.config/sbx/id_ed25519` | the private key for the sandboxes |
+| `agent_sidecar` | `true` | every agent sandbox gets a sidecar: a small trusted VM on the sandbox's own VLAN that holds its credentials and its port policy. `false`: an agent sandbox sits on the agent bridge alone, as before sidecars. |
+| `sidecar_ports` | `open` | what a sidecar forwards to its sandbox. `open`: port 22 and every port from 1024 to 32767. `ask`: port 22, and a port only after the sandbox asked and you approved. |
+| `sidecar_claude` | `direct` | how Claude Code in an agent sandbox reaches Claude. `direct`: the subscription token goes into the sandbox. `proxy`: the token stays in the sidecar; the sandbox gets a placeholder and a base URL. Claude Code documents the proxy path for a Console API key; with the subscription token it is not verified. |
 
 The shared keys of the table above (`domain`, `agent_bridge`, and so on) are
 also accepted, but only with the same value as in `host/local.conf`.
@@ -174,6 +179,7 @@ explains them.
 | `apt` | `[]` | more apt packages |
 | `cores`, `memory_mb` | `8`, `8192` | the size of the build VM |
 | `disk_gb` | `60` | the disk of the template. A sandbox can grow it with `--disk`. |
+| `bare` | `false` | `true` skips the core (Docker, Node, Chrome, Claude Code, herdr, the mirror): the base packages, the user and the components only. The `sidecar` definition is bare. |
 | `image_url` | `SBX_UBUNTU_IMAGE_URL` | the cloud image to start from |
 | `[<component>]` | | the settings of one listed component, or of `node` or `docker` |
 
@@ -243,7 +249,8 @@ the pane layout (`.sandbox/herdr.toml`).
 | `~/code/<project>` | the project clone |
 | `~/.local/state/sbx/recipe.log` | the output of the recipe |
 | `~/.local/state/sbx/remote-control.log` | the output of the Remote Control server |
-| `~/.config/sbx/claude.env` | the Claude token, read by every shell |
+| `~/.config/sbx/claude.env` | the Claude token, read by every shell; with `sidecar_claude = "proxy"`, the sidecar's base URL and the placeholder instead |
+| `~/.git-credentials` | with a sidecar: the placeholder for the sidecar's proxy. Without: the project's git token. |
 | `/etc/sbx/tls/` | the sandbox's certificate |
 | `/etc/sbx/mirror.toml` | optional: the ports that the port mirror skips or forces |
 | `/etc/sbx/template` | the template of the sandbox: its name, fingerprint and components |
@@ -259,6 +266,28 @@ the pane layout (`.sandbox/herdr.toml`).
 | `sbx-proj-<project>` | the project |
 | `sbx-tpl-<name>` | the template it was cloned from |
 
+### Proxmox tags on a sidecar
+
+A sidecar does not carry `sbx`, so `sbx list`, `sbx rm` and `sbx gc` never
+take it for a sandbox. Its VM is named `<sandbox>-sc`.
+
+| Tag | Meaning |
+|---|---|
+| `sbx-sidecar` | the VM is the sidecar of an agent sandbox |
+| `sbx-of-<sandbox>` | the sandbox it serves. `sbx rm` destroys the two together; `sbx gc` removes a sidecar whose sandbox is gone. |
+| `sbx-tpl-<name>` | the template it was cloned from |
+
+### In a sidecar
+
+| Path | What it is |
+|---|---|
+| `/etc/sbx/sidecar.env` | the sandbox's policy: the wire, the sandbox's name, `sidecar_ports`, the upstreams. `sbx new` writes it. |
+| `/etc/sbx/sidecar/secret` | the per-sandbox placeholder that the sandbox presents |
+| `/etc/sbx/sidecar/tokens` | `claude=` and `github=`: the real credentials |
+| `/etc/nftables.conf` | the firewall, rendered from `sidecar/nftables.conf.tmpl` by `sbx-sidecar-apply` |
+| `/usr/local/bin/sbx-sidecar-apply` | renders the firewall, registers the sandbox's name, restarts the service. `--claude-token` reads a new token from stdin. |
+| `/usr/local/lib/sbx/sidecar.py` | the credential proxy (`<wire>:8080`) and the expose API (`8081` on both sides) |
+
 ### Proxmox tags on a template
 
 | Tag | Meaning |
@@ -272,5 +301,5 @@ the pane layout (`.sandbox/herdr.toml`).
 
 | Path | What it is |
 |---|---|
-| `/root/sbx/` | the copy of `host/`, `gw/`, `template/`, `templates/` and `sbxlib/` that the setup and the builds run |
+| `/root/sbx/` | the copy of `host/`, `gw/`, `template/`, `templates/`, `sidecar/` and `sbxlib/` that the setup and the builds run |
 | `/root/sbx/host/local.conf` | the values of this setup. `sbx setup --mac-only` reads it. |

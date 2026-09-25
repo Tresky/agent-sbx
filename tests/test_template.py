@@ -51,6 +51,16 @@ class DefinitionTest(Repo):
                 self.assertTrue(d.description)
                 self.assertEqual(len(templates.fingerprint(d)), 12)
 
+    def test_a_bare_definition_skips_the_core(self):
+        d = templates.load("sidecar")
+        self.assertTrue(d.bare)
+        env = templates.build_env(d)
+        self.assertEqual((env["SBX_TEMPLATE_BARE"], env["SBX_COMPONENTS"], env["SBX_TEMPLATE_CORES"]), ("1", "sidecar", "1"))
+        self.assertEqual(templates.build_env(templates.load("rails"))["SBX_TEMPLATE_BARE"], "0")
+        self.define("odd", 'description = "x"\ncomponents = []\nbare = "yes"\n')
+        with self.assertRaisesRegex(templates.TemplateError, "bare must be true or false"):
+            templates.load("odd")
+
     def test_settings_become_build_variables(self):
         env = templates.build_env(templates.load("rails"))
         self.assertEqual(env["SBX_COMPONENTS"], "ruby rails")

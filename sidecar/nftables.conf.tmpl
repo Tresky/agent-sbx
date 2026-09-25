@@ -1,17 +1,19 @@
 #!/usr/sbin/nft -f
-# The sidecar's own boundary. One sidecar serves ONE sandbox. Interfaces:
-#   agent0  the private wire to the sandbox VM (a VLAN that only the two share)
-#   net0    the shared sidecar network, where the gateway routes
+# The sidecar's own boundary. One sidecar serves ONE sandbox. sbx-sidecar-apply
+# renders this file with the two interfaces it finds:
+#   @SBX_SIDECAR_AGENT_IF@  the private wire to the sandbox VM (a VLAN that only the two share)
+#   @SBX_SIDECAR_NET_IF@    the shared sidecar network, where the gateway routes
 #
-# What the sandbox may do through its sidecar: reach the internet, and ask the
-# sidecar's own two services (the credential proxy and the expose API). Nothing
-# private: not the gateway, not another sidecar, not the LAN, not the tailnet.
-# The gateway drops most of that again, so a bug here is not a breach alone.
+# What the sandbox may do through its sidecar: reach the internet, resolve
+# names at the gateway, and ask the sidecar's own two services (the credential
+# proxy and the expose API). Nothing private: not the gateway itself, not
+# another sidecar, not the LAN, not the tailnet. The gateway drops most of that
+# again, so a bug here is not a breach on its own.
 #
-# What the sidecar accepts from the shared network: the gateway side only. The
-# other sidecars share that network and must not reach in; the source address
-# rule keys on the sidecar subnet, which no packet from the gateway side carries
-# except the gateway's own.
+# What reaches the sandbox from the gateway side: port 22, the approved ports,
+# and in "open" mode every port from 1024 to 32767, each by DNAT to the VM.
+# Nothing from another sidecar: a packet from the sidecar subnet, other than
+# the gateway's own address, is neither translated nor accepted.
 
 table inet sbx_sidecar
 delete table inet sbx_sidecar
@@ -30,39 +32,55 @@ table inet sbx_sidecar {
 		meta nfproto ipv6 drop
 
 		# The sandbox: the two services, and a ping to see the wire.
-		iifname "agent0" tcp dport { 8080, 8081 } accept
-		iifname "agent0" icmp type echo-request accept
-		iifname "agent0" drop
+		iifname "@SBX_SIDECAR_AGENT_IF@" tcp dport { 8080, 8081 } accept
+		iifname "@SBX_SIDECAR_AGENT_IF@" icmp type echo-request accept
+		iifname "@SBX_SIDECAR_AGENT_IF@" drop
 
 		# The shared network: never another sidecar.
-		iifname "net0" ip saddr @SBX_AGENT_NET@.0/24 ip saddr != @SBX_AGENT_NET@.1 drop
-		iifname "net0" udp sport 67 udp dport 68 accept
-		iifname "net0" icmp type echo-request accept
-		# The expose API for approvals, and the ports it has opened after one.
-		iifname "net0" tcp dport 8081 accept
-		iifname "net0" tcp dport 1024-32767 accept
+		iifname "@SBX_SIDECAR_NET_IF@" ip saddr @SBX_AGENT_NET@.0/24 ip saddr != @SBX_AGENT_NET@.1 drop
+		iifname "@SBX_SIDECAR_NET_IF@" udp sport 67 udp dport 68 accept
+		iifname "@SBX_SIDECAR_NET_IF@" icmp type echo-request accept
+		# The sidecar's own sshd, and the expose API for approvals.
+		iifname "@SBX_SIDECAR_NET_IF@" tcp dport { 2222, 8081 } accept
 	}
 
 	chain forward {
 		type filter hook forward priority 0; policy drop;
 		ct state established,related accept
 		meta nfproto ipv6 drop
-		# Names come from the gateway's dnsmasq, as today. A sidecar could run
-		# its own forwarder instead; then this pair of rules goes.
-		iifname "agent0" oifname "net0" ip daddr @SBX_AGENT_NET@.1 udp dport 53 accept
-		iifname "agent0" oifname "net0" ip daddr @SBX_AGENT_NET@.1 tcp dport 53 accept
-		# The internet and nothing private. Approved ports are terminated in
-		# the sidecar, so nothing from net0 is ever forwarded to the sandbox.
-		iifname "agent0" oifname "net0" ip daddr @private4 drop
-		iifname "agent0" oifname "net0" accept
+		# Toward the sandbox: only what prerouting translated (22, the
+		# approved ports, the open range).
+		iifname "@SBX_SIDECAR_NET_IF@" oifname "@SBX_SIDECAR_AGENT_IF@" ct status dnat accept
+		# Names come from the gateway's dnsmasq, as today.
+		iifname "@SBX_SIDECAR_AGENT_IF@" oifname "@SBX_SIDECAR_NET_IF@" ip daddr @SBX_AGENT_NET@.1 udp dport 53 accept
+		iifname "@SBX_SIDECAR_AGENT_IF@" oifname "@SBX_SIDECAR_NET_IF@" ip daddr @SBX_AGENT_NET@.1 tcp dport 53 accept
+		# The internet and nothing private.
+		iifname "@SBX_SIDECAR_AGENT_IF@" oifname "@SBX_SIDECAR_NET_IF@" ip daddr @private4 drop
+		iifname "@SBX_SIDECAR_AGENT_IF@" oifname "@SBX_SIDECAR_NET_IF@" accept
 	}
 }
 
 table ip sbx_sidecar_nat
 delete table ip sbx_sidecar_nat
 table ip sbx_sidecar_nat {
+	# The ports that the trusted side approved; sidecar.py adds and removes
+	# elements as it is told.
+	set approved {
+		type inet_service
+	}
+
+	chain prerouting {
+		type nat hook prerouting priority -100; policy accept;
+		# Another sidecar gets no translation: its packet then meets the input
+		# chain, which drops it.
+		iifname "@SBX_SIDECAR_NET_IF@" ip saddr @SBX_AGENT_NET@.0/24 ip saddr != @SBX_AGENT_NET@.1 return
+		iifname "@SBX_SIDECAR_NET_IF@" tcp dport 22 dnat to @SBX_SIDECAR_VM@
+		iifname "@SBX_SIDECAR_NET_IF@" tcp dport @approved dnat to @SBX_SIDECAR_VM@
+		@SBX_SIDECAR_OPEN_RULE@
+	}
+
 	chain postrouting {
 		type nat hook postrouting priority 100; policy accept;
-		oifname "net0" ip saddr @SBX_SIDECAR_LINK@.0/24 masquerade
+		oifname "@SBX_SIDECAR_NET_IF@" ip saddr @SBX_SIDECAR_LINK@.0/24 masquerade
 	}
 }

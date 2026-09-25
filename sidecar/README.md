@@ -1,62 +1,53 @@
-# The sidecar prototype
+# The sidecar
 
-One trusted container per agent sandbox. The sandbox VM has exactly one
-network link, a VLAN that only it and its sidecar share, and the sidecar
-decides what crosses it. The sidecars share a network with the gateway; the
-agents share nothing.
+One trusted VM per agent sandbox. The sandbox VM has exactly one network link,
+a VLAN that only it and its sidecar share, and the sidecar decides what
+crosses it. The sidecars share a network with the gateway; the agents share
+nothing.
 
-This directory is a prototype of the sidecar, and `tests/run-sidecar-test.sh`
-proves its claims in network namespaces. Nothing here is wired into `sbx new`
-yet. The design and its trust zones are in the architecture page that this
-branch was made for.
+`sbx new` clones a sidecar beside each agent sandbox and writes its policy.
+This directory holds what runs inside a sidecar; `template/components/sidecar.sh`
+installs it into the `sidecar` template (`templates/sidecar.toml`).
+[docs/security.md](../docs/security.md) has the trust model,
+[docs/architecture.md](../docs/architecture.md) the mechanism.
 
-## What a sidecar does
+## What is here
 
-| Job | Where | What |
+| File | Installed as | What |
 |---|---|---|
-| Credential proxy | `agent0:8080` | The VM sends a per-sandbox placeholder. The sidecar swaps it for the real Claude or git token and forwards the call. `/github/<path>` goes to the git host; the rest to Claude. Every call is logged. |
-| Expose API | `agent0:8081` and `net0:8081` | The VM asks for one of its ports (`POST /expose {"port": 4400}`). Only the trusted side may `POST /approve` or `/deny`. `GET /requests` lists the states. |
-| Port forward | `net0:<port>` | After an approval, a TCP relay to the VM's port. Caddy with TLS takes this job in the real design; the relay is enough to prove the policy. |
+| `nftables.conf.tmpl` | `/usr/local/lib/sbx/sidecar-nftables.tmpl` | the sidecar's boundary. From the sandbox: the two services, a ping, DNS to the gateway, the internet. From the shared network: the gateway side only. Port 22 and the open or approved ports are translated to the VM. |
+| `sidecar.py` | `/usr/local/lib/sbx/sidecar.py` | the credential proxy (`<wire>:8080`): the sandbox's placeholder in, the real Claude or git token out. The expose API (`8081`): the sandbox asks, only the net side approves, an approval adds the port to the nftables set `approved`. |
+| `sbx-sidecar-apply` | `/usr/local/bin/sbx-sidecar-apply` | renders the firewall from `/etc/sbx/sidecar.env`, registers the sandbox's name in DHCP, starts the service. `--claude-token` replaces the Claude token from stdin. |
+| `sbx-sidecar.service` | systemd | runs `sidecar.py` with the addresses that apply wrote |
+| `sbx-sidecar-apply.service` | systemd | runs apply after cloud-init on each boot, because cloud-init sets the VM's own name back |
 
-`nftables.conf.tmpl` is the sidecar's boundary. From the VM: the two services,
-a ping, DNS to the gateway, and the internet. Nothing private. From the shared
-network: the gateway side only, never another sidecar.
+The sidecar's own sshd is on port 2222 (`sbx ssh <name> --sidecar`).
 
-## What the test proves
+## What the tests prove
 
-`tests/run-sidecar-test.sh` builds two agent VMs, two sidecars, the gateway
-with its real rules, a LAN host that is also the "internet", and a tailnet
-device that plays your Mac. The host's bridge is VLAN-aware, with one VLAN per
-sandbox, as Proxmox does for `net0: ...,tag=<vlan>`.
+- `tests/test_sidecar.py`: the handlers, with in-memory sockets and a fake
+  upstream. The real token goes upstream in the right header (a bearer with
+  the OAuth beta header, or `x-api-key` for a Console key; basic auth for
+  git). A wrong placeholder, no placeholder, or a bad basic-auth password is
+  refused before any upstream call. Only the net side opens a port, and a
+  refused firewall change is an error, not an approval.
+- `tests/run-sidecar-test.sh` (Docker): two agents, two sidecars, the gateway
+  with its real rules, a LAN host that is also the "internet", and a tailnet
+  device, on a VLAN-aware bridge. An agent reaches its sidecar and the
+  internet and nothing else, not even the other agent when it tries the
+  bridge directly. Port 22 of the sidecar's address reaches the sandbox from
+  the tailnet and from nowhere else. A port opens only after an approval and
+  closes on a denial. Every refusal has a control.
 
-- An agent reaches its sidecar and the internet, and nothing else: not the
-  gateway, not the LAN, not the tailnet, not another sidecar, and not the
-  other agent even when it tries the bridge directly.
-- The real tokens reach the upstream; the placeholder never does. A wrong
-  placeholder, no placeholder, or another sandbox's placeholder is refused.
-  The placeholder sent straight to the internet is just a string.
-- A port is unreachable until the trusted side approves. The sandbox cannot
-  approve its own request. After a denial the port closes again.
-- Each refusal has a control: with the sidecar rules deleted, the gateway's
-  layer still stops the LAN and the tailnet; with the VLAN tag moved, the
-  agents reach each other; with the gateway guard deleted too, every path is
-  open, so the topology itself was whole.
+## Limits
 
-```
-tests/run-sidecar-test.sh
-```
-
-## What is not here yet
-
-- **Proxmox.** `sbx new` does not clone a sidecar, tag the sandbox's NIC, or
-  write the secret and the tokens into it. `host/10-bridges.sh` does not make
-  the agent bridge VLAN-aware. Both need a real host to try.
-- **DHCP and DNS.** The test uses static addresses. In the design the sidecar
-  takes its `net0` address from the gateway's dnsmasq, and the VM either asks
-  its sidecar or keeps a static `/30` that every pair can reuse.
-- **TLS.** The forward is plain TCP. The real sidecar runs Caddy with the
-  sandbox's leaf certificate, so the leaf key moves out of the VM.
-- **The Claude credential.** The proxy injects a bearer token, or an API key
-  with `--claude-header x-api-key`. The documented gateway path for Claude Code
-  needs a Console API key; the subscription token from `claude setup-token`
-  is not supported through a custom base URL.
+- **The Claude lane with a subscription token is unverified.** Claude Code
+  documents the base-URL path for a Console API key. The proxy sends a
+  subscription token as a bearer with the OAuth beta header, which is what
+  Claude Code itself sends, but that has not been tried against the real API.
+  `sidecar_claude` is `direct` until it is.
+- **Uploads are buffered.** The proxy reads a request and a response whole
+  before it forwards them. A `git push` with a chunked body does not work
+  through it; a clone does.
+- **The forwarded ports are plain TCP** to the VM, which does its own TLS
+  through the mirror, as before. The leaf key therefore still lives in the VM.

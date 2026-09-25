@@ -1,9 +1,10 @@
 """sidecar/sidecar.py, driven without a network: each handler gets an
-in-memory socket, the upstream is a fake connection class, and the port
-forward is a stub. tests/run-sidecar-test.sh proves the same flows on real
+in-memory socket, the upstream is a fake connection class, and the nftables
+calls are stubs. tests/run-sidecar-test.sh proves the same flows on real
 interfaces; this file proves the handlers' decisions."""
 from __future__ import annotations
 
+import base64
 import io
 import json
 import sys
@@ -94,69 +95,79 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         d = Path(self.tmp.name)
         (d / "secret").write_text(SECRET + "\n")
-        (d / "tokens").write_text("claude=REAL-CLAUDE\ngithub=REAL-GITHUB\n")
+        (d / "tokens").write_text("claude=sk-ant-oat01-REAL\ngithub=ghp_REAL\n")
         self.args = types.SimpleNamespace(
             agent_addr="10.79.0.1", vm_addr="10.79.0.2", net_addr="10.77.0.57",
             secret_file=str(d / "secret"), tokens_file=str(d / "tokens"),
             claude_upstream="http://203.0.113.10:9000", github_upstream="http://203.0.113.10:9001",
-            claude_header="Authorization", net_expose_port=8081)
+            net_expose_port=8081)
         sidecar.CFG = sidecar.Config(self.args)
         sidecar.REQUESTS = sidecar.Requests()
         FakeUpstream.calls = []
         FakeUpstream.status = 200
-        self._real_conn = sidecar.http.client.HTTPConnection
+        self._real = (sidecar.http.client.HTTPConnection, sidecar.open_port, sidecar.close_port)
         sidecar.http.client.HTTPConnection = FakeUpstream
-        self._real_forward = sidecar.start_forward
-        self.forwards = []
-
-        def fake_forward(listen_addr, port, target):
-            stub = types.SimpleNamespace(listen=(listen_addr, port), target=target, events=[])
-            stub.shutdown = lambda how: stub.events.append("shutdown")
-            stub.close = lambda: stub.events.append("close")
-            self.forwards.append(stub)
-            return stub
-        sidecar.start_forward = fake_forward
+        self.nft: list[tuple[str, int]] = []
+        self.nft_ok = True
+        sidecar.open_port = lambda port: self.nft.append(("add", port)) or self.nft_ok
+        sidecar.close_port = lambda port: self.nft.append(("delete", port)) or True
 
     def tearDown(self):
-        sidecar.http.client.HTTPConnection = self._real_conn
-        sidecar.start_forward = self._real_forward
+        sidecar.http.client.HTTPConnection, sidecar.open_port, sidecar.close_port = self._real
         self.tmp.cleanup()
+
+    def set_tokens(self, text: str):
+        Path(self.args.tokens_file).write_text(text)
+        sidecar.CFG = sidecar.Config(self.args)
 
 
 class ProxyTest(Base):
-    def test_claude_call_gets_the_real_bearer_token(self):
+    def test_claude_call_gets_the_real_subscription_token_and_its_beta_header(self):
         status, _, body = request(sidecar.Proxy, "agent", "POST", "/v1/messages",
                                   {"Authorization": f"Bearer {SECRET}", "anthropic-version": "2023-06-01",
-                                   "Content-Type": "application/json"}, b'{"model": "x"}')
+                                   "anthropic-beta": "prompt-caching-2024-07-31", "Content-Type": "application/json"},
+                                  b'{"model": "x"}')
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"ok": True})
         [call] = FakeUpstream.calls
         self.assertEqual((call["host"], call["port"], call["path"]), ("203.0.113.10", 9000, "/v1/messages"))
-        self.assertEqual(call["headers"]["Authorization"], "Bearer REAL-CLAUDE")
+        self.assertEqual(call["headers"]["Authorization"], "Bearer sk-ant-oat01-REAL")
+        self.assertEqual(call["headers"]["anthropic-beta"], "prompt-caching-2024-07-31,oauth-2025-04-20")
         self.assertEqual(call["headers"]["anthropic-version"], "2023-06-01")
         self.assertEqual(call["headers"]["Host"], "203.0.113.10:9000")
         self.assertEqual(call["body"], b'{"model": "x"}')
         self.assertNotIn(SECRET, repr(call))
 
-    def test_git_call_goes_to_the_git_host_with_its_own_token(self):
-        status, _, _ = request(sidecar.Proxy, "agent", "GET", "/github/repos/o/r",
-                               {"x-api-key": SECRET})
-        self.assertEqual(status, 200)
-        [call] = FakeUpstream.calls
-        self.assertEqual((call["port"], call["path"]), (9001, "/repos/o/r"))
-        self.assertEqual(call["headers"]["Authorization"], "Bearer REAL-GITHUB")
-        self.assertNotIn("x-api-key", call["headers"])
-
-    def test_api_key_mode_uses_the_x_api_key_header(self):
-        self.args.claude_header = "x-api-key"
-        sidecar.CFG = sidecar.Config(self.args)
+    def test_an_api_key_goes_in_x_api_key_with_no_beta_header(self):
+        self.set_tokens("claude=sk-ant-api03-KEY\ngithub=\n")
         request(sidecar.Proxy, "agent", "GET", "/v1/models", {"Authorization": f"Bearer {SECRET}"})
         [call] = FakeUpstream.calls
-        self.assertEqual(call["headers"]["x-api-key"], "REAL-CLAUDE")
+        self.assertEqual(call["headers"]["x-api-key"], "sk-ant-api03-KEY")
+        self.assertNotIn("Authorization", call["headers"])
+        self.assertNotIn("anthropic-beta", call["headers"])
+
+    def test_git_call_goes_to_the_git_host_with_basic_auth(self):
+        # git presents the placeholder as a basic-auth password.
+        basic = base64.b64encode(f"sbx:{SECRET}".encode()).decode()
+        status, _, _ = request(sidecar.Proxy, "agent", "GET", "/github/o/r.git/info/refs?service=git-upload-pack",
+                               {"Authorization": f"Basic {basic}"})
+        self.assertEqual(status, 200)
+        [call] = FakeUpstream.calls
+        self.assertEqual((call["port"], call["path"]), (9001, "/o/r.git/info/refs?service=git-upload-pack"))
+        want = "Basic " + base64.b64encode(b"x-access-token:ghp_REAL").decode()
+        self.assertEqual(call["headers"]["Authorization"], want)
+        self.assertNotIn("x-api-key", call["headers"])
+
+    def test_no_git_token_means_no_credential_upstream(self):
+        self.set_tokens("claude=sk-ant-oat01-REAL\ngithub=\n")
+        request(sidecar.Proxy, "agent", "GET", "/github/o/public.git/info/refs", {"x-api-key": SECRET})
+        [call] = FakeUpstream.calls
         self.assertNotIn("Authorization", call["headers"])
 
     def test_wrong_or_missing_placeholder_is_refused_before_any_upstream_call(self):
-        for headers in ({"Authorization": "Bearer wrong"}, {"x-api-key": "wrong"}, {}):
+        wrong_basic = base64.b64encode(b"sbx:wrong").decode()
+        for headers in ({"Authorization": "Bearer wrong"}, {"x-api-key": "wrong"},
+                        {"Authorization": f"Basic {wrong_basic}"}, {"Authorization": "Basic %%%"}, {}):
             status, _, body = request(sidecar.Proxy, "agent", "GET", "/v1/models", headers)
             self.assertEqual(status, 401, headers)
             self.assertIn("unknown sandbox credential", body.decode())
@@ -184,29 +195,39 @@ class ExposeTest(Base):
         _, _, body = request(sidecar.Expose, side, "GET", "/requests")
         return {r["port"]: r["state"] for r in json.loads(body)["requests"]}
 
-    def test_the_sandbox_asks_and_only_the_trusted_side_approves(self):
+    def test_the_sandbox_asks_and_only_the_trusted_side_opens_the_port(self):
         status, _, body = self.ask()
         self.assertEqual((status, json.loads(body)), (202, {"port": 4400, "state": "pending"}))
         self.assertEqual(self.states(), {4400: "pending"})
-        self.assertEqual(self.forwards, [], "no listener before an approval")
+        self.assertEqual(self.nft, [], "nothing opens before an approval")
 
         status, _, _ = self.decide("approve", side="agent")
         self.assertEqual(status, 403)
-        self.assertEqual(self.forwards, [], "the sandbox side cannot open a port")
+        self.assertEqual(self.nft, [], "the sandbox side cannot open a port")
 
         status, _, body = self.decide("approve")
         self.assertEqual((status, json.loads(body)["state"]), (200, "approved"))
-        [fwd] = self.forwards
-        self.assertEqual((fwd.listen, fwd.target), (("10.77.0.57", 4400), "10.79.0.2"))
+        self.assertEqual(self.nft, [("add", 4400)])
         self.assertEqual(self.states(side="agent"), {4400: "approved"})
 
         status, _, _ = self.decide("approve")
         self.assertEqual(status, 200)
-        self.assertEqual(len(self.forwards), 1, "a second approval opens nothing new")
+        self.assertEqual(self.nft, [("add", 4400)], "a second approval adds nothing")
 
         status, _, body = self.decide("deny")
         self.assertEqual((status, json.loads(body)["state"]), (200, "denied"))
-        self.assertEqual(fwd.events, ["shutdown", "close"])
+        self.assertEqual(self.nft, [("add", 4400), ("delete", 4400)])
+
+        status, _, _ = self.decide("deny")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.nft), 2, "a denial of a port that is not open deletes nothing")
+
+    def test_a_refused_firewall_change_is_an_error_not_an_approval(self):
+        self.ask()
+        self.nft_ok = False
+        status, _, body = self.decide("approve")
+        self.assertEqual((status, json.loads(body)["state"]), (500, "error"))
+        self.assertEqual(self.states(), {4400: "pending"})
 
     def test_a_request_needs_the_placeholder_and_a_sane_port(self):
         status, _, _ = self.ask(headers={})
@@ -232,10 +253,15 @@ class ExposeTest(Base):
 
 
 class ConfigTest(Base):
-    def test_tokens_file_needs_both_credentials(self):
-        Path(self.args.tokens_file).write_text("claude=only\n")
+    def test_an_empty_secret_is_refused(self):
+        Path(self.args.secret_file).write_text("\n")
         with self.assertRaises(SystemExit):
             sidecar.Config(self.args)
+
+    def test_missing_tokens_are_empty_not_errors(self):
+        Path(self.args.tokens_file).write_text("# nothing yet\n")
+        cfg = sidecar.Config(self.args)
+        self.assertEqual(cfg.tokens, {"claude": "", "github": ""})
 
 
 if __name__ == "__main__":

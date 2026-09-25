@@ -11,13 +11,15 @@
 #                                                                                                             with a fake API on :9000)
 #                                                                          gw tailscale0 -- ts  100.64.0.2   (your Mac, on the tailnet)
 #
+# The sidecars run in "ask" mode, so that an approval is what opens a port.
 # Every refusal is a CONTROLLED PAIR: the same probe runs again with the rule
 # that refused it removed, and must pass then. A probe that fails both ways
 # proves nothing about the design; it means the topology is broken.
 set -u
 GW_RULES="$1"
-SIDECAR_RULES="$2"
+SIDECAR_TMPL="$2"
 fails=0
+source /sbx/host/lib.sh   # render(), and the defaults (SBX_AGENT_NET)
 
 ns() { ip netns exec "$@"; }
 
@@ -70,7 +72,7 @@ ns ts ip route add 10.77.0.0/24 via 100.64.0.1
 ns lan ip route add 10.77.0.0/24 via 192.168.50.2
 ns gw sysctl -qw net.ipv4.ip_forward=1
 
-# Each pair: a /30 on its own VLAN. (The real design can give every pair the
+# Each pair: a /30 on its own VLAN. (The real design gives every pair the
 # same /30, since no two pairs share a segment; the test uses two, so that a
 # probe can name the other VM.)
 ns sideA ip addr add 10.79.0.1/30 dev agent0;  ns agentA ip addr add 10.79.0.2/30 dev eth0
@@ -92,16 +94,24 @@ table inet fake_tailscale {
 }
 EOF
 ns gw nft -f "$GW_RULES" || { echo "gateway rules failed to load"; exit 2; }
-ns sideA nft -f "$SIDECAR_RULES" || { echo "sidecar rules failed to load"; exit 2; }
-ns sideB nft -f "$SIDECAR_RULES" || { echo "sidecar rules failed to load"; exit 2; }
+
+# The sidecars: the template rendered as sbx-sidecar-apply renders it, with
+# the interfaces it would find, in "ask" mode.
+export SBX_SIDECAR_LINK=10.79.0 SBX_SIDECAR_AGENT_IF=agent0 SBX_SIDECAR_NET_IF=net0
+export SBX_SIDECAR_OPEN_RULE="# ports open by approval only (sidecar_ports = ask)"
+export SBX_SIDECAR_VM=10.79.0.2; render "$SIDECAR_TMPL" > /tmp/sideA.conf
+export SBX_SIDECAR_VM=10.79.0.6; render "$SIDECAR_TMPL" > /tmp/sideB.conf
+ns sideA nft -f /tmp/sideA.conf || { echo "sidecar rules failed to load"; exit 2; }
+ns sideB nft -f /tmp/sideB.conf || { echo "sidecar rules failed to load"; exit 2; }
 
 # Services. Port 8000 everywhere is the generic probe target; the fake API
-# answers on the "internet"; 4400 in agent A is the dev server to expose.
+# answers on the "internet"; 22 and 4400 in agent A are sshd and a dev server.
 SA="placeholder-for-sandbox-A"; SB="placeholder-for-sandbox-B"
 printf '%s\n' "$SA" > /tmp/secretA; printf '%s\n' "$SB" > /tmp/secretB
-printf 'claude=REAL-CLAUDE-A\ngithub=REAL-GITHUB-A\n' > /tmp/tokensA
-printf 'claude=REAL-CLAUDE-B\ngithub=REAL-GITHUB-B\n' > /tmp/tokensB
+printf 'claude=sk-ant-oat01-REAL-A\ngithub=ghp_REAL_A\n' > /tmp/tokensA
+printf 'claude=sk-ant-oat01-REAL-B\ngithub=ghp_REAL_B\n' > /tmp/tokensB
 for n in lan ts gw agentA agentB; do ns "$n" python3 -m http.server 8000 --bind 0.0.0.0 >/dev/null 2>&1 & done
+ns agentA python3 -m http.server 22 --bind 0.0.0.0 >/dev/null 2>&1 &
 ns agentA python3 -m http.server 4400 --bind 0.0.0.0 >/dev/null 2>&1 &
 ns lan python3 /sbx/tests/sidecar_fake_api.py 203.0.113.10 9000 &
 ns sideA python3 /sbx/sidecar/sidecar.py --agent-addr 10.79.0.1 --vm-addr 10.79.0.2 --net-addr 10.77.0.57 \
@@ -113,8 +123,8 @@ ns sideB python3 /sbx/sidecar/sidecar.py --agent-addr 10.79.0.5 --vm-addr 10.79.
 sleep 2
 
 report() { # report <label> <got> <want>
-  if [[ "$2" == "$3" ]]; then printf '  ok    %-56s %s\n' "$1" "$2"
-  else printf '  WRONG %-56s got %s, want %s\n' "$1" "$2" "$3"; fails=$((fails + 1)); fi
+  if [[ "$2" == "$3" ]]; then printf '  ok    %-58s %s\n' "$1" "$2"
+  else printf '  WRONG %-58s got %s, want %s\n' "$1" "$2" "$3"; fails=$((fails + 1)); fi
 }
 probe() { ns "$1" ping -c1 -W1 "$2" >/dev/null 2>&1 && ns "$1" timeout 2 bash -c "exec 3<>/dev/tcp/$2/8000" 2>/dev/null; }
 probe_ping() { ns "$1" ping -c1 -W1 "$2" >/dev/null 2>&1; }
@@ -128,68 +138,73 @@ expect() {
 # expect_tcp <pass|fail> <label> <ns> <addr> <port>
 expect_tcp() { local got=pass; tcp "$3" "$4" "$5" || got=fail; report "$2" "$got" "$1"; }
 # contains <label> <text> <needle>
-contains() { if grep -q -- "$3" <<<"$2"; then report "$1" "found" "found"; else report "$1" "missing: ${2:0:80}" "found"; fi; }
+contains() { if grep -qF -- "$3" <<<"$2"; then report "$1" "found" "found"; else report "$1" "missing: ${2:0:80}" "found"; fi; }
 c() { ns "$1" curl -s -m 3 "${@:2}"; }
 code() { ns "$1" curl -s -m 3 -o /dev/null -w '%{http_code}' "${@:2}"; }
 
 echo "== the wire: what an agent reaches through, and around, its sidecar"
-expect     pass "agent A -> its sidecar (ping)"                      agentA 10.79.0.1 ping
-expect     pass "agent A -> internet, through sidecar and gateway"   agentA 203.0.113.10
-expect     fail "agent A -> LAN host"                                agentA 192.168.50.10
-expect     fail "agent A -> tailnet device"                          agentA 100.64.0.2
-expect     fail "agent A -> gateway (ping)"                          agentA 10.77.0.1 ping
-expect_tcp fail "agent A -> gateway TCP service"                     agentA 10.77.0.1 8000
-expect     fail "agent A -> sidecar B (ping)"                        agentA 10.77.0.58 ping
-expect     fail "agent A -> agent B, directly on the bridge"         agentA 10.79.0.6 ping
-expect_tcp fail "sidecar A -> sidecar B expose API"                  sideA  10.77.0.58 8081
-expect     fail "LAN host -> sidecar A (ping)"                       lan    10.77.0.57 ping
-expect     pass "tailnet device -> sidecar A (ping)"                 ts     10.77.0.57 ping
-expect_tcp pass "tailnet device -> sidecar A expose API"             ts     10.77.0.57 8081
+expect     pass "agent A -> its sidecar (ping)"                        agentA 10.79.0.1 ping
+expect     pass "agent A -> internet, through sidecar and gateway"     agentA 203.0.113.10
+expect     fail "agent A -> LAN host"                                  agentA 192.168.50.10
+expect     fail "agent A -> tailnet device"                            agentA 100.64.0.2
+expect     fail "agent A -> gateway (ping)"                            agentA 10.77.0.1 ping
+expect_tcp fail "agent A -> gateway TCP service"                       agentA 10.77.0.1 8000
+expect     fail "agent A -> sidecar B (ping)"                          agentA 10.77.0.58 ping
+expect     fail "agent A -> agent B, directly on the bridge"           agentA 10.79.0.6 ping
+expect_tcp fail "sidecar A -> sidecar B expose API"                    sideA  10.77.0.58 8081
+expect     fail "LAN host -> sidecar A (ping)"                         lan    10.77.0.57 ping
+expect     pass "tailnet device -> sidecar A (ping)"                   ts     10.77.0.57 ping
+expect_tcp pass "tailnet device -> sidecar A expose API"               ts     10.77.0.57 8081
+
+echo "== port 22 of the sidecar's address is the sandbox's"
+report "tailnet device -> sandbox A sshd, through the sidecar" "$(code ts http://10.77.0.57:22/)" 200
+expect_tcp fail "LAN host -> sandbox A sshd"                           lan    10.77.0.57 22
+expect_tcp fail "agent B -> sandbox A sshd"                            agentB 10.77.0.57 22
 
 echo "== the credential proxy: the placeholder never leaves, the real token never enters"
 out="$(c agentA -H "Authorization: Bearer $SA" http://10.79.0.1:8080/v1/messages)"
-contains "Claude call carries the real token upstream"               "$out" "Bearer REAL-CLAUDE-A"
-out="$(c agentA -H "Authorization: Bearer $SA" http://10.79.0.1:8080/github/repos/o/r)"
-contains "git call carries the git token upstream"                   "$out" "Bearer REAL-GITHUB-A"
-contains "git call keeps its path"                                   "$out" '"path": "/repos/o/r"'
-report   "wrong placeholder is refused"        "$(code agentA -H 'Authorization: Bearer wrong' http://10.79.0.1:8080/v1/messages)" 401
-report   "no credential is refused"            "$(code agentA http://10.79.0.1:8080/v1/messages)" 401
+contains "Claude call carries the real token upstream"                 "$out" "Bearer sk-ant-oat01-REAL-A"
+out="$(c agentA -u "sbx:$SA" http://10.79.0.1:8080/github/o/r.git/info/refs)"
+contains "git call carries the git token upstream, as basic auth"      "$out" "Basic $(printf 'x-access-token:ghp_REAL_A' | base64 -w0)"
+contains "git call keeps its path"                                     "$out" '"path": "/o/r.git/info/refs"'
+report   "wrong placeholder is refused"          "$(code agentA -H 'Authorization: Bearer wrong' http://10.79.0.1:8080/v1/messages)" 401
+report   "no credential is refused"              "$(code agentA http://10.79.0.1:8080/v1/messages)" 401
 report   "A's placeholder is useless at sidecar B" "$(code agentB -H "Authorization: Bearer $SA" http://10.79.0.5:8080/v1/messages)" 401
 out="$(c agentA -H "Authorization: Bearer $SA" http://203.0.113.10:9000/v1/messages)"
 contains "the placeholder sent straight to the internet is only itself" "$out" "Bearer $SA"
 
 echo "== the expose API: the sandbox asks, only the trusted side approves"
-expect_tcp fail "tailnet device -> port 4400 before approval"        ts 10.77.0.57 4400
-report "sandbox asks for 4400"                 "$(code agentA -H "Authorization: Bearer $SA" -d '{"port":4400}' http://10.79.0.1:8081/expose)" 202
-report "sandbox asks with no credential"       "$(code agentA -d '{"port":4400}' http://10.79.0.1:8081/expose)" 401
-report "sandbox cannot approve its own request" "$(code agentA -H "Authorization: Bearer $SA" -d '{"port":4400}' http://10.79.0.1:8081/approve)" 403
+expect_tcp fail "tailnet device -> port 4400 before approval"          ts 10.77.0.57 4400
+report "sandbox asks for 4400"                   "$(code agentA -H "Authorization: Bearer $SA" -d '{"port":4400}' http://10.79.0.1:8081/expose)" 202
+report "sandbox asks with no credential"         "$(code agentA -d '{"port":4400}' http://10.79.0.1:8081/expose)" 401
+report "sandbox cannot approve its own request"  "$(code agentA -H "Authorization: Bearer $SA" -d '{"port":4400}' http://10.79.0.1:8081/approve)" 403
 contains "trusted side sees the request pending" "$(c ts http://10.77.0.57:8081/requests)" pending
-report "trusted side approves"                 "$(code ts -d '{"port":4400}' http://10.77.0.57:8081/approve)" 200
+report "trusted side approves"                   "$(code ts -d '{"port":4400}' http://10.77.0.57:8081/approve)" 200
 report "tailnet device -> port 4400 after approval" "$(code ts http://10.77.0.57:4400/)" 200
-expect_tcp fail "agent B -> sidecar A port 4400"                     agentB 10.77.0.57 4400
-expect_tcp fail "LAN host -> sidecar A port 4400"                    lan    10.77.0.57 4400
-report "trusted side denies"                   "$(code ts -d '{"port":4400}' http://10.77.0.57:8081/deny)" 200
-expect_tcp fail "tailnet device -> port 4400 after denial"           ts 10.77.0.57 4400
-report "a port outside the range is refused"   "$(code agentA -H "Authorization: Bearer $SA" -d '{"port":22}' http://10.79.0.1:8081/expose)" 400
+expect_tcp fail "agent B -> sidecar A port 4400"                       agentB 10.77.0.57 4400
+expect_tcp fail "LAN host -> sidecar A port 4400"                      lan    10.77.0.57 4400
+report "trusted side denies"                     "$(code ts -d '{"port":4400}' http://10.77.0.57:8081/deny)" 200
+expect_tcp fail "tailnet device -> port 4400 after denial"             ts 10.77.0.57 4400
+report "a port outside the range is refused"     "$(code agentA -H "Authorization: Bearer $SA" -d '{"port":22}' http://10.79.0.1:8081/expose)" 400
 
 echo "== control 1: sidecar rules deleted (the gateway's own layer still holds)"
 for s in sideA sideB; do ns "$s" nft delete table inet sbx_sidecar; done
-expect     pass "agent A -> gateway (ping)"                          agentA 10.77.0.1 ping
-expect     pass "agent A -> sidecar B (ping)"                        agentA 10.77.0.58 ping
-expect_tcp pass "sidecar A -> sidecar B expose API"                  sideA  10.77.0.58 8081
-expect     fail "agent A -> LAN host (gateway drops it)"             agentA 192.168.50.10
-expect     fail "agent A -> tailnet device (gateway drops it)"       agentA 100.64.0.2
+expect     pass "agent A -> gateway (ping)"                            agentA 10.77.0.1 ping
+expect     pass "agent A -> sidecar B (ping)"                          agentA 10.77.0.58 ping
+expect_tcp pass "sidecar A -> sidecar B expose API"                    sideA  10.77.0.58 8081
+expect     fail "agent A -> LAN host (gateway drops it)"               agentA 192.168.50.10
+expect     fail "agent A -> tailnet device (gateway drops it)"         agentA 100.64.0.2
 
 echo "== control 2: agent B moved onto agent A's VLAN"
 bridge vlan del dev tapB vid 9151
 bridge vlan add dev tapB vid 9150 pvid untagged
-expect     pass "agent A -> agent B, directly on the bridge"         agentA 10.79.0.6 ping
+expect     pass "agent A -> agent B, directly on the bridge"           agentA 10.79.0.6 ping
 
 echo "== control 3: gateway guard deleted too (the topology itself is whole)"
 ns gw nft delete table inet sbx_guard
-expect     pass "agent A -> LAN host"                                agentA 192.168.50.10
-expect     pass "agent A -> tailnet device"                          agentA 100.64.0.2
-expect     pass "LAN host -> sidecar A (ping)"                       lan    10.77.0.57 ping
+expect     pass "agent A -> LAN host"                                  agentA 192.168.50.10
+expect     pass "agent A -> tailnet device"                            agentA 100.64.0.2
+expect     pass "LAN host -> sidecar A (ping)"                         lan    10.77.0.57 ping
 
 echo
 echo "-- sidecar A log --"; cat /tmp/sideA.log

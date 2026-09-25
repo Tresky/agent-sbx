@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Applies one sandbox's policy in its sidecar. Reads /etc/sbx/sidecar.env
+# (written by `sbx new` over SSH), finds the two interfaces, renders the
+# firewall, registers the sandbox's name in the gateway's DHCP, and starts the
+# sidecar service. Runs at each boot after cloud-init, and whenever the CLI
+# changes the policy.
+#
+#   sbx-sidecar-apply                 apply the env file
+#   sbx-sidecar-apply --claude-token  read a new Claude token from stdin (one line;
+#                                     empty removes it), write it, restart the service
+set -euo pipefail
+
+ENV=/etc/sbx/sidecar.env
+DIR=/etc/sbx/sidecar
+TMPL=/usr/local/lib/sbx/sidecar-nftables.tmpl
+[[ -f "$ENV" ]] || { echo "no $ENV yet; nothing to apply"; exit 0; }
+# shellcheck disable=SC1090
+source "$ENV"
+: "${SBX_SIDECAR_LINK:?}" "${SBX_AGENT_NET:?}"
+
+if [[ "${1:-}" == "--claude-token" ]]; then
+  IFS= read -r token || token=""
+  { grep -v '^claude=' "$DIR/tokens" 2>/dev/null || true; printf 'claude=%s\n' "$token"; } > "$DIR/tokens.new"
+  chmod 0600 "$DIR/tokens.new"
+  mv "$DIR/tokens.new" "$DIR/tokens"
+  systemctl restart sbx-sidecar
+  echo "claude token ${token:+updated}${token:-removed}"
+  exit 0
+fi
+
+# The wire is the interface that holds <link>.1; the shared network is the
+# interface of the default route. Names are not assumed: they depend on the
+# image and on the order of the NICs.
+agent_if="$(ip -o -4 addr show | awk -v a="$SBX_SIDECAR_LINK.1/30" '$4 == a {print $2; exit}')"
+net_if="$(ip -4 route show default | awk '{print $5; exit}')"
+[[ -n "$agent_if" && -n "$net_if" ]] \
+  || { echo "ERROR: no interface holds $SBX_SIDECAR_LINK.1/30, or there is no default route" >&2; exit 1; }
+net_addr="$(ip -o -4 addr show dev "$net_if" | awk '{print $4; exit}' | cut -d/ -f1)"
+
+export SBX_SIDECAR_AGENT_IF="$agent_if" SBX_SIDECAR_NET_IF="$net_if" SBX_SIDECAR_VM="$SBX_SIDECAR_LINK.2"
+if [[ "${SBX_SIDECAR_PORTS:-open}" == open ]]; then
+  export SBX_SIDECAR_OPEN_RULE="iifname \"$net_if\" tcp dport 1024-32767 dnat to $SBX_SIDECAR_LINK.2"
+else
+  export SBX_SIDECAR_OPEN_RULE="# ports open by approval only (sidecar_ports = ask)"
+fi
+
+# render <template>: @NAME@ becomes $NAME, as host/lib.sh does it.
+render() {
+  local out name
+  out="$(cat "$1")"
+  for name in $(grep -oE '@[A-Z_]+@' "$1" | sort -u | tr -d '@'); do
+    [[ -n "${!name+x}" ]] && out="${out//@${name}@/${!name}}"
+  done
+  printf '%s\n' "$out"
+}
+render "$TMPL" > /etc/nftables.conf.new
+nft -c -f /etc/nftables.conf.new
+mv /etc/nftables.conf.new /etc/nftables.conf
+nft -f /etc/nftables.conf
+systemctl enable -q nftables
+
+# The sandbox has no path to the gateway's DHCP, so its NAME is registered by
+# this machine: the sidecar asks for its lease with the sandbox's hostname.
+# cloud-init sets the VM's own name on every boot; this puts it back.
+if [[ -n "${SBX_SANDBOX_HOSTNAME:-}" && "$(hostname)" != "$SBX_SANDBOX_HOSTNAME" ]]; then
+  hostnamectl set-hostname "$SBX_SANDBOX_HOSTNAME"
+  networkctl reconfigure "$net_if" || true
+fi
+
+install -d -m 0755 /run/sbx
+printf 'SBX_SIDECAR_NET_ADDR=%s\n' "$net_addr" > /run/sbx/sidecar.env
+touch "$DIR/secret" "$DIR/tokens"
+chmod 0600 "$DIR/secret" "$DIR/tokens"
+systemctl restart sbx-sidecar
+echo "sidecar applied: wire $agent_if ($SBX_SIDECAR_LINK.1), network $net_if ($net_addr), ports ${SBX_SIDECAR_PORTS:-open}"

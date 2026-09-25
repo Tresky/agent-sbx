@@ -6,6 +6,7 @@ import datetime as dt
 import getpass
 import os
 import posixpath
+import secrets
 import shlex
 import shutil
 import sys
@@ -32,7 +33,7 @@ from .inputs import PLACEHOLDER, REPO, SEND, InputError
 from .manifest import MANIFEST_PATH, Manifest, ManifestError
 from .pve import HttpApi, Pve, PveError, TemplateVm
 from .run import CommandError, Runner
-from .vm import Vm, VmError, dns_has, resolves
+from .vm import SIDECAR_SSH_PORT, Vm, VmError, dns_has, resolves, sidecar_alias
 
 SSH_INCLUDE = "Include ~/.config/sbx/ssh_config"
 
@@ -345,7 +346,7 @@ def _copy_to_host(cfg: Config, runner: Runner) -> None:
     info(f"copying the scripts and the template definitions to {target}:/root/sbx/")
     runner.run(["ssh", *_host_ssh(cfg), target, "mkdir -p /root/sbx"], capture=False, check=False)
     done = runner.run(["scp", *_host_ssh(cfg), "-q", "-r"]
-                      + [str(REPO_ROOT / d) for d in ("host", "gw", "template", "templates", "sbxlib")]
+                      + [str(REPO_ROOT / d) for d in ("host", "gw", "template", "templates", "sbxlib", "sidecar")]
                       + [f"{target}:/root/sbx/"], capture=False, check=False)
     if done.code != 0:
         raise CommandError(["scp"], done.code, "the copy to the host failed")
@@ -392,8 +393,10 @@ def _project_template(cfg: Config, project: "Project | None", built: dict) -> st
         return project.manifest.template
     if cfg.default_template:
         return cfg.default_template
-    if len(built) == 1:
-        return next(iter(built))
+    # The sidecar template is never a sandbox's template.
+    candidates = [name for name in built if name != cfg.sidecar_template]
+    if len(candidates) == 1:
+        return candidates[0]
     return ""
 
 
@@ -818,7 +821,9 @@ def _each_claude_sandbox(cfg: Config, runner: Runner, api, wanted: list[str], co
     the token file, and in each sandbox that `wanted` names. A sandbox with no
     file was made with --no-claude, or before a token existed; it is left out
     unless it is named."""
-    boxes = _pve(cfg, runner, api).sandboxes()
+    pve = _pve(cfg, runner, api)
+    boxes = pve.sandboxes()
+    sidecars = pve.sidecars()
     named = {names.hostname(n) for n in wanted}
     if unknown := named - {b.hostname for b in boxes}:
         raise PveError("no sandbox named " + ", ".join(sorted(unknown)))
@@ -829,15 +834,28 @@ def _each_claude_sandbox(cfg: Config, runner: Runner, api, wanted: list[str], co
             stopped.append(box.hostname)
             continue
         vm = Vm(cfg, runner, box.hostname)
+        sc = (Vm(cfg, runner, box.hostname, port=SIDECAR_SSH_PORT, alias=sidecar_alias(cfg, box.hostname))
+              if box.hostname in sidecars else None)
         try:
-            if box.hostname not in named:
-                has = vm.run(f"test -f {q(claudetoken.ENV_FILE)} && echo yes || echo no")
-                if has.stdout.strip() != "yes":
-                    continue
-            if command is None:
-                _install_claude(vm, token)
-            else:
+            # "proxy": the sandbox points at its sidecar, which holds the token.
+            # "direct": the sandbox holds the token. "none": no file.
+            mode = vm.run(f"if grep -q ANTHROPIC_BASE_URL {q(claudetoken.ENV_FILE)} 2>/dev/null; then echo proxy; "
+                          f"elif test -f {q(claudetoken.ENV_FILE)}; then echo direct; else echo none; fi").stdout.strip()
+            if mode == "none" and box.hostname not in named:
+                continue
+            if mode == "none" and sc is not None and cfg.sidecar_claude == "proxy":
+                mode = "proxy"
+                if command is None:
+                    placeholder = sc.run("sudo cat /etc/sbx/sidecar/secret").stdout.strip()
+                    _install_claude_proxy(vm, placeholder)
+            if command is not None:
                 vm.run(command)
+                if mode == "proxy" and sc is not None:
+                    sc.run("sudo sbx-sidecar-apply --claude-token", input=b"\n")
+            elif mode == "proxy" and sc is not None:
+                sc.run("sudo sbx-sidecar-apply --claude-token", input=(token + "\n").encode())
+            else:
+                _install_claude(vm, token)
             info(f"{box.hostname}: {done_text}")
         except (CommandError, VmError):
             failed.append(box.hostname)
@@ -937,6 +955,52 @@ def _install_claude(vm: Vm, token: str) -> None:
     vm.run(claudetoken.SKIP_ONBOARDING)
 
 
+def _install_claude_proxy(vm: Vm, placeholder: str) -> None:
+    """Point Claude Code in the sandbox at its sidecar. The sandbox holds the
+    placeholder only; the sidecar holds the token."""
+    vm.put(claudetoken.proxy_env_file(placeholder, vm.cfg.sidecar_proxy_url), claudetoken.ENV_FILE)
+    vm.run(claudetoken.SKIP_ONBOARDING)
+
+
+def _git_token(cfg: Config, runner: Runner, project: Project) -> tuple[str, str] | None:
+    """(host, token) for an agent sandbox of this project, or None when there
+    is no token and only public repositories can be cloned."""
+    access = _git_access(cfg, _bindings(project))
+    if access is None:
+        return None
+    return access.host, runner.run(access.token_command).stdout.strip()
+
+
+def _provision_sidecar(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostname: str,
+                       secret: str, claude_token: str, git: tuple[str, str] | None) -> Vm:
+    """Reach the new sidecar by its address on the sidecar network and give it
+    the sandbox's policy, the secret and the real credentials, over SSH stdin.
+    The sidecar then registers the sandbox's NAME, so the sandbox itself is
+    reached by name after this."""
+    deadline = time.monotonic() + 240
+    address = None
+    while time.monotonic() < deadline:
+        address = pve.guest_ipv4(node, vmid, prefix=f"{cfg.agent_net}.")
+        if address:
+            break
+        time.sleep(3)
+    if not address:
+        raise VmError(f"the sidecar (VM {vmid}) got no address on the sidecar network in 240 s; "
+                      "open its console in the Proxmox web UI")
+    sc = Vm(cfg, runner, f"{hostname}-sc", address, port=SIDECAR_SSH_PORT, alias=sidecar_alias(cfg, hostname))
+    sc.wait(120.0)
+    sc.run("cloud-init status --wait >/dev/null 2>&1 || true")
+    git_host, git_token = git or ("github.com", "")
+    env = (f"SBX_SIDECAR_LINK={cfg.sidecar_link}\nSBX_AGENT_NET={cfg.agent_net}\n"
+           f"SBX_SANDBOX_HOSTNAME={hostname}\nSBX_SIDECAR_PORTS={cfg.sidecar_ports}\n"
+           f"SBX_CLAUDE_UPSTREAM=https://api.anthropic.com\nSBX_GIT_UPSTREAM=https://{git_host}\n")
+    sc.put(env.encode(), "/etc/sbx/sidecar.env", mode="0644", sudo=True)
+    sc.put((secret + "\n").encode(), "/etc/sbx/sidecar/secret", sudo=True)
+    sc.put(f"claude={claude_token}\ngithub={git_token}\n".encode(), "/etc/sbx/sidecar/tokens", sudo=True)
+    sc.run("sudo sbx-sidecar-apply", capture=False)
+    return sc
+
+
 def _identity_hint(runner: Runner, host: str) -> str:
     """The ssh-add line for the key that the user's own config uses for `host`."""
     done = runner.run(["ssh", "-G", host], check=False)
@@ -984,18 +1048,32 @@ def _preflight_git(cfg: Config, runner: Runner, profile: str, project: Project) 
                          + f"\n  Make one that covers every repository, then: sbx git-token {project.name}")
 
 
-def _git_auth(cfg: Config, runner: Runner, vm: Vm, profile: str, project: Project) -> bool:
+def _git_auth(cfg: Config, runner: Runner, vm: Vm, profile: str, project: Project, placeholder: str = "") -> bool:
     """Returns whether git commands in the VM need the forwarded SSH agent.
-    _preflight_git has already proved that the access works."""
+    _preflight_git has already proved that the access works.
+
+    With a placeholder (a sandbox with a sidecar), git in the VM talks to the
+    sidecar's proxy and presents the placeholder; the sidecar adds the token.
+    The VM then holds no git token at all."""
     if profile == "personal":
         return True
-    access = _git_access(cfg, _bindings(project))
-    if access is None:
-        return False
-    token = runner.run(access.token_command).stdout.strip()
-    host = access.host
-    vm.put(f"https://{access.username}:{token}@{host}\n".encode(), ".git-credentials")
     q = shlex.quote
+    if placeholder:
+        access = _git_access(cfg, _bindings(project))
+        host = access.host if access else "github.com"
+        proxy = f"{cfg.sidecar_proxy_url}/github/"
+        vm.put(f"http://sbx:{placeholder}@{cfg.sidecar_addr}:8080\n".encode(), ".git-credentials")
+        vm.run("git config --global credential.helper store && "
+               f"git config --global url.{q(proxy)}.insteadOf {q(f'https://{host}/')} && "
+               f"git config --global --add url.{q(proxy)}.insteadOf {q(f'git@{host}:')} && "
+               f"git config --global --add url.{q(proxy)}.insteadOf {q(f'ssh://git@{host}/')}")
+        return False
+    git = _git_token(cfg, runner, project)
+    if git is None:
+        return False
+    host, token = git
+    access = _git_access(cfg, _bindings(project))
+    vm.put(f"https://{access.username}:{token}@{host}\n".encode(), ".git-credentials")
     # The manifest and `origin` may use the SSH form; the token works over HTTPS.
     vm.run("git config --global credential.helper store && "
            f"git config --global url.{q(f'https://{host}/')}.insteadOf {q(f'git@{host}:')} && "
@@ -1090,45 +1168,79 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
     built = pve.templates()
     tpl_name = args.template or _project_template(cfg, project, built)
     if not tpl_name:
-        if not built:
+        others = [n for n in built if n != cfg.sidecar_template]
+        if not others:
             raise PveError("no template is built. Build one: sbx template rebuild <name> "
                            "(`sbx template list` shows the definitions)")
-        raise InputError(f"more than one template is built ({', '.join(built)}); pass --template, "
+        raise InputError(f"more than one template is built ({', '.join(others)}); pass --template, "
                          "set [recipe] template in the project, or set default_template in config.toml")
     template = pve.template(tpl_name)
     if note := _stale_warning(template):
         warn(note)
+    sidecar = cfg.sidecar_for(profile)
+    sc_template = None
+    if sidecar:
+        try:
+            sc_template = pve.template(cfg.sidecar_template)
+        except PveError as exc:
+            raise PveError(f"{exc}\n  Every agent sandbox needs a sidecar. Build the template: "
+                           f"sbx template rebuild {cfg.sidecar_template}  "
+                           "(or set agent_sidecar = false in config.toml)") from None
     if args.gpu and (holder := pve.gpu_holder()):
         raise PveError(f"the GPU is held by VM {holder[0]} ({holder[1]}); run `sbx gpu detach` there first")
 
     ttl = args.ttl if args.ttl is not None else (cfg.agent_ttl_days if profile == "agent" else 0)
     expires = dt.date.today() + dt.timedelta(days=ttl) if ttl else None
     vmid = pve.next_vmid()
+    sc_vmid = pve.next_vmid(start=vmid + 1) if sidecar else 0
+    pubkey = cfg.ssh_key_path.with_suffix(".pub").read_text()
+    known_hosts = str(state_dir() / "known_hosts")
+    # The per-sandbox secret: the sandbox presents it to its sidecar, and to
+    # nothing else. It goes to both over SSH stdin and appears in no command.
+    secret = secrets.token_urlsafe(24) if sidecar else ""
+    if sidecar:
+        info(f"cloning template {sc_template.name} into VM {sc_vmid} ({hostname}-sc, the sidecar; VLAN {vmid})")
+        pve.create_sidecar(sc_template, sc_vmid, hostname, vlan=vmid, pubkey=pubkey)
     info(f"cloning template {template.name} ({template.vm_name}) into VM {vmid} ({hostname}, {profile})")
-    node = pve.create(template, vmid, hostname, profile, cfg.ssh_key_path.with_suffix(".pub").read_text(),
+    node = pve.create(template, vmid, hostname, profile, pubkey,
                       cores=args.cores or cfg.cores, memory_mb=args.memory or cfg.memory_mb,
-                      disk_gb=args.disk, expires=expires, project=project.name if project else "")
+                      disk_gb=args.disk, expires=expires, project=project.name if project else "",
+                      vlan=vmid if sidecar else None,
+                      ipconfig=f"ip={cfg.sidecar_vm_addr}/30,gw={cfg.sidecar_addr}" if sidecar else "ip=dhcp",
+                      nameserver=cfg.dns_server if sidecar else "", searchdomain=cfg.domain if sidecar else "")
     if args.gpu:
         pve.gpu_attach(node, vmid)
+    if sidecar:
+        pve.start(node, sc_vmid)
     pve.start(node, vmid)
 
     # A reused name must not trip over the previous VM's host key.
-    runner.run(["ssh-keygen", "-R", cfg.fqdn(hostname), "-f", str(state_dir() / "known_hosts")], check=False)
+    runner.run(["ssh-keygen", "-R", cfg.fqdn(hostname), "-f", known_hosts], check=False)
+    if sidecar:
+        runner.run(["ssh-keygen", "-R", sidecar_alias(cfg, hostname), "-f", known_hosts], check=False)
+        info("waiting for the sidecar")
+        _provision_sidecar(cfg, runner, pve, node, sc_vmid, hostname, secret,
+                           claude if cfg.sidecar_claude == "proxy" else "",
+                           _git_token(cfg, runner, project) if project is not None else None)
 
     info("waiting for the sandbox")
-    vm = _connect(cfg, runner, pve, node, vmid, hostname)
+    vm = _connect(cfg, runner, pve, node, vmid, hostname, by_name_only=sidecar)
     vm.run("cloud-init status --wait >/dev/null 2>&1 || true")
     _refresh_shell_files(vm)
 
     https = _install_cert(cfg, runner, vm)
     if claude:
         # Before the recipe and the 'clean' snapshot: a rollback keeps the sign-in.
-        _install_claude(vm, claude)
-        info("Claude Code is signed in to your Claude subscription")
+        if sidecar and cfg.sidecar_claude == "proxy":
+            _install_claude_proxy(vm, secret)
+            info("Claude Code goes through the sidecar; the token stays there")
+        else:
+            _install_claude(vm, claude)
+            info("Claude Code is signed in to your Claude subscription")
     code = 0
     if project is not None:
         try:
-            code = _setup_project(vm, project, decisions, _git_auth(cfg, runner, vm, profile, project), profile)
+            code = _setup_project(vm, project, decisions, _git_auth(cfg, runner, vm, profile, project, secret), profile)
         except (CommandError, VmError) as exc:
             # The VM exists; a bare error would leave the user with a dead end.
             raise VmError(f"{exc}\n  The sandbox {hostname} is up without its project. "
@@ -1178,7 +1290,8 @@ def _refresh_shell_files(vm: Vm) -> None:
            f"else mv {lib}.new {lib} && systemctl restart sbx-mirror; fi'", check=False)
 
 
-def _connect(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostname: str) -> Vm:
+def _connect(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostname: str,
+             by_name_only: bool = False) -> Vm:
     """By name as soon as dnsmasq has the name; by address until then.
 
     The name comes from the DHCP request that carries the final hostname, which
@@ -1186,6 +1299,10 @@ def _connect(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostna
     first, the sandbox is asked for that lease at once. The Mac's own resolver
     is asked only AFTER dnsmasq has the name: an earlier query would plant a
     negative answer that the Mac keeps for about 75 s.
+
+    A sandbox with a sidecar has no address the Mac can reach: its name is
+    registered by the sidecar, and resolves to the sidecar, which translates
+    port 22 to the VM. So that sandbox is reached by name only.
     """
     deadline = time.monotonic() + 240
     fqdn = cfg.fqdn(hostname)
@@ -1202,6 +1319,9 @@ def _connect(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostna
                     return vm
                 time.sleep(3)
             break
+        if by_name_only:
+            time.sleep(3)
+            continue
         if by_address is None and (address := pve.guest_ipv4(node, vmid)):
             by_address = Vm(cfg, runner, hostname, address)
         if by_address is not None and not kicked:
@@ -1213,6 +1333,9 @@ def _connect(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostna
             except VmError:
                 pass
         time.sleep(3)
+    if by_name_only:
+        raise VmError(f"{fqdn} did not appear in DNS in 240 s. The sidecar registers that name; look at it: "
+                      f"sbx ssh {hostname[4:]} --sidecar -- sudo journalctl -u sbx-sidecar-apply -n 30")
     if by_address is None:
         raise VmError(f"VM {vmid} got no address in 240 s; open its console in the Proxmox web UI")
     warn(f"{fqdn} does not resolve on this Mac; using {by_address.address}. "
@@ -1238,10 +1361,18 @@ def cmd_list(args, cfg: Config, runner: Runner, api=None) -> int:
 
 def cmd_ssh(args, cfg: Config, runner: Runner, api=None) -> int:
     hostname = names.hostname(args.name)
-    box = _pve(cfg, runner, api).require(hostname)
-    # The agent is forwarded to a personal sandbox only. A full-permission
-    # agent could use the forwarded key for as long as the session lasts.
-    argv = Vm(cfg, runner, hostname).ssh_argv(forward_agent=box.profile == "personal", tty=not args.command)
+    pve = _pve(cfg, runner, api)
+    box = pve.require(hostname)
+    if args.sidecar:
+        if hostname not in pve.sidecars():
+            raise PveError(f"{hostname} has no sidecar")
+        # The sidecar answers at the sandbox's name, on its own port.
+        vm = Vm(cfg, runner, hostname, port=SIDECAR_SSH_PORT, alias=sidecar_alias(cfg, hostname))
+        argv = vm.ssh_argv(tty=not args.command)
+    else:
+        # The agent is forwarded to a personal sandbox only. A full-permission
+        # agent could use the forwarded key for as long as the session lasts.
+        argv = Vm(cfg, runner, hostname).ssh_argv(forward_agent=box.profile == "personal", tty=not args.command)
     # Joined with spaces, as ssh itself does: `sbx ssh x -- ls code` runs
     # `ls code`, and a quoted 'a; b' stays one argument that the remote shell
     # splits. shlex.join would turn that into one word, a command not found.
@@ -1352,10 +1483,19 @@ def cmd_rollback(args, cfg: Config, runner: Runner, api=None) -> int:
 def _remove(cfg: Config, runner: Runner, pve: Pve, box) -> None:
     info(f"destroying {box.hostname} (VM {box.vmid}) and its snapshots")
     pve.destroy(box.node, box.vmid)
-    runner.run(["ssh-keygen", "-R", cfg.fqdn(box.hostname), "-f", str(state_dir() / "known_hosts")], check=False)
+    known_hosts = str(state_dir() / "known_hosts")
+    runner.run(["ssh-keygen", "-R", cfg.fqdn(box.hostname), "-f", known_hosts], check=False)
+    if sc := pve.sidecars().get(box.hostname):
+        _remove_sidecar(cfg, runner, pve, box.hostname, sc)
     shutil.rmtree(state_dir() / "certs" / box.hostname, ignore_errors=True)
     if herdr_mod.remove(runner, box.hostname):
         info(f"{box.hostname} left your herdr sidebar")
+
+
+def _remove_sidecar(cfg: Config, runner: Runner, pve: Pve, hostname: str, sc) -> None:
+    info(f"destroying the sidecar of {hostname} (VM {sc.vmid})")
+    pve.destroy(sc.node, sc.vmid)
+    runner.run(["ssh-keygen", "-R", sidecar_alias(cfg, hostname), "-f", str(state_dir() / "known_hosts")], check=False)
 
 
 def _confirm(question: str, yes: bool) -> bool:
@@ -1381,16 +1521,24 @@ def cmd_rm(args, cfg: Config, runner: Runner, api=None) -> int:
 def cmd_gc(args, cfg: Config, runner: Runner, api=None) -> int:
     pve = _pve(cfg, runner, api)
     today = dt.date.today()
-    expired = [b for b in pve.sandboxes() if b.expires and b.expires < today]
-    if not expired:
+    boxes = pve.sandboxes()
+    expired = [b for b in boxes if b.expires and b.expires < today]
+    # A sidecar whose sandbox is gone (a removal that stopped halfway).
+    names_ = {b.hostname for b in boxes}
+    orphans = {h: s for h, s in pve.sidecars().items() if h not in names_}
+    if not expired and not orphans:
         print("no expired sandbox")
         return 0
     for box in expired:
         print(f"  {box.hostname}  expired {box.expires}")
-    if not _confirm(f"Destroy {len(expired)} sandbox(es)?", args.yes):
+    for h, s in orphans.items():
+        print(f"  {s.hostname}  (VM {s.vmid}) the sidecar of {h}, which is gone")
+    if not _confirm(f"Destroy {len(expired) + len(orphans)} VM(s)?", args.yes):
         return 1
     for box in expired:
         _remove(cfg, runner, pve, box)
+    for h, s in orphans.items():
+        _remove_sidecar(cfg, runner, pve, h, s)
     return 0
 
 
@@ -1561,6 +1709,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("ssh", help="open a shell, or run a command after --")
     s.add_argument("name")
+    s.add_argument("--sidecar", action="store_true", help="the sandbox's sidecar instead of the sandbox")
     s.add_argument("command", nargs="*")
     s.set_defaults(fn=cmd_ssh)
 

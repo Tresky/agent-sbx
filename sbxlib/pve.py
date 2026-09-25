@@ -244,10 +244,24 @@ class Pve:
             raise PveError(f"no sandbox named {hostname}")
         return box
 
-    def next_vmid(self) -> int:
+    def sidecars(self) -> dict[str, Sandbox]:
+        """Every sidecar, by the hostname of the sandbox it serves. A sidecar
+        carries sbx-sidecar and sbx-of-<hostname>, and not the sbx tag, so
+        sandboxes() never lists it."""
+        out = {}
+        for r in self.resources():
+            tags = _tags(r)
+            if r.get("type") != "qemu" or r.get("template") or "sbx-sidecar" not in tags:
+                continue
+            owner = next((t[7:] for t in tags if t.startswith("sbx-of-")), "")
+            if owner:
+                out[owner] = Sandbox(int(r["vmid"]), r.get("name", ""), r.get("node", ""), r.get("status", ""), tags)
+        return out
+
+    def next_vmid(self, start: int | None = None) -> int:
         # The token sees only its own pool, so an id that another guest holds
         # is invisible in resources(). /cluster/nextid asks the cluster itself.
-        for vmid in range(self.cfg.vmid_min, self.cfg.vmid_max + 1):
+        for vmid in range(start or self.cfg.vmid_min, self.cfg.vmid_max + 1):
             try:
                 self.api("GET", "/cluster/nextid", {"vmid": vmid})
                 return vmid
@@ -256,7 +270,10 @@ class Pve:
                     raise
         raise PveError(f"no free VM id in {self.cfg.vmid_min}-{self.cfg.vmid_max}; run `sbx gc` or `sbx rm`")
 
-    def guest_ipv4(self, box_node: str, vmid: int) -> str | None:
+    def guest_ipv4(self, box_node: str, vmid: int, prefix: str = "") -> str | None:
+        """The first IPv4 address the guest agent reports, or the first one
+        that starts with `prefix`: a sidecar has two, and only the one on the
+        sidecar network is reachable."""
         try:
             data = self.api("GET", self._vm(box_node, vmid, "/agent/network-get-interfaces")) or {}
         except PveError:
@@ -265,15 +282,17 @@ class Pve:
             if iface.get("name") == "lo":
                 continue
             for addr in iface.get("ip-addresses", []):
-                if addr.get("ip-address-type") == "ipv4":
+                if addr.get("ip-address-type") == "ipv4" and addr["ip-address"].startswith(prefix):
                     return addr["ip-address"]
         return None
 
     # --- lifecycle ---
     def create(self, template: TemplateVm, vmid: int, hostname: str, profile: str, pubkey: str, *,
                cores: int, memory_mb: int, disk_gb: int | None, expires: dt.date | None,
-               project: str = "") -> str:
-        """Returns the node the sandbox lives on."""
+               project: str = "", vlan: int | None = None, ipconfig: str = "ip=dhcp",
+               nameserver: str = "", searchdomain: str = "") -> str:
+        """Returns the node the sandbox lives on. With `vlan`, the NIC carries
+        that tag: the sandbox then shares a segment with its sidecar only."""
         cfg, node = self.cfg, template.node
         # A template clones as a LINKED clone by default: seconds, not minutes.
         # `pool` puts the VM where the token's permissions apply.
@@ -282,19 +301,46 @@ class Pve:
         tags = ["sbx", f"sbx-{profile}", f"sbx-tpl-{template.name}"] + ([f"sbx-exp-{expires:%Y%m%d}"] if expires else [])
         if project:
             tags.append(projects.tag(project))
-        self.api("PUT", self._vm(node, vmid, "/config"), {
+        params = {
             # The bridge IS the profile: the gateway's rules key on the
-            # interface, and a root user in the VM cannot move it.
-            "net0": f"virtio,bridge={cfg.bridge_for(profile)}",
+            # interface, and a root user in the VM cannot move it. The tag,
+            # when there is one, is set on the host side of the tap: root in
+            # the VM cannot move that either.
+            "net0": f"virtio,bridge={cfg.bridge_for(profile)}" + (f",tag={vlan}" if vlan else ""),
             "cores": cores, "memory": memory_mb,
-            "ciuser": cfg.vm_user, "ipconfig0": "ip=dhcp",
+            "ciuser": cfg.vm_user, "ipconfig0": ipconfig,
             # The API wants this one value URL-encoded INSIDE the form body,
             # so it is encoded twice on the wire.
             "sshkeys": urllib.parse.quote(pubkey.strip(), safe=""),
             "tags": ";".join(tags),
-        })
+        }
+        if nameserver:
+            params["nameserver"] = nameserver
+        if searchdomain:
+            params["searchdomain"] = searchdomain
+        self.api("PUT", self._vm(node, vmid, "/config"), params)
         if disk_gb:
             self._wait(node, self.api("PUT", self._vm(node, vmid, "/resize"), {"disk": "scsi0", "size": f"{disk_gb}G"}))
+        return node
+
+    def create_sidecar(self, template: TemplateVm, vmid: int, hostname: str, *, vlan: int, pubkey: str) -> str:
+        """The sidecar of the sandbox `hostname`: net0 on the sandbox's VLAN
+        with the wire address, net1 untagged on the agent bridge with DHCP from
+        the gateway. Tagged sbx-sidecar and sbx-of-<hostname>, never sbx, so it
+        is not a sandbox to `sbx list`, `sbx rm` or `sbx gc`."""
+        cfg, node = self.cfg, template.node
+        self._wait(node, self.api("POST", self._vm(node, template.vmid, "/clone"),
+                                  {"newid": vmid, "name": f"{hostname}-sc", "pool": cfg.pve_pool}))
+        self.api("PUT", self._vm(node, vmid, "/config"), {
+            "net0": f"virtio,bridge={cfg.agent_bridge},tag={vlan}",
+            "net1": f"virtio,bridge={cfg.agent_bridge}",
+            "cores": 1, "memory": 1024,
+            "ciuser": cfg.vm_user,
+            "ipconfig0": f"ip={cfg.sidecar_addr}/30",
+            "ipconfig1": "ip=dhcp",
+            "sshkeys": urllib.parse.quote(pubkey.strip(), safe=""),
+            "tags": f"sbx-sidecar;sbx-of-{hostname};sbx-tpl-{template.name}",
+        })
         return node
 
     def start(self, node: str, vmid: int):
