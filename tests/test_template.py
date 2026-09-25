@@ -221,6 +221,100 @@ class HostHelpersTest(unittest.TestCase):
         self.assertIn("keeping sbx-tpl-minimal-20260101-0900 (9003): 1 sandbox(es) use it", done.stdout)
 
 
+class BundleTest(Repo):
+    """`sbx template export` and `import`: one file carries a definition and
+    its own components to another person's setup, and back unchanged."""
+
+    ZIG = "# Zig\n# a tricky line: ''' and \\n and \"quotes\"\nstep zig\nCHECK_TOOLS+=\" zig\"\n"
+
+    def setUp(self):
+        super().setUp()
+        comp = self.root / "template" / "components" / "local"
+        comp.mkdir(parents=True)
+        (comp / "zig.sh").write_text(self.ZIG)
+        self.define("tools", 'description = "Zig and Go"\ncomponents = ["go", "zig"]\n[go]\nversion = "1.27.1"\n')
+        # A second setup: the same shared files, nothing local.
+        self.other = Path(self._tmp.name) / "other"
+        shutil.copytree(self.root / "template", self.other / "template",
+                        ignore=shutil.ignore_patterns("local"))
+        shutil.copytree(self.root / "templates", self.other / "templates",
+                        ignore=shutil.ignore_patterns("local"))
+
+    def test_a_round_trip_carries_everything_exactly(self):
+        bundle = templates.read_bundle(templates.export_bundle("tools"))
+        self.assertEqual(bundle.definition, (self.local / "tools.toml").read_text())
+        self.assertEqual(bundle.components, {"zig": self.ZIG})       # its own component, whole
+        self.assertEqual(set(bundle.shared), {"go"})                 # a shared one, by hash only
+
+    def test_an_import_builds_the_same_template_on_the_other_setup(self):
+        bundle = templates.read_bundle(templates.export_bundle("tools"))
+        plan = templates.plan_import(bundle, root=self.other)
+        self.assertEqual((plan.problems, plan.warnings), ([], []))
+        templates.apply_import(plan)
+        theirs = templates.load("tools", self.other)
+        self.assertEqual(theirs.components, ("go", "zig"))
+        self.assertEqual(templates.fingerprint(theirs, self.other), templates.fingerprint(templates.load("tools")))
+
+    def test_an_import_of_what_is_here_already_writes_nothing(self):
+        plan = templates.plan_import(templates.read_bundle(templates.export_bundle("tools")))
+        self.assertEqual((plan.writes, plan.problems), ({}, []))
+        self.assertEqual(plan.same, ["definition tools", "component zig"])
+
+    def test_a_name_that_exists_needs_as_or_force(self):
+        bundle = templates.read_bundle(templates.export_bundle("tools"))
+        (self.other / "templates" / "local").mkdir()
+        (self.other / "templates" / "local" / "tools.toml").write_text('description = "mine"\n')
+        plan = templates.plan_import(bundle, root=self.other)
+        self.assertTrue(any("pass --as" in p for p in plan.problems))
+        with self.assertRaises(templates.TemplateError):
+            templates.apply_import(plan)
+        self.assertEqual(templates.plan_import(bundle, as_name="tools2", root=self.other).problems, [])
+        forced = templates.plan_import(bundle, force=True, root=self.other)
+        self.assertEqual(forced.problems, [])
+        self.assertTrue(any("replaces your definition tools" in w for w in forced.warnings))
+
+    def test_a_different_component_of_the_same_name_needs_force(self):
+        comp = self.other / "template" / "components" / "local"
+        comp.mkdir()
+        (comp / "zig.sh").write_text("# my zig\nCHECK_TOOLS+=\" zig\"\n")
+        (self.other / "templates" / "local").mkdir()
+        (self.other / "templates" / "local" / "mine.toml").write_text('components = ["zig"]\n')
+        bundle = templates.read_bundle(templates.export_bundle("tools"))
+        problems = templates.plan_import(bundle, root=self.other).problems
+        self.assertTrue(any("a different component zig" in p for p in problems))
+        forced = templates.plan_import(bundle, force=True, root=self.other)
+        self.assertTrue(any("replaces your component zig, which mine also use" in w for w in forced.warnings))
+
+    def test_shared_components_must_exist_and_are_compared(self):
+        bundle = templates.read_bundle(templates.export_bundle("tools"))
+        go = self.other / "template" / "components" / "go.sh"
+        go.write_text(go.read_text() + "# a newer copy\n")
+        plan = templates.plan_import(bundle, root=self.other)
+        self.assertEqual(plan.problems, [])
+        self.assertTrue(any("shared component go differs" in w for w in plan.warnings))
+        go.unlink()
+        plan = templates.plan_import(bundle, root=self.other)
+        self.assertTrue(any("does not have; pull the latest sbx" in p for p in plan.problems))
+
+    def test_a_broken_file_is_refused(self):
+        good = templates.export_bundle("tools")
+        cases = {
+            "": "no \\[sbx_template\\] table",
+            "not toml [": "not valid TOML",
+            good.replace("format = 1", "format = 2"): "format 2 is not known",
+            good.replace('name = "tools"', 'name = "../x"'): "no valid template",
+            good.replace("[sbx_template.components.zig]", '[sbx_template.components."Bad"]'): "not a component name",
+            "#" * 1_000_001: "larger than 1 MB",
+        }
+        for text, needle in cases.items():
+            with self.subTest(needle=needle), self.assertRaisesRegex(templates.TemplateError, needle):
+                templates.read_bundle(text)
+        # A definition that names a component that no one has cannot be imported.
+        bad = good.replace('components = ["go", "zig"]', 'components = ["go", "zig", "cobol"]')
+        problems = templates.plan_import(templates.read_bundle(bad), as_name="x", root=self.other).problems
+        self.assertTrue(any("cobol" in p for p in problems))
+
+
 class CommandTest(Repo):
     def setUp(self):
         super().setUp()
@@ -283,6 +377,34 @@ class CommandTest(Repo):
                 code, events = self.run_cmd(*argv)
                 self.assertEqual(code, 0)
                 self.assertTrue(any(e[1].endswith(f"30-template-build.sh {want}") for e in events if e[0] == "cmd"))
+
+    def test_export_then_import_by_file_and_by_url(self):
+        import contextlib
+        import io
+        self.define("tools", 'description = "Go"\ncomponents = ["go"]\n')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.run_cmd("export", "tools")[0], 0)
+        exported = out.getvalue()
+        path = Path(self._tmp.name) / "tools.sbx-template.toml"
+        path.write_text(exported)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.run_cmd("import", str(path), "--as", "tools2", "-y")[0], 0)
+        self.assertEqual((self.local / "tools2.toml").read_text(), (self.local / "tools.toml").read_text())
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        with mock.patch("urllib.request.urlopen", return_value=Resp(exported.encode())) as urlopen, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.run_cmd("import", "https://example.com/t.toml", "--as", "tools3", "-y")[0], 0)
+        self.assertEqual(urlopen.call_args[0][0], "https://example.com/t.toml")
+        self.assertTrue((self.local / "tools3.toml").exists())
+        self.assertEqual(self.run_cmd("import", "http://example.com/t.toml", "-y")[0], 1)  # https only
 
     def test_new_writes_a_local_definition(self):
         code, _ = self.run_cmd("new", "web", "--from", "rails")

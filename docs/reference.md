@@ -79,6 +79,8 @@ Options of `sbx new`:
 | `sbx template show <name>` | one template: its definition, components, build settings, fingerprint, versions and sandboxes |
 | `sbx template components` | the components that a definition can list, with a description of each |
 | `sbx template new <name> [--from TEMPLATE]` | writes `templates/local/<name>.toml`, empty or as a copy of another definition |
+| `sbx template export <name> [-o FILE]` | writes the template as one file to share: its definition, the full text of its own components, and a hash of each shared component. The default is stdout. |
+| `sbx template import <FILE\|URL\|-> [--as NAME] [--force] [-y]` | reads a template file into `templates/local/` and `template/components/local/`. It prints each file and asks first. `--as` imports under another name; `--force` replaces a definition or a component of the same name. A URL must be https. |
 | `sbx template rebuild [NAME ...] [--all] [--changed] [--no-versions] [-y]` | builds a new version of each named template, of every definition (`--all`), or of each one that is not current (`--changed`). 15 to 40 minutes each. The old version stays for its sandboxes. `--no-versions` does not add the versions that the projects need. |
 | `sbx template finish <name>` | attaches to a build that is running on the host, after a dropped SSH session |
 | `sbx template prune` | removes the old versions that no sandbox uses |

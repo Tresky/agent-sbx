@@ -438,6 +438,18 @@ def cmd_template(args, cfg: Config, runner: Runner, api=None) -> int:
         info(f"wrote {dest.relative_to(templates_mod.REPO_ROOT)}; edit it, then: sbx template rebuild {args.name}")
         return 0
 
+    if action == "export":
+        text = templates_mod.export_bundle(args.name)
+        if args.output:
+            Path(args.output).expanduser().write_text(text)
+            info(f"wrote {args.output}; share it, and import it with: sbx template import <file>")
+        else:
+            sys.stdout.write(text)
+        return 0
+
+    if action == "import":
+        return _import_template(args)
+
     defs = _definitions()
     if action in ("list", "show"):
         pve = _pve(cfg, runner, api)
@@ -536,6 +548,58 @@ def cmd_template(args, cfg: Config, runner: Runner, api=None) -> int:
         _host_build(cfg, runner, "--adopt", str(args.vmid), args.name)
         return 0
     raise InputError(f"unknown action {action}")
+
+
+def _read_source(source: str) -> str:
+    """A template file from a path, an https URL, or stdin ("-")."""
+    if source == "-":
+        return sys.stdin.read(templates_mod.BUNDLE_MAX_BYTES + 1)
+    if source.startswith(("https://", "http://")):
+        if not source.startswith("https://"):
+            raise InputError("only an https:// URL is accepted")
+        import urllib.error
+        import urllib.request
+        try:
+            with urllib.request.urlopen(source, timeout=30) as resp:
+                return resp.read(templates_mod.BUNDLE_MAX_BYTES + 1).decode("utf-8", errors="replace")
+        except (urllib.error.URLError, OSError) as exc:
+            raise InputError(f"cannot read {source}: {exc}") from None
+    path = Path(source).expanduser()
+    if not path.is_file():
+        raise InputError(f"{source}: no such file")
+    return path.read_text(errors="replace")
+
+
+def _import_template(args) -> int:
+    bundle = templates_mod.read_bundle(_read_source(args.source))
+    plan = templates_mod.plan_import(bundle, args.as_name or "", args.force)
+    root = templates_mod.REPO_ROOT
+    print(f"template {plan.name}" + (f" (exported as {bundle.name})" if plan.name != bundle.name else ""))
+    for problem in plan.problems:
+        print(f"  PROBLEM  {problem}")
+    if plan.problems:
+        raise InputError("nothing imported")
+    for warning in plan.warnings:
+        warn(warning)
+    for item in plan.same:
+        print(f"  unchanged  {item}: this Mac has the same already")
+    if not plan.writes:
+        info("nothing to import: this Mac has the same template already")
+        return 0
+    # Show every file in full: a component runs as root in the template build.
+    for path, text in plan.writes.items():
+        print(f"\n----- {path.relative_to(root)} -----")
+        print(text.rstrip("\n"))
+    print("-----")
+    if bundle.components:
+        print("A component runs as root in the template build, and its result is in every sandbox of the "
+              "template. Read each script above before you import it.")
+    if not _confirm(f"Write these {len(plan.writes)} file(s)?", args.yes):
+        return 1
+    for path in templates_mod.apply_import(plan):
+        info(f"wrote {path.relative_to(root)}")
+    print(f"Build it: sbx template rebuild {plan.name}")
+    return 0
 
 
 def _registry_by_template(cfg: Config, built: dict) -> tuple[dict[str, versions_mod.Needs], list[str], list[str]]:
@@ -1295,7 +1359,14 @@ def _remove(cfg: Config, runner: Runner, pve: Pve, box) -> None:
 
 
 def _confirm(question: str, yes: bool) -> bool:
-    return yes or input(f"{question} [y/N] ").strip().lower() == "y"
+    if yes:
+        return True
+    try:
+        return input(f"{question} [y/N] ").strip().lower() == "y"
+    except EOFError:
+        # No terminal to answer on: that is a no, not a traceback.
+        print("\nno answer: stopped (pass -y to proceed without a question)")
+        return False
 
 
 def cmd_rm(args, cfg: Config, runner: Runner, api=None) -> int:
@@ -1391,6 +1462,16 @@ def build_parser() -> argparse.ArgumentParser:
     t = ts.add_parser("new", help="start your own definition in templates/local/")
     t.add_argument("name")
     t.add_argument("--from", dest="from_name", metavar="TEMPLATE", help="start from this definition")
+    t.set_defaults(fn=cmd_template)
+    t = ts.add_parser("export", help="write a template as one file to share: its definition and its own components")
+    t.add_argument("name")
+    t.add_argument("-o", "--output", metavar="FILE", help="write to this file (default: stdout)")
+    t.set_defaults(fn=cmd_template)
+    t = ts.add_parser("import", help="read a template file into templates/local/ (a path, an https URL, or -)")
+    t.add_argument("source", metavar="FILE|URL")
+    t.add_argument("--as", dest="as_name", metavar="NAME", help="import it under this name")
+    t.add_argument("--force", action="store_true", help="replace a definition or a component of the same name")
+    t.add_argument("-y", "--yes", action="store_true", help="do not ask; the files are still printed")
     t.set_defaults(fn=cmd_template)
     t = ts.add_parser("rebuild", help="build a new version of templates (15-40 min each)")
     t.add_argument("names", nargs="*", metavar="NAME")

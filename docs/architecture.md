@@ -472,6 +472,17 @@ users of a version. That cleanup needs root, and runs over SSH as part of
 `sbx template rebuild` or `sbx template prune`: the API token can still clone
 and read templates only.
 
+**A template file** (`sbx template export`) is TOML with one `[sbx_template]`
+table: a format number, the name, the definition's text, the full text of each
+local component (`[sbx_template.components.<name>] script`), and the SHA-256 of
+each shared one (`[sbx_template.shared.<name>] sha256`). A text is a multi-line
+literal string, which keeps a script readable, or a JSON-escaped string when it
+contains `'''`. `import` plans every write before it makes one: a name that
+exists with other content is refused unless `--force`, a missing shared
+component is refused, and a shared component with another hash gives a warning.
+It checks that the definition parses with the planned components in place,
+through a shadow copy of the component directories, before it writes anything.
+
 **A template from before named templates** carries only the `sbx-template` tag.
 The CLI shows it as `default`, and each sandbox with no `sbx-tpl-*` tag counts
 as its clone. `30-template-build.sh --adopt <vmid> <name>` renames and tags

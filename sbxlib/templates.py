@@ -170,14 +170,20 @@ def parse(text: str, name: str, path: Path, root: Path | None = None) -> Definit
                       image_url=data.get("image_url", ""), settings=settings, **sizes)
 
 
-def load_all(root: Path | None = None) -> dict[str, Definition]:
+def definition_paths(root: Path | None = None) -> dict[str, Path]:
+    """Each definition's file, local over shared, without parsing it."""
     root = root or REPO_ROOT
     found: dict[str, Path] = {}
     for d in definition_dirs(root):
         for p in sorted(d.glob("*.toml")) if d.is_dir() else []:
             if p.name != "versions.toml":
                 found[p.stem] = p
-    return {name: parse(p.read_text(), name, p, root) for name, p in sorted(found.items())}
+    return dict(sorted(found.items()))
+
+
+def load_all(root: Path | None = None) -> dict[str, Definition]:
+    root = root or REPO_ROOT
+    return {name: parse(p.read_text(), name, p, root) for name, p in definition_paths(root).items()}
 
 
 def load(name: str, root: Path | None = None) -> Definition:
@@ -287,6 +293,204 @@ def fingerprint(defn: Definition, root: Path | None = None) -> str:
     for p in files:
         h.update(p.name.encode() + b"\0" + p.read_bytes() + b"\0")
     return h.hexdigest()[:12]
+
+
+# --- sharing: one file per template -------------------------------------------
+#
+# `sbx template export` writes a template as one TOML file: its definition, the
+# full text of each LOCAL component that it uses, and the name and hash of each
+# shared component (the other person has those from git). `sbx template import`
+# reads it back into templates/local/ and template/components/local/.
+
+BUNDLE_FORMAT = 1
+BUNDLE_MAX_BYTES = 1_000_000
+_COMPONENT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+
+
+@dataclass
+class Bundle:
+    name: str
+    definition: str
+    components: dict[str, str] = field(default_factory=dict)   # local: name -> script
+    shared: dict[str, str] = field(default_factory=dict)       # shared: name -> sha256
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _toml_string(text: str) -> str:
+    """A TOML string that reads back as exactly `text`. A multi-line literal
+    string keeps a script readable; a text that contains ''' cannot be one."""
+    if "'''" not in text and "\r" not in text:
+        return "'''\n" + text + "'''"
+    return json.dumps(text, ensure_ascii=False)
+
+
+def export_bundle(name: str, root: Path | None = None) -> str:
+    root = root or REPO_ROOT
+    defn = load(name, root)
+    lines = [f"# An sbx template: {name}. Import it with: sbx template import <this file>",
+             "# It holds a template definition and the scripts of its own components. A",
+             "# component runs as root in the template build: read it before you import.",
+             "",
+             "[sbx_template]",
+             f"format = {BUNDLE_FORMAT}",
+             f"name = {json.dumps(name)}",
+             f"definition = {_toml_string(defn.path.read_text())}"]
+    shared = []
+    for comp in defn.components:
+        path = component_path(comp, root)
+        if path.parent.name == "local":
+            lines += ["", f"[sbx_template.components.{comp}]", f"script = {_toml_string(path.read_text())}"]
+        else:
+            shared.append((comp, _sha256(path.read_text())))
+    for comp, digest in shared:
+        lines += ["", f"[sbx_template.shared.{comp}]", f"sha256 = {json.dumps(digest)}"]
+    return "\n".join(lines) + "\n"
+
+
+def read_bundle(text: str) -> Bundle:
+    if len(text.encode()) > BUNDLE_MAX_BYTES:
+        raise TemplateError("the template file is larger than 1 MB; it is not a template file")
+    try:
+        data = tomllib.loads(text).get("sbx_template")
+    except tomllib.TOMLDecodeError as exc:
+        raise TemplateError(f"the template file is not valid TOML: {exc}") from None
+    if not isinstance(data, dict):
+        raise TemplateError("this is not an sbx template file: it has no [sbx_template] table")
+    if data.get("format") != BUNDLE_FORMAT:
+        raise TemplateError(f"template file format {data.get('format')!r} is not known; update sbx")
+    name, definition = data.get("name"), data.get("definition")
+    if not (isinstance(name, str) and NAME_RE.match(name)):
+        raise TemplateError(f"the template file names no valid template ({name!r})")
+    if not isinstance(definition, str):
+        raise TemplateError("the template file has no definition")
+    bundle = Bundle(name, definition)
+    for key, attr, field_name in (("components", "components", "script"), ("shared", "shared", "sha256")):
+        table = data.get(key, {})
+        if not isinstance(table, dict):
+            raise TemplateError(f"[sbx_template.{key}] must be a table")
+        for comp, entry in table.items():
+            if not _COMPONENT_RE.match(comp):
+                raise TemplateError(f"'{comp}' is not a component name")
+            if not (isinstance(entry, dict) and isinstance(entry.get(field_name), str)):
+                raise TemplateError(f"[sbx_template.{key}.{comp}] needs {field_name}")
+            getattr(bundle, attr)[comp] = entry[field_name]
+    return bundle
+
+
+@dataclass
+class ImportPlan:
+    name: str
+    writes: dict[Path, str]               # the files to write
+    same: list[str]                       # bundled components that are here already, unchanged
+    problems: list[str]                   # any one of these stops the import
+    warnings: list[str]
+
+
+def plan_import(bundle: Bundle, as_name: str = "", force: bool = False,
+                root: Path | None = None) -> ImportPlan:
+    root = root or REPO_ROOT
+    name = as_name or bundle.name
+    problems, warnings, writes, same = [], [], {}, []
+    if not NAME_RE.match(name):
+        problems.append(f"'{name}' is not a template name (lowercase letters, digits, hyphens)")
+    _, local = definition_dirs(root)
+    dest = local / f"{name}.toml"
+    # By path: a broken definition elsewhere in this setup must not stop an import.
+    paths = definition_paths(root)
+    if name in paths:
+        mine = paths[name].parent.name == "local"
+        if paths[name].read_text() == bundle.definition:
+            same.append(f"definition {name}")
+        elif force:
+            warnings.append(f"replaces your definition {name} ({paths[name].relative_to(root)})")
+            writes[dest] = bundle.definition
+        else:
+            where = "yours" if mine else "a shared one"
+            problems.append(f"a template named {name} exists ({where}); pass --as <new-name>, or --force"
+                            + (" to replace yours" if mine else " to hide it with this one"))
+    else:
+        writes[dest] = bundle.definition
+
+    comp_dir = root / "template" / "components" / "local"
+    for comp, script in bundle.components.items():
+        have = component_path(comp, root)
+        if have is None:
+            writes[comp_dir / f"{comp}.sh"] = script
+        elif have.read_text() == script:
+            same.append(f"component {comp}")
+        elif force:
+            users = sorted(n for n, p in paths.items() if n != name and comp in _components_of(p))
+            warnings.append(f"replaces your component {comp}" + (f", which {', '.join(users)} also use"
+                                                                   if users else ""))
+            writes[comp_dir / f"{comp}.sh"] = script
+        else:
+            problems.append(f"a different component {comp} exists here ({have.relative_to(root)}); "
+                            "pass --force to replace it with the imported one")
+    for comp, digest in bundle.shared.items():
+        have = component_path(comp, root)
+        if have is None:
+            problems.append(f"the template needs the shared component {comp}, which this copy of sbx "
+                            "does not have; pull the latest sbx")
+        elif _sha256(have.read_text()) != digest:
+            warnings.append(f"your copy of the shared component {comp} differs from the exporter's; "
+                            "the template can build differently. Pull the latest sbx, or ask which is newer")
+    if not problems:
+        # The definition must load with the components that it will have.
+        for comp in bundle.components:
+            if comp_dir / f"{comp}.sh" not in writes and component_path(comp, root) is None:
+                problems.append(f"component {comp} is missing")
+        try:
+            _check_with(bundle.definition, name, dest, writes, root)
+        except TemplateError as exc:
+            problems.append(str(exc))
+    return ImportPlan(name, writes, same, problems, warnings)
+
+
+def _components_of(path: Path) -> list[str]:
+    """The component list of a definition file, or none when it does not parse."""
+    try:
+        comps = tomllib.loads(path.read_text()).get("components", [])
+    except (tomllib.TOMLDecodeError, OSError):
+        return []
+    return comps if isinstance(comps, list) else []
+
+
+def _check_with(definition: str, name: str, dest: Path, writes: dict[Path, str], root: Path) -> None:
+    """Parse the definition as if the planned components were in place,
+    without writing them yet."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        shadow = Path(tmp)
+        for d in ("components", "components/local"):
+            (shadow / "template" / d).mkdir(parents=True)
+        for src in (root / "template" / "components", root / "template" / "components" / "local"):
+            for p in src.glob("*.sh") if src.is_dir() else []:
+                sub = "components/local" if src.name == "local" else "components"
+                (shadow / "template" / sub / p.name).write_text(p.read_text())
+        for path, text in writes.items():
+            if path.suffix == ".sh":
+                (shadow / "template" / "components" / "local" / path.name).write_text(text)
+        parse(definition, name, dest, shadow)
+
+
+def apply_import(plan: ImportPlan) -> list[Path]:
+    """Write the planned files; on any failure, remove what was written."""
+    if plan.problems:
+        raise TemplateError("; ".join(plan.problems))
+    written = []
+    try:
+        for path, text in plan.writes.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+            written.append(path)
+    except OSError:
+        for path in written:
+            path.unlink(missing_ok=True)
+        raise
+    return written
 
 
 def shell(env: dict[str, str]) -> str:

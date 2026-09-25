@@ -63,8 +63,11 @@ A shared key (the domain, the bridges, the subnets, the IDs) belongs in
   - `sbx new`, `sbx rm`, `sbx gc`, `sbx rollback`
 - **These commands are safe to run at any time:** `sbx doctor`, `sbx guide`,
   `sbx list`, `sbx projects`, `sbx inputs <project>`, `sbx versions`,
-  `sbx template list`, `sbx template show`, `sbx template components`, and the
-  unit tests.
+  `sbx template list`, `sbx template show`, `sbx template components`,
+  `sbx template export`, and the unit tests.
+- **`sbx template import` writes component scripts that run as root in a
+  template build.** Show the user each script, and let the user answer the
+  prompt. Do not pass `-y` for a file from someone else.
 
 ## How to set up sbx for a user
 
@@ -138,6 +141,8 @@ host with an existing gateway keeps its values.
 5. The user runs `sbx template rebuild <name>` (it asks for the host's root
    password). Then set `default_template`, or `[recipe] template` in the
    project.
+6. To give the template to a coworker: `sbx template export <name> -o <file>`.
+   They run `sbx template import <file>`.
 
 ## When something fails
 

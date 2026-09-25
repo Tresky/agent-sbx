@@ -216,12 +216,41 @@ The rules:
   log. `bash /root/sbx/host/vm-diag.sh <vmid>` on the host shows it. The next
   build of that template removes the failed VM.
 
-## Share a template with the team
+## Share a template
 
 A definition or a component in `templates/local/` or
-`template/components/local/` is yours alone. To share one, move it to
-`templates/` or `template/components/`, and commit it. Each person then
-builds it on their own host when they want it.
+`template/components/local/` is yours alone. There are two ways to share one.
+
+**One file, for one person or one project.** Export the template:
+
+```
+sbx template export rust-wasm -o rust-wasm.sbx-template.toml
+```
+
+The file holds the definition, the full text of each of your own components
+that it uses, and a hash of each shared component. Send it in a message, put
+it in a gist, or keep it in a project's repository. The other person imports
+it:
+
+```
+sbx template import rust-wasm.sbx-template.toml
+sbx template import https://gist.githubusercontent.com/.../rust-wasm.sbx-template.toml
+sbx template rebuild rust-wasm
+```
+
+- The import prints every file that it will write, and asks first.
+  **Caution:** a component runs as root in the template build, and its result
+  is in every sandbox of that template. Read each script before you answer.
+- It refuses a template or a component name that exists with other content.
+  `--as <name>` imports under another name. `--force` replaces yours.
+- It warns when your copy of a shared component differs from the exporter's,
+  and it refuses when you lack one. Pull the latest sbx, then import again.
+- An import of what you have already writes nothing.
+- Nothing reaches your host until you run `sbx template rebuild`.
+
+**Git, for a team standard.** Move the definition to `templates/`, and each
+component to `template/components/`, and commit them. Everyone then has the
+template after a pull, with its fixes, and a review of each change.
 
 A second Mac that uses your host gets your local definitions and components
 from the host, with `sbx setup --mac-only`.
