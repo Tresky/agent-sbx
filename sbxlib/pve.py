@@ -226,9 +226,9 @@ class Pve:
                            f"Build it: sbx template rebuild {name}")
         return built[name][-1]
 
-    def sandboxes(self) -> list[Sandbox]:
+    def sandboxes(self, resources: list[dict] | None = None) -> list[Sandbox]:
         out = []
-        for r in self.resources():
+        for r in self.resources() if resources is None else resources:
             tags = _tags(r)
             if r.get("type") != "qemu" or r.get("template") or "sbx" not in tags:
                 continue

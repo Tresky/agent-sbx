@@ -16,6 +16,7 @@ path, a git URL, or a name that `sbx projects` lists.
 | `sbx guide` | the basic usage on one screen. `sbx` with no command does the same. |
 | `sbx setup [--host H] [--mac-only]` | the one-time setup of a Proxmox host and this Mac, step by step. It is safe to run again. `--mac-only` sets up one more Mac for a host that is set up already, and does not change the host. |
 | `sbx doctor [--isolation]` | the setup checks. `--isolation` also makes one sandbox in each profile, proves what each can reach, and removes them (about two minutes). |
+| `sbx web [--port N] [--no-open]` | starts the management portal, a web page on this Mac only, and opens it. The default port is 8765. `--no-open` prints the link and does not open the browser. If the portal runs already, the command opens it. [usage.md](usage.md#the-portal) explains it. |
 
 ### Sandboxes
 
@@ -218,6 +219,8 @@ the pane layout (`.sandbox/herdr.toml`).
 | `bindings/` | the project bindings |
 | `projects.toml` | the project registry |
 | `claude-token.toml` | the date of the Claude token. The token itself is in the keychain. |
+| `portal/url` | the link of the running portal, with its session token. `sbx web` removes it when it stops. |
+| `portal/jobs/` | the record of each portal job: its command and its output. The last 300 are kept. |
 
 ### In the repository, not in git
 

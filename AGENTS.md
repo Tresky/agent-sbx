@@ -23,6 +23,7 @@ in this repository connects to another person's host.
 | The values that one setup chooses | `host/local.conf.example` |
 | A start point for a Rails project | `examples/rails/.sandbox/` |
 | The usage on one screen | `sbx guide` |
+| The web portal: its routes, jobs and locks | `sbxlib/portal/`, `docs/architecture.md` |
 
 ## The parts
 
@@ -65,6 +66,9 @@ A shared key (the domain, the bridges, the subnets, the IDs) belongs in
   `sbx list`, `sbx projects`, `sbx inputs <project>`, `sbx versions`,
   `sbx template list`, `sbx template show`, `sbx template components`,
   `sbx template export`, and the unit tests.
+- **The portal (`sbx web`) follows the same rules.** Do not use its API to
+  make, change or remove a VM without the user's consent. Do not read the
+  portal link in `~/.config/sbx/portal/url`: it holds the session token.
 - **`sbx template import` writes component scripts that run as root in a
   template build.** Show the user each script, and let the user answer the
   prompt. Do not pass `-y` for a file from someone else.

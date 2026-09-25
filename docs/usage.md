@@ -182,6 +182,43 @@ sbx gc            destroy each expired sandbox (it asks first)
 - A removed sandbox's name stays in DNS for up to one hour. A new sandbox with
   the same name takes the name at once.
 
+## The portal
+
+The portal is a web page for everything that sbx does. It runs on your Mac
+only.
+
+```
+sbx web                  start the portal, and open it in the browser
+sbx web --no-open        print the link only
+```
+
+Keep the terminal window open while you use the portal. Ctrl-C stops it.
+
+The portal has these pages:
+
+| Page | What you do there |
+|---|---|
+| Overview | See the sandboxes, the templates, the Claude token and the checks of this Mac. |
+| Sandboxes | Make, start, stop, snapshot and destroy sandboxes. Each sandbox has tabs for its facts and charts, its listening ports, its system, its logs, its snapshots, its Remote Control, its Proxmox configuration and its Proxmox tasks. |
+| Templates | See each template and its versions. Edit a local definition, export or import a template, and see the components. |
+| Projects | See each project's recipe, inputs, bindings and sandboxes. Store or remove its git token, and install it into a sandbox that runs already. |
+| Tokens | Store, send or remove the Claude token. See the git token of each project. |
+| Checks | Run the checks of `sbx doctor`, and the isolation test. |
+| Activity | See each change that the portal made, with the full output. |
+| Settings | Change the Mac settings in `config.toml`. See the host settings. |
+| Docs | Read these documents. |
+
+The portal runs the same `sbx` commands that you type. A command that needs
+the host's root password or a sign-in in the browser opens in Terminal. For
+example, `sbx template rebuild` and `sbx setup` open in Terminal. You type the
+password there, not in the portal.
+
+A token that you paste into the portal goes to `sbx` over stdin, and then into
+the keychain. The portal never shows a token.
+
+[architecture.md](architecture.md#the-portal) explains how the portal keeps
+other web pages out.
+
 ## Projects
 
 sbx records each project that a command sees. `--project <name>` then works by

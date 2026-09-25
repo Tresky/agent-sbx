@@ -77,6 +77,7 @@ sbx list                     every sandbox
 sbx ssh <name>               a shell in it
 sbx rm <name>                destroy it
 sbx doctor                   check the setup
+sbx web                      the portal: all of the above in a web page on this Mac
 ```
 
 [docs/reference.md](docs/reference.md) lists every command and option.

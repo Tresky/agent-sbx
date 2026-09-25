@@ -269,6 +269,8 @@ A SANDBOX, FROM START TO END
   sbx list                             every sandbox
   sbx snap lab  /  sbx rollback lab    a snapshot, and back to it
   sbx rm lab                           destroy it; `sbx gc` destroys expired ones
+  sbx web                              the portal: every sandbox, template, project,
+                                       token, setting and log, in a web page on this Mac
 
 A PROJECT
   sbx projects                         the projects this Mac has used
@@ -317,15 +319,19 @@ WHERE THINGS ARE
 """
 
 
-def cmd_guide(args, cfg: Config, runner: Runner, api=None) -> int:
+def guide_text(cfg: Config) -> str:
     from .config import REPO_ROOT
     home = str(Path.home())
-    print(GUIDE.format(domain=cfg.domain, ttl=cfg.agent_ttl_days, profile=cfg.default_profile,
-                       user=cfg.vm_user, state=str(state_dir()).replace(home, "~"),
-                       docs=str(REPO_ROOT / "docs").replace(home, "~"),
-                       gw_ctid=cfg.gw_ctid, gw_host=cfg.gw_hostname, template_pool=cfg.template_pool,
-                       agent_bridge=cfg.agent_bridge, personal_bridge=cfg.personal_bridge,
-                       agent_net=cfg.agent_net, personal_net=cfg.personal_net), end="")
+    return GUIDE.format(domain=cfg.domain, ttl=cfg.agent_ttl_days, profile=cfg.default_profile,
+                        user=cfg.vm_user, state=str(state_dir()).replace(home, "~"),
+                        docs=str(REPO_ROOT / "docs").replace(home, "~"),
+                        gw_ctid=cfg.gw_ctid, gw_host=cfg.gw_hostname, template_pool=cfg.template_pool,
+                        agent_bridge=cfg.agent_bridge, personal_bridge=cfg.personal_bridge,
+                        agent_net=cfg.agent_net, personal_net=cfg.personal_net)
+
+
+def cmd_guide(args, cfg: Config, runner: Runner, api=None) -> int:
+    print(guide_text(cfg), end="")
     return 0
 
 
@@ -1443,6 +1449,12 @@ def cmd_gpu(args, cfg: Config, runner: Runner, api=None) -> int:
     return 0
 
 
+def _cmd_web(args, cfg: Config, runner: Runner, api=None) -> int:
+    # Imported here: the portal is large, and no other command needs it.
+    from .portal import server
+    return server.serve(args.port, open_browser=not args.no_open)
+
+
 # --- entry ------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1619,6 +1631,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("gc", help="destroy every expired sandbox")
     s.add_argument("-y", "--yes", action="store_true")
     s.set_defaults(fn=cmd_gc)
+
+    s = sub.add_parser("web", help="the management portal: a local web page for everything sbx does")
+    s.add_argument("--port", type=int, default=8765, help="the local port (default: 8765)")
+    s.add_argument("--no-open", action="store_true", help="print the link; do not open the browser")
+    s.set_defaults(fn=_cmd_web)
 
     s = sub.add_parser("gpu", help="move the host GPU between sandboxes")
     s.add_argument("action", choices=("attach", "detach", "status"))

@@ -366,6 +366,48 @@ A pane's shell starts inside the project with no `cd`, so rvm's and nvm's `cd`
 hooks have not chosen its Ruby, gemset and Node. The template's `~/.zshrc`
 therefore ends with one `cd .`.
 
+## The portal
+
+`sbx web` (`sbxlib/portal/`) starts a web server that uses the standard
+library only. The page is static files with no build step, and it loads
+nothing from outside the portal.
+
+**Reads and changes.** A read calls `sbxlib` directly and returns JSON. A
+change runs `bin/sbx` as a job (`jobs.py`): a child process whose output the
+Activity page keeps. The portal therefore uses the CLI's own checks and error
+texts, and cannot drift from the CLI. The fast Proxmox calls that the CLI has
+no command for are jobs too: power, the expiry tag, and a snapshot delete. A
+command that needs a terminal opens in Terminal.app through `osascript`. That
+is each command that needs the host's root password or a sign-in in the
+browser. Only the commands in a fixed list open there.
+
+**One job for each sandbox.** A second job on the same sandbox is refused
+until the first one ends.
+
+**Secrets.** A job's command line holds no secret. A token that the user
+pastes goes to the child's stdin (`--stdin`). The portal checks that a token
+is in the keychain without `-w`, so it never reads the value. It shows a
+binding of kind `value` as "a literal value" and never reads it.
+
+**The locks.** The portal can make and destroy VMs, so a page on another site
+must not drive it. The server has four locks:
+
+1. It listens on `127.0.0.1` only.
+2. Each request needs the session token. `sbx web` makes a new token at each
+   start and prints a link that holds it. The first visit turns the token into
+   an `HttpOnly`, `SameSite=Strict` cookie.
+3. The `Host` header must be `127.0.0.1:<port>` or `localhost:<port>`. This
+   lock stops DNS rebinding: a hostile name that resolves to `127.0.0.1`.
+4. A change needs the portal's own `Origin` and a JSON body. A form on another
+   site can send neither.
+
+The Content-Security-Policy permits the portal's own script and style only.
+The page puts each text from the server into the DOM as text, never as HTML.
+
+**A template import** has two steps. The first step returns the full text of
+each file. The second step writes the files only when their digest is the
+digest of the files that the user reviewed.
+
 ## Claude Code
 
 **The subscription token.** `sbx claude-token` runs `claude setup-token`,
@@ -628,6 +670,8 @@ sbxlib/
   layout.py                 a project's .sandbox/herdr.toml panes
   names.py                  the host name rules
   run.py                    one place that starts processes, replaceable in tests
+  portal/                   sbx web: server.py (the locks), api.py (the routes),
+                            jobs.py (the child processes), static/ (the page)
 host/
   defaults.conf             the shared settings; local.conf.example
   lib.sh                    the loader, render(), confirm()

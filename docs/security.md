@@ -131,6 +131,10 @@ secret by accident.
   your organization. So only a personal sandbox can get it. No option changes
   that.
 
+**The portal.** `sbx web` listens on your Mac only, and each request needs its
+session token. A web page on another site cannot drive it.
+[architecture.md](architecture.md#the-portal) explains the locks.
+
 **Certificates.** The mkcert CA key stays on your Mac. A sandbox gets a leaf
 certificate for its own names only, so it cannot make a certificate that your
 Mac trusts.
