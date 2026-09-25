@@ -42,7 +42,8 @@ class ScanTest(unittest.TestCase):
             versions.scan_checkout(root, "lib", needs)
         self.assertEqual((needs.ruby, needs.node), ({"3.2.4": {"lib"}}, {"22.21.0": {"lib"}}))
 
-    def test_union_over_the_registry_and_the_conf_lines(self):
+    def test_union_over_the_registry_and_the_values_for_a_template(self):
+        from sbxlib.templates import Definition
         with tempfile.TemporaryDirectory() as tmp:
             a, b = Path(tmp) / "a", Path(tmp) / "b"
             make_checkout(a, {".ruby-version": "3.3.6\n", ".nvmrc": "22\n"})
@@ -52,14 +53,18 @@ class ScanTest(unittest.TestCase):
             needs, missing = versions.scan_registry(registry)
         self.assertEqual(missing, ["gone"])
         self.assertEqual(needs.node, {"22": {"a", "b"}})
-        lines = versions.conf_lines(needs)
+        rails = Definition("rails", Path("rails.toml"), components=("ruby", "rails"))
+        values = versions.derived_values(needs, rails)
         # Oldest first: the first entry becomes the template's default.
-        self.assertEqual(lines["SBX_RUBY_VERSIONS"], "3.3.6 3.4.10")
-        self.assertEqual(lines["SBX_NODE_VERSIONS"], "22")
-        self.assertEqual(lines["SBX_DOCKER_IMAGES"], "redis:7")
+        self.assertEqual(values["ruby"], {"versions": ["3.3.6", "3.4.10"]})
+        self.assertEqual(values["node"], {"versions": ["22"]})
+        self.assertEqual(values["docker"], {"images": ["redis:7"]})
+        # A template without Ruby gets no Ruby versions.
+        self.assertNotIn("ruby", versions.derived_values(needs, Definition("go", Path("go.toml"), components=("go",))))
         text = versions.table(needs, {"3.4.10"}, set(), set())
         self.assertRegex(text, r"ruby\s+3\.3\.6\s+NO\s+a")
         self.assertRegex(text, r"ruby\s+3\.4\.10\s+yes\s+b")
+        self.assertIn("no ruby component", versions.table(needs, set(), set(), set(), has_ruby=False))
 
     def test_write_local_conf_keeps_other_lines(self):
         with tempfile.TemporaryDirectory() as tmp:

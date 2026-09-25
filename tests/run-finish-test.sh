@@ -48,7 +48,7 @@ cat > /stub/poweroff <<"EOF"
 #!/bin/bash
 touch /tmp/fake/stopped
 EOF
-for s in cloud-init apt-get journalctl fstrim pvesh; do printf "#!/bin/bash\nexit 0\n" > /stub/$s; done
+for s in cloud-init apt-get journalctl fstrim pvesh pveum; do printf "#!/bin/bash\nexit 0\n" > /stub/$s; done
 printf "#!/bin/bash\necho /tmp/fake/snippet.yaml\n" > /stub/pvesm
 chmod +x /stub/*
 export PATH="/stub:$PATH"
@@ -62,7 +62,7 @@ check() { if eval "$2"; then echo "  ok    $1"; else echo "  WRONG $1"; fails=$(
 echo "== run 1: both markers (the real state after build #3)"
 touch /var/lib/sbx/provision.ok /var/lib/sbx/provision.failed
 rm -f /tmp/fake/stopped /tmp/fake/calls
-out="$(bash /work/host/30-template-build.sh --finish 2>&1)"; code=$?
+out="$(bash /work/host/30-template-build.sh --finish default 9000 2>&1)"; code=$?
 echo "$out" | sed "s/^/    /"
 check "exit 0"                                  "[[ $code -eq 0 ]]"
 check "the seal was placed, executable"         "[[ -x /usr/local/lib/sbx/seal.sh ]]"
@@ -70,11 +70,12 @@ check "the real seal ran: machine-id emptied"   "[[ ! -s /etc/machine-id ]]"
 check "the VM powered off"                      "[[ -e /tmp/fake/stopped ]]"
 check "cicustom deleted, ciuser set, templated" "grep -q -- \"--delete cicustom\" /tmp/fake/calls && grep -q -- \"--ciuser dev\" /tmp/fake/calls && grep -q \"^qm template 9000\" /tmp/fake/calls"
 check "reports the template as ready"           "grep -q \"is ready\" <<<\"$out\""
+check "tagged as template default"              "grep -q -- \"--tags sbx-template;sbx-tpl-default;\" /tmp/fake/calls"
 
 echo "== run 2 (control): the failed marker only"
 rm -f /var/lib/sbx/provision.ok /tmp/fake/stopped /tmp/fake/calls
 echo "1234567890abcdef" > /etc/machine-id
-out="$(bash /work/host/30-template-build.sh --finish 2>&1)"; code=$?
+out="$(bash /work/host/30-template-build.sh --finish default 9000 2>&1)"; code=$?
 check "exit non-zero"                           "[[ $code -ne 0 ]]"
 check "says provision FAILED"                   "grep -q \"provision FAILED\" <<<\"$out\""
 check "no seal ran: machine-id intact"          "[[ -s /etc/machine-id ]]"

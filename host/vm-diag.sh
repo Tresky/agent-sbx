@@ -7,7 +7,7 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_pve
-ID="${1:-$SBX_TEMPLATE_VMID}"
+ID="${1:?usage: vm-diag.sh <vmid> (the build VM; sbx template list shows it)}"
 
 # The parser lives in a quoted heredoc, so no shell quoting touches it.
 read -r -d '' PARSE <<'PY' || true

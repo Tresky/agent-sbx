@@ -25,11 +25,12 @@ from . import manifest as manifest_mod
 from . import names
 from . import projects as projects_mod
 from . import remotecontrol
+from . import templates as templates_mod
 from . import versions as versions_mod
 from .config import Config, ConfigError, load as load_config, local_conf_path, state_dir
 from .inputs import PLACEHOLDER, REPO, SEND, InputError
 from .manifest import MANIFEST_PATH, Manifest, ManifestError
-from .pve import HttpApi, Pve, PveError
+from .pve import HttpApi, Pve, PveError, TemplateVm
 from .run import CommandError, Runner
 from .vm import Vm, VmError, dns_has, resolves
 
@@ -239,10 +240,11 @@ GUIDE = """\
 sbx: throwaway Proxmox sandboxes for development
 
 WHAT IT IS
-  One command makes a VM on the Proxmox host in about 30 s. Ruby, Node, Go,
-  Docker, Chrome, Claude Code and herdr are already in it, with the extras
-  that host/local.conf names. The VM gets a name at once, and every port on
-  it is direct, with https on the same port:
+  One command makes a VM on the Proxmox host in about 30 s, from one of your
+  templates. Each template has the core (Node, Docker, Chrome, Claude Code,
+  herdr) and the components that its definition names (Ruby, Go, Rust, ...).
+  The VM gets a name at once, and every port on it is direct, with https on
+  the same port:
 
       https://sbx-<name>.{domain}:<port>
 
@@ -257,6 +259,7 @@ A SANDBOX, FROM START TO END
   sbx new lab                          a plain sandbox, {profile} profile
   sbx new lab --profile personal       ... for your own work
   sbx new app --project ~/code/app     clone the project and run its recipe
+  sbx new lab --template rust          ... from a named template
   sbx ssh lab                          a shell        (or: ssh sbx-lab)
   sbx herdr lab                        put it in your herdr sidebar (done by `new` too)
   sbx layout app --replace             the project's .sandbox/herdr.toml panes, again
@@ -276,6 +279,12 @@ A PROJECT
   what the recipe needs. <project> is a checkout path, a URL, or a listed name.
   An agent sandbox needs --with <input> or --without <input> for each input.
 
+TEMPLATES
+  sbx template list                    the definitions, and what is built
+  sbx template new <name> --from rails your own definition, in templates/local/
+  sbx template rebuild <name>          build a new version (15-40 min; asks for
+                                       the host's root password)
+
 INSIDE A SANDBOX
   User {user}, sudo with no password, the project in ~/code/<project>.
   A dev server on 127.0.0.1:<port> is reachable from your Mac at
@@ -283,17 +292,15 @@ INSIDE A SANDBOX
   A database published by Docker is reachable on its port the same way.
 
 ON THE PROXMOX HOST
-  Three things that are not sandboxes. They were made once by `sbx setup`
-  and stay. Leave them running. `sbx template rebuild` rebuilds the template
-  with what the projects need (35-40 min, asks for the host's root password).
+  Three things that are not sandboxes. `sbx setup` made them, and they stay.
   {gw_ctid} {gw_host:<9}  a small container: the DHCP and DNS server for the
                   sandboxes, their route to the internet, the firewall that
                   keeps an agent sandbox off your LAN, and the Tailscale route
                   that lets your Mac reach them. A sandbox's name comes from
                   its DHCP request to this container, and from nothing else.
-  {template_id} sbx-base-* the template: an Ubuntu VM with every tool installed,
-                  built once. A sandbox is a linked clone of it, which is why
-                  `sbx new` takes seconds. It never runs by itself.
+  sbx-tpl-*       the templates, in the pool {template_pool}: one Ubuntu VM per
+                  definition and version. A sandbox is a linked clone of one,
+                  which is why `sbx new` takes seconds. They never run.
   {agent_bridge}, {personal_bridge}  two bridges with no physical port: the agent subnet
                   ({agent_net}.0/24) and the personal subnet ({personal_net}.0/24).
                   The bridge a sandbox sits on IS its profile: the firewall
@@ -304,6 +311,7 @@ WHERE THINGS ARE
   {docs}/
       usage.md         daily use: profiles, ports, Claude, snapshots
       projects.md      recipes, manifests, inputs, git tokens, pane layouts
+      templates.md     one template per kind of project, and your own
       troubleshooting.md, reference.md, security.md, setup.md, architecture.md
   sbx <command> --help   every option of a command
 """
@@ -315,7 +323,7 @@ def cmd_guide(args, cfg: Config, runner: Runner, api=None) -> int:
     print(GUIDE.format(domain=cfg.domain, ttl=cfg.agent_ttl_days, profile=cfg.default_profile,
                        user=cfg.vm_user, state=str(state_dir()).replace(home, "~"),
                        docs=str(REPO_ROOT / "docs").replace(home, "~"),
-                       gw_ctid=cfg.gw_ctid, gw_host=cfg.gw_hostname, template_id=cfg.template_vmid,
+                       gw_ctid=cfg.gw_ctid, gw_host=cfg.gw_hostname, template_pool=cfg.template_pool,
                        agent_bridge=cfg.agent_bridge, personal_bridge=cfg.personal_bridge,
                        agent_net=cfg.agent_net, personal_net=cfg.personal_net), end="")
     return 0
@@ -329,94 +337,274 @@ def _host_ssh(cfg: Config) -> list[str]:
             "-o", "ControlPersist=15m", *cfg.pve_ssh_options]
 
 
-def _template_info(pve: Pve) -> dict | None:
-    return next((r for r in pve.resources() if r.get("template") and int(r["vmid"]) == pve.cfg.template_vmid), None)
+def _copy_to_host(cfg: Config, runner: Runner) -> None:
+    """The scripts, the template definitions (the local ones too) and the
+    definition parser go to /root/sbx on the host, over the shared connection."""
+    from .config import REPO_ROOT
+    target = cfg.pve_ssh_target
+    info(f"copying the scripts and the template definitions to {target}:/root/sbx/")
+    runner.run(["ssh", *_host_ssh(cfg), target, "mkdir -p /root/sbx"], capture=False, check=False)
+    done = runner.run(["scp", *_host_ssh(cfg), "-q", "-r"]
+                      + [str(REPO_ROOT / d) for d in ("host", "gw", "template", "templates", "sbxlib")]
+                      + [f"{target}:/root/sbx/"], capture=False, check=False)
+    if done.code != 0:
+        raise CommandError(["scp"], done.code, "the copy to the host failed")
+
+
+def _host_build(cfg: Config, runner: Runner, *args: str) -> None:
+    done = runner.run(["ssh", *_host_ssh(cfg), "-t", cfg.pve_ssh_target, "SBX_YES=1", "bash",
+                       "/root/sbx/host/30-template-build.sh", *args], capture=False, check=False)
+    if done.code != 0:
+        raise CommandError(["30-template-build.sh", *args], done.code, "the host script printed why")
+
+
+def _definitions() -> dict[str, templates_mod.Definition]:
+    try:
+        return templates_mod.load_all()
+    except templates_mod.TemplateError as exc:
+        raise ConfigError(str(exc)) from None
+
+
+def _state(defn: templates_mod.Definition | None, versions: list[TemplateVm]) -> str:
+    if not versions:
+        return "not built"
+    if defn is None:
+        return "no definition"
+    try:
+        current = templates_mod.fingerprint(defn) == versions[-1].fingerprint
+    except (templates_mod.TemplateError, OSError):
+        return "?"
+    return "current" if current else "OUT OF DATE"
+
+
+def _stale_warning(tv: TemplateVm) -> str | None:
+    defs = _definitions()
+    if tv.name in defs and _state(defs[tv.name], [tv]) == "OUT OF DATE":
+        return (f"template {tv.name} is older than its definition; "
+                f"`sbx template rebuild {tv.name}` builds a new version")
+    return None
+
+
+def _project_template(cfg: Config, project: "Project | None", built: dict) -> str:
+    """The template of a sandbox: the project's manifest, then default_template,
+    then the only one that is built."""
+    if project is not None and project.manifest is not None and project.manifest.template:
+        return project.manifest.template
+    if cfg.default_template:
+        return cfg.default_template
+    if len(built) == 1:
+        return next(iter(built))
+    return ""
 
 
 def cmd_template(args, cfg: Config, runner: Runner, api=None) -> int:
     from .config import REPO_ROOT
-    pve = _pve(cfg, runner, api)
-    if args.action == "status":
-        tpl = _template_info(pve)
-        print("template: " + (f"{tpl['vmid']} {tpl.get('name', '')} on {tpl.get('node', '')}" if tpl else "NONE"))
-        print("the next build caches (host/local.conf; `sbx versions` derives it):")
-        print(f"  rubies: {cfg.template_ruby or '-'}   nodes: {cfg.template_node or '-'}")
-        print(f"  images: {cfg.template_images or '-'}")
-        boxes = pve.sandboxes()
-        print("linked clones: " + (", ".join(b.hostname for b in boxes) if boxes else "none"))
+    action = args.action
+
+    if action == "components":
+        for name, path in templates_mod.components().items():
+            where = "local " if path.parent.name == "local" else "shared"
+            needs = templates_mod.requires(path)
+            print(f"  {name:<10} {where}  {templates_mod.describe(path)}"
+                  + (f"  (after: {', '.join(needs)})" if needs else ""))
+        print("A definition lists them in `components`; template/components/<name>.sh shows each setting.")
         return 0
 
-    target = cfg.pve_ssh_target
-    if args.action == "finish":
-        # The scripts go over first: a fix to the host script must reach the
-        # host before it attaches to the build.
-        runner.run(["scp", *_host_ssh(cfg), "-q", "-r", str(REPO_ROOT / "host"), str(REPO_ROOT / "gw"),
-                    str(REPO_ROOT / "template"), f"{target}:/root/sbx/"], capture=False)
-        return runner.run(["ssh", *_host_ssh(cfg), "-t", target, "bash", "/root/sbx/host/30-template-build.sh", "--finish"],
-                          capture=False, check=False).code
+    if action == "new":
+        if not templates_mod.NAME_RE.match(args.name):
+            raise InputError(f"'{args.name}' is not a template name (lowercase letters, digits, hyphens)")
+        shared, local = templates_mod.definition_dirs()
+        dest = local / f"{args.name}.toml"
+        if dest.exists():
+            raise InputError(f"{dest} exists already")
+        if args.from_name:
+            src = local / f"{args.from_name}.toml"
+            src = src if src.is_file() else shared / f"{args.from_name}.toml"
+            if not src.is_file():
+                raise InputError(f"no definition '{args.from_name}' to start from; `sbx template list` shows them")
+            text = src.read_text()
+        else:
+            text = ('description = ""\n'
+                    '# The components, in order: `sbx template components` lists them.\n'
+                    'components  = []\n\n'
+                    '# Settings of a component go in a table of its name, for example:\n'
+                    '# [ruby]\n# versions = ["3.4.1"]\n\n'
+                    '[node]\nversions = ["lts/*"]\n\n'
+                    '# apt = ["graphviz"]       more apt packages\n'
+                    '# disk_gb = 60             also cores, memory_mb, image_url\n')
+        local.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text)
+        templates_mod.load(args.name)  # refuses a file that does not parse
+        info(f"wrote {dest.relative_to(templates_mod.REPO_ROOT)}; edit it, then: sbx template rebuild {args.name}")
+        return 0
 
-    # rebuild
-    if not args.no_versions:
-        needs, missing = versions_mod.scan_registry()
-        if needs.ruby or needs.node or needs.images:
-            values = versions_mod.conf_lines(needs)
-            versions_mod.write_local_conf(local_conf_path(), values)
-            info("the template will cache what the projects need:")
-            for k, v in values.items():
-                print(f"    {k}={v or '-'}")
+    defs = _definitions()
+    if action in ("list", "show"):
+        pve = _pve(cfg, runner, api)
+        built = pve.templates()
+        boxes = pve.sandboxes()
+        if action == "show":
+            name = args.name
+            if name not in defs and name not in built:
+                raise InputError(f"no template '{name}'; `sbx template list` shows them")
+            defn = defs.get(name)
+            if defn is not None:
+                print(f"{name}: {defn.description or '-'}")
+                print(f"  definition  {defn.path.relative_to(templates_mod.REPO_ROOT)}")
+                print(f"  components  core, {', '.join(defn.components) or 'nothing more'}")
+                for key, value in templates_mod.build_env(defn).items():
+                    if key not in ("SBX_TEMPLATE_NAME", "SBX_COMPONENTS"):
+                        print(f"  {key:<24} {value or '-'}")
+                print(f"  fingerprint {templates_mod.fingerprint(defn)}")
+            for v in built.get(name, []):
+                users = [b.hostname for b in boxes if b.template == name]
+                print(f"  built       {v.vm_name} (VM {v.vmid}, fingerprint {v.fingerprint})")
+            if built.get(name):
+                users = [b.hostname for b in boxes if b.template == name]
+                print(f"  sandboxes   {', '.join(users) or 'none'}")
+            return 0
+        rows = [("TEMPLATE", "DEFINITION", "STATE", "BUILT", "SANDBOXES", "DESCRIPTION")]
+        for name in sorted(set(defs) | set(built)):
+            defn, versions = defs.get(name), built.get(name, [])
+            source = "-" if defn is None else ("local" if defn.local else "shared")
+            newest = f"{versions[-1].vmid}" + (f" (+{len(versions) - 1} old)" if len(versions) > 1 else "") if versions else "-"
+            users = sum(1 for b in boxes if b.template == name)
+            rows.append((name + (" *" if name == cfg.default_template else ""), source, _state(defn, versions),
+                         newest, str(users), defn.description if defn else ""))
+        widths = [max(len(r[c]) for r in rows) for c in range(len(rows[0]))]
+        for r in rows:
+            print("  ".join(cell.ljust(w) for cell, w in zip(r, widths)).rstrip())
+        print("* = default_template.  `sbx template rebuild <name>` builds one;"
+              " `sbx template new <name>` starts your own.")
+        return 0
+
+    if action == "rebuild":
+        pve = _pve(cfg, runner, api)
+        built = pve.templates()
+        if args.all:
+            names = list(defs)
+        elif args.changed:
+            names = [n for n in defs if _state(defs[n], built.get(n, [])) != "current"]
+            if not names:
+                info("every template is current")
+                return 0
+        else:
+            names = args.names
+        if not names:
+            raise InputError("name a template, or pass --all or --changed; `sbx template list` shows them")
+        missing = [n for n in names if n not in defs]
         if missing:
-            warn("not scanned (no checkout on this Mac): " + ", ".join(missing))
-
-    # Proxmox refuses to destroy a template while linked clones exist.
-    boxes = pve.sandboxes()
-    if boxes:
-        names_ = ", ".join(b.hostname for b in boxes)
-        if not args.rm_sandboxes:
-            raise PveError(f"linked clones exist: {names_}. Remove them first (sbx rm), "
-                           "or pass --rm-sandboxes to destroy every sandbox now")
-        if not _confirm(f"Destroy {len(boxes)} sandbox(es) ({names_}) and rebuild the template?", args.yes):
+            raise InputError(f"no definition for {', '.join(missing)}; `sbx template new <name>` makes one")
+        if not args.no_versions:
+            _derive_versions(cfg, pve, defs, names)
+        minutes = f"{15 * len(names)} to {40 * len(names)}"
+        if not _confirm(f"Build {', '.join(names)}? It takes {minutes} minutes and asks for the host's root "
+                        "password once. Sandboxes keep their current template version.", args.yes):
             return 1
-        for box in boxes:
-            _remove(cfg, runner, pve, box)
-    elif not _confirm("Rebuild the template? It takes 35 to 40 minutes and asks for the host's root password.", args.yes):
-        return 1
+        _copy_to_host(cfg, runner)
+        for name in names:
+            info(f"building template {name}; the host script prints its progress")
+            _host_build(cfg, runner, name)
+        built = pve.templates()
+        for name in names:
+            if built.get(name):
+                info(f"template {name}: {built[name][-1].vm_name} (VM {built[name][-1].vmid}) is ready")
+            else:
+                warn(f"template {name} was built, but the token does not see it. Run on the host: "
+                     "bash /root/sbx/host/40-api-token.sh --acl-only")
+        return 0
 
-    info(f"copying host/, gw/ and template/ to {target}:/root/sbx/")
-    done = runner.run(["scp", *_host_ssh(cfg), "-q", "-r", str(REPO_ROOT / "host"), str(REPO_ROOT / "gw"),
-                       str(REPO_ROOT / "template"), f"{target}:/root/sbx/"], capture=False, check=False)
-    if done.code != 0:
-        raise CommandError(["scp"], done.code, "the copy to the host failed")
-    info("building; the host script prints its progress")
-    # SBX_YES=1: this command confirmed already, so the host script must not ask again.
-    done = runner.run(["ssh", *_host_ssh(cfg), "-t", target, "SBX_YES=1", "bash",
-                       "/root/sbx/host/30-template-build.sh", "--replace"], capture=False, check=False)
-    if done.code != 0:
-        raise CommandError(["30-template-build.sh"], done.code,
-                           "the build failed; the host script printed why. To attach again: sbx template finish")
-    tpl = _template_info(pve)
-    info("template " + (f"{tpl['vmid']} {tpl.get('name', '')} is ready" if tpl else "built, but the token does not see it yet"))
-    return 0
+    if action == "finish":
+        _copy_to_host(cfg, runner)
+        _host_build(cfg, runner, "--finish", args.name)
+        return 0
+    if action == "prune":
+        _copy_to_host(cfg, runner)
+        _host_build(cfg, runner, "--prune")
+        return 0
+    if action == "rm":
+        if not _confirm(f"Remove every version of template {args.name} that no sandbox uses?", args.yes):
+            return 1
+        _copy_to_host(cfg, runner)
+        _host_build(cfg, runner, "--rm", args.name)
+        info(f"the definition stays; remove {args.name}.toml from templates/local/ yourself if you want")
+        return 0
+    if action == "adopt":
+        if not templates_mod.NAME_RE.match(args.name):
+            raise InputError(f"'{args.name}' is not a template name")
+        _copy_to_host(cfg, runner)
+        _host_build(cfg, runner, "--adopt", str(args.vmid), args.name)
+        return 0
+    raise InputError(f"unknown action {action}")
+
+
+def _registry_by_template(cfg: Config, built: dict) -> tuple[dict[str, versions_mod.Needs], list[str], list[str]]:
+    """The needs of each registered project, grouped by the template that its
+    sandboxes use. Returns (needs by template, projects with no checkout here,
+    projects with no template to go to)."""
+    by_tpl: dict[str, versions_mod.Needs] = {}
+    missing, homeless = [], []
+    for name, entry in sorted(projects_mod.load().items()):
+        root = Path(entry.checkout) if entry.checkout else None
+        if root is None or not root.is_dir():
+            missing.append(name)
+            continue
+        try:
+            manifest = _read_manifest(root)
+        except ManifestError:
+            manifest = None
+        project = Project(name, entry.url, None, root, manifest)
+        tpl = _project_template(cfg, project, built)
+        if not tpl:
+            homeless.append(name)
+            continue
+        versions_mod.scan_checkout(root, name, by_tpl.setdefault(tpl, versions_mod.Needs()))
+    return by_tpl, missing, homeless
+
+
+def _derive_versions(cfg: Config, pve: Pve, defs: dict, names: list[str]) -> None:
+    by_tpl, missing, homeless = _registry_by_template(cfg, pve.templates())
+    for name in names:
+        needs = by_tpl.get(name)
+        if needs is None:
+            continue
+        values = versions_mod.derived_values(needs, defs[name])
+        templates_mod.write_derived(name, values)
+        flat = "; ".join(f"{t} {k}: {' '.join(v) or '-'}" for t, kv in values.items() for k, v in kv.items())
+        info(f"template {name} will also cache what its projects need: {flat or 'nothing more'}")
+    if missing:
+        warn("not scanned (no checkout on this Mac): " + ", ".join(missing))
+    if homeless:
+        warn("no template for: " + ", ".join(homeless) + ". Set [recipe] template in the project, "
+             "or default_template in config.toml")
 
 
 def cmd_versions(args, cfg: Config, runner: Runner, api=None) -> int:
-    from .config import REPO_ROOT
-    needs, missing = versions_mod.scan_registry()
-    if not (needs.ruby or needs.node or needs.go or needs.images):
+    defs = _definitions()
+    built = _pve(cfg, runner, api).templates() if cfg.pve_api else {}
+    by_tpl, missing, homeless = _registry_by_template(cfg, built)
+    if not by_tpl:
         print("no registered project with a checkout here; `sbx project add <checkout>` records one")
         return 0
-    print(versions_mod.table(needs, set(cfg.template_ruby.split()), set(cfg.template_node.split()),
-                             set(cfg.template_images.split())))
+    for name, needs in sorted(by_tpl.items()):
+        defn = defs.get(name)
+        print(f"template {name}" + ("" if defn else " (no definition on this Mac)"))
+        have = templates_mod.effective_settings(defn) if defn else {}
+        print(versions_mod.table(needs, set(have.get("ruby", {}).get("versions", [])),
+                                 set(have.get("node", {}).get("versions", [])),
+                                 set(have.get("docker", {}).get("images", [])),
+                                 has_ruby=defn is not None and "ruby" in defn.components))
+        if args.write and defn is not None:
+            templates_mod.write_derived(name, versions_mod.derived_values(needs, defn))
+        print()
     if missing:
         print("not scanned (no checkout on this Mac): " + ", ".join(missing))
-    values = versions_mod.conf_lines(needs)
-    local = local_conf_path()
+    if homeless:
+        print("no template for: " + ", ".join(homeless) + " (set [recipe] template, or default_template)")
     if args.write:
-        versions_mod.write_local_conf(local, values)
-        info(f"wrote {local}; rebuild the template to cache these: host/30-template-build.sh --replace")
+        info(f"wrote {templates_mod.versions_path()}; the next `sbx template rebuild` caches these")
     else:
-        print("\nfor host/local.conf (`sbx versions --write` writes it):")
-        for k, v in values.items():
-            print(f'  {k}="{v}"')
+        print("`sbx versions --write` saves these for the next build; `sbx template rebuild` does it too.")
     return 0
 
 
@@ -835,14 +1023,25 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
     pve = _pve(cfg, runner, api)
     if pve.find(hostname):
         raise PveError(f"{hostname} already exists")
+    built = pve.templates()
+    tpl_name = args.template or _project_template(cfg, project, built)
+    if not tpl_name:
+        if not built:
+            raise PveError("no template is built. Build one: sbx template rebuild <name> "
+                           "(`sbx template list` shows the definitions)")
+        raise InputError(f"more than one template is built ({', '.join(built)}); pass --template, "
+                         "set [recipe] template in the project, or set default_template in config.toml")
+    template = pve.template(tpl_name)
+    if note := _stale_warning(template):
+        warn(note)
     if args.gpu and (holder := pve.gpu_holder()):
         raise PveError(f"the GPU is held by VM {holder[0]} ({holder[1]}); run `sbx gpu detach` there first")
 
     ttl = args.ttl if args.ttl is not None else (cfg.agent_ttl_days if profile == "agent" else 0)
     expires = dt.date.today() + dt.timedelta(days=ttl) if ttl else None
     vmid = pve.next_vmid()
-    info(f"cloning the template into VM {vmid} ({hostname}, {profile})")
-    node = pve.create(vmid, hostname, profile, cfg.ssh_key_path.with_suffix(".pub").read_text(),
+    info(f"cloning template {template.name} ({template.vm_name}) into VM {vmid} ({hostname}, {profile})")
+    node = pve.create(template, vmid, hostname, profile, cfg.ssh_key_path.with_suffix(".pub").read_text(),
                       cores=args.cores or cfg.cores, memory_mb=args.memory or cfg.memory_mb,
                       disk_gb=args.disk, expires=expires, project=project.name if project else "")
     if args.gpu:
@@ -891,7 +1090,8 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
             warn(f"Remote Control not set up: {exc}. Later: sbx remote-control {args.name}")
 
     scheme = "https" if https else "http"
-    print(f"\n{hostname} is up ({profile}, VM {vmid}" + (f", expires {expires}" if expires else "") + ")")
+    print(f"\n{hostname} is up ({profile}, template {template.name}, VM {vmid}"
+          + (f", expires {expires}" if expires else "") + ")")
     print(f"  ssh    sbx ssh {args.name}        (or: ssh {hostname})")
     print(f"  herdr  in your herdr sidebar     (a full window: sbx herdr {args.name} --attach)")
     print(f"  web    {scheme}://{cfg.fqdn(hostname)}:<port>")
@@ -958,10 +1158,10 @@ def _connect(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostna
 
 def cmd_list(args, cfg: Config, runner: Runner, api=None) -> int:
     today = dt.date.today()
-    rows = [("NAME", "PROFILE", "PROJECT", "STATUS", "VMID", "EXPIRES", "ADDRESS")]
+    rows = [("NAME", "PROFILE", "TEMPLATE", "PROJECT", "STATUS", "VMID", "EXPIRES", "ADDRESS")]
     for box in _pve(cfg, runner, api).sandboxes():
         exp = box.expires
-        rows.append((box.hostname, box.profile, box.project or "-", box.status, str(box.vmid),
+        rows.append((box.hostname, box.profile, box.template or "-", box.project or "-", box.status, str(box.vmid),
                      "-" if exp is None else f"{exp}{' (EXPIRED)' if exp < today else ''}",
                      cfg.fqdn(box.hostname)))
     widths = [max(len(r[c]) for r in rows) for c in range(len(rows[0]))]
@@ -1179,20 +1379,42 @@ def build_parser() -> argparse.ArgumentParser:
     project_opts(s, required=True)
     s.set_defaults(fn=cmd_inputs)
 
-    s = sub.add_parser("template", help="the base template: status, rebuild, finish")
+    s = sub.add_parser("template", help="the base templates: list, new, rebuild, and more")
     ts = s.add_subparsers(dest="action", required=True)
-    t_status = ts.add_parser("status", help="the template's name, what it caches, and its linked clones")
-    t_status.set_defaults(fn=cmd_template)
-    t_rebuild = ts.add_parser("rebuild", help="derive the version cache from the projects, copy the scripts, rebuild (35-40 min)")
-    t_rebuild.add_argument("--rm-sandboxes", action="store_true", help="destroy every sandbox first; the rebuild needs that")
-    t_rebuild.add_argument("--no-versions", action="store_true", help="keep host/local.conf as it is")
-    t_rebuild.add_argument("-y", "--yes", action="store_true")
-    t_rebuild.set_defaults(fn=cmd_template)
-    t_finish = ts.add_parser("finish", help="attach to a build that is running on the host (a dropped session)")
-    t_finish.set_defaults(fn=cmd_template)
+    t = ts.add_parser("list", help="each definition, and whether its template is built and current")
+    t.set_defaults(fn=cmd_template)
+    t = ts.add_parser("show", help="one template: its components, its build settings, its versions")
+    t.add_argument("name")
+    t.set_defaults(fn=cmd_template)
+    t = ts.add_parser("components", help="the components that a definition can list")
+    t.set_defaults(fn=cmd_template)
+    t = ts.add_parser("new", help="start your own definition in templates/local/")
+    t.add_argument("name")
+    t.add_argument("--from", dest="from_name", metavar="TEMPLATE", help="start from this definition")
+    t.set_defaults(fn=cmd_template)
+    t = ts.add_parser("rebuild", help="build a new version of templates (15-40 min each)")
+    t.add_argument("names", nargs="*", metavar="NAME")
+    t.add_argument("--all", action="store_true", help="every definition")
+    t.add_argument("--changed", action="store_true", help="each definition whose template is not current")
+    t.add_argument("--no-versions", action="store_true", help="do not add the versions that the projects need")
+    t.add_argument("-y", "--yes", action="store_true")
+    t.set_defaults(fn=cmd_template)
+    t = ts.add_parser("finish", help="attach to a build that is running on the host (a dropped session)")
+    t.add_argument("name")
+    t.set_defaults(fn=cmd_template)
+    t = ts.add_parser("prune", help="remove the old template versions that no sandbox uses")
+    t.set_defaults(fn=cmd_template)
+    t = ts.add_parser("rm", help="remove every version of a template that no sandbox uses")
+    t.add_argument("name")
+    t.add_argument("-y", "--yes", action="store_true")
+    t.set_defaults(fn=cmd_template)
+    t = ts.add_parser("adopt", help="make a template from before named templates a version of <name>")
+    t.add_argument("vmid", type=int)
+    t.add_argument("name")
+    t.set_defaults(fn=cmd_template)
 
-    s = sub.add_parser("versions", help="the Ruby, Node, Go and Docker images the projects need, and what the template caches")
-    s.add_argument("--write", action="store_true", help="write the union into host/local.conf for the next template build")
+    s = sub.add_parser("versions", help="the Ruby, Node, Go and Docker images the projects need, per template")
+    s.add_argument("--write", action="store_true", help="save them for the next build of each template")
     s.set_defaults(fn=cmd_versions)
 
     s = sub.add_parser("projects", help="the projects this Mac has used, their tokens and sandboxes")
@@ -1227,6 +1449,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("new", help="make a sandbox")
     s.add_argument("name")
     s.add_argument("--profile", choices=("agent", "personal"))
+    s.add_argument("--template", metavar="NAME", help="the template to clone (default: the project's, then default_template)")
     project_opts(s, required=False)
     s.add_argument("--with", dest="with_input", action="append", default=[], metavar="INPUT",
                    help="send this input to an agent sandbox (repeatable)")
@@ -1306,7 +1529,7 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, api=None) 
         cfg = load_config()
         return args.fn(args, cfg, runner or Runner(verbose=args.verbose), api) or 0
     except (ConfigError, ManifestError, InputError, names.NameError_, PveError, VmError, CommandError,
-            projects_mod.ProjectError) as exc:
+            projects_mod.ProjectError, templates_mod.TemplateError) as exc:
         print(f"sbx: error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

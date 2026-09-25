@@ -51,12 +51,11 @@ class Config:
     # -o PubkeyAuthentication=no: a Mac with many keys otherwise offers each
     # one and the host closes the connection before the password prompt.
     pve_ssh_options: list[str] = field(default_factory=lambda: ["-o", "PubkeyAuthentication=no"])
-    # The fields from here to template_images mirror host/defaults.conf (a
+    # The fields from here to template_vmid_max mirror host/defaults.conf (a
     # test keeps them equal). A setup changes them in host/local.conf.
     domain: str = "sbx.internal"
     agent_bridge: str = "vmbr77"
     personal_bridge: str = "vmbr78"
-    template_vmid: int = 9000
     vmid_min: int = 9100
     vmid_max: int = 9199
     vm_user: str = "dev"
@@ -68,9 +67,12 @@ class Config:
     lan_bridge: str = "vmbr0"
     vm_storage: str = "local-lvm"
     # What the template caches; `sbx versions` derives them from the projects.
-    template_ruby: str = "3.4.10"
-    template_node: str = "lts/*"
-    template_images: str = ""
+    template_pool: str = "sbx-templates"
+    template_vmid_min: int = 9000
+    template_vmid_max: int = 9099
+    # The template that `sbx new` clones when neither --template nor the
+    # project's manifest names one. Empty: the only template, if there is one.
+    default_template: str = ""
     default_profile: str = "agent"
     cores: int = 8
     memory_mb: int = 6144
@@ -114,11 +116,12 @@ class Config:
 
 _ENV_MAP = {
     "SBX_DOMAIN": "domain", "SBX_AGENT_BRIDGE": "agent_bridge", "SBX_PERSONAL_BRIDGE": "personal_bridge",
-    "SBX_TEMPLATE_VMID": "template_vmid", "SBX_VMID_MIN": "vmid_min", "SBX_VMID_MAX": "vmid_max",
+    "SBX_VMID_MIN": "vmid_min", "SBX_VMID_MAX": "vmid_max",
     "SBX_VM_USER": "vm_user", "SBX_AGENT_NET": "agent_net", "SBX_PERSONAL_NET": "personal_net",
     "SBX_GW_CTID": "gw_ctid", "SBX_GW_HOSTNAME": "gw_hostname", "SBX_TAILSCALE_TAG": "tailscale_tag",
     "SBX_LAN_BRIDGE": "lan_bridge", "SBX_VM_STORAGE": "vm_storage",
-    "SBX_RUBY_VERSIONS": "template_ruby", "SBX_NODE_VERSIONS": "template_node", "SBX_DOCKER_IMAGES": "template_images", "SBX_POOL": "pve_pool", "SBX_GPU_MAPPING": "gpu_mapping",
+    "SBX_TEMPLATE_POOL": "template_pool", "SBX_TEMPLATE_VMID_MIN": "template_vmid_min",
+    "SBX_TEMPLATE_VMID_MAX": "template_vmid_max", "SBX_POOL": "pve_pool", "SBX_GPU_MAPPING": "gpu_mapping",
 }
 
 

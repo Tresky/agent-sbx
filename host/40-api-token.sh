@@ -5,9 +5,7 @@
 #
 #   40-api-token.sh            create the pool, the user, the roles, the ACLs, the token
 #   40-api-token.sh --rotate   delete the token and create a new one
-#   40-api-token.sh --acl-only apply the ACLs again and stop; a template rebuild
-#                              needs this, because `qm destroy` removes every
-#                              ACL on the destroyed VM's path
+#   40-api-token.sh --acl-only apply the roles and the ACLs again, and stop
 #   40-api-token.sh --emit     with or without --rotate: print only the line
 #                              SBX_TOKEN=<token>, for `sbx setup` to capture
 #   --token-id NAME            the token to make or rotate; the default is "cli".
@@ -16,7 +14,7 @@
 #
 # What the token can do, and where:
 #   /pool/$SBX_POOL                 manage VMs (clone into, configure, start, snapshot, destroy)
-#   /vms/$SBX_TEMPLATE_VMID         clone it and read it; NOT change it, NOT destroy it
+#   /pool/$SBX_TEMPLATE_POOL        clone and read each template; NOT change or destroy one
 #   /storage/$SBX_VM_STORAGE        allocate disk space
 #   the two sandbox bridges         attach a NIC
 # What it cannot do: reach a VM outside the pool, the gateway container, the
@@ -66,12 +64,13 @@ set_role SbxBridge SDN.Use
 
 log "pool and user"
 pveum pool add "$SBX_POOL" --comment "sbx sandboxes" 2>/dev/null || true
+pveum pool add "$SBX_TEMPLATE_POOL" --comment "sbx templates" 2>/dev/null || true
 pveum user add "$USER_ID" --comment "sbx command line tool" 2>/dev/null || true
 
 log "permissions"
 acl() { pveum acl modify "$1" --users "$USER_ID" --roles "$2"; }
 acl "/pool/$SBX_POOL" SbxOperator
-acl "/vms/$SBX_TEMPLATE_VMID" SbxTemplateUser
+acl "/pool/$SBX_TEMPLATE_POOL" SbxTemplateUser
 acl "/storage/$SBX_VM_STORAGE" SbxStorage
 acl "/sdn/zones/localnetwork/$SBX_AGENT_BRIDGE" SbxBridge
 acl "/sdn/zones/localnetwork/$SBX_PERSONAL_BRIDGE" SbxBridge

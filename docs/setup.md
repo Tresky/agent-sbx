@@ -65,11 +65,14 @@ read the two files, so the two sides always agree. The most important values:
 - `SBX_LAN_BRIDGE`: the bridge that carries your LAN. The default is `vmbr0`.
 - `SBX_AGENT_NET` and `SBX_PERSONAL_NET`: the two sandbox subnets. They must not
   collide with your LAN or with a network that you visit.
-- `SBX_TEMPLATE_VMID`, `SBX_GW_CTID`, `SBX_VMID_MIN` and `SBX_VMID_MAX`: they
-  must not collide with a VM or a container that you have.
+- `SBX_TEMPLATE_VMID_MIN` to `SBX_TEMPLATE_VMID_MAX` (the templates),
+  `SBX_GW_CTID`, and `SBX_VMID_MIN` to `SBX_VMID_MAX` (the sandboxes): they must
+  not collide with a VM or a container that you have.
 - `SBX_GW_STORAGE` and `SBX_VM_STORAGE`: the default is `local-lvm`.
-- `SBX_TEMPLATE_EXTRAS`: the optional parts of the template, from
-  `template/extras/`. For example `odin` or `gis`.
+
+What goes into each template is not a host setting: it is a template
+definition. `sbx setup` asks which templates to build. [templates.md](templates.md)
+explains them.
 
 The steps below are the manual path. In them, `<pve-host>` is the address of
 your host, `<domain>` is `SBX_DOMAIN`, and `<agent-net>` is `SBX_AGENT_NET`.
@@ -173,37 +176,42 @@ UDP path between them. If `tailscale ping` reports
 `via DERP`, your router blocks that path and all sandbox traffic goes through a
 relay on the internet. Permit UDP port 41641 between the two subnets.
 
-## 5. The template
+## 5. The templates
+
+Build one template for each kind of project that you work on. `templates/`
+has the shared definitions (`minimal`, `rails`, `go`, `rust`, `python`), and
+[templates.md](templates.md) explains how to make your own. For each one:
 
 ```
-ssh -t root@<pve-host> bash /root/sbx/host/30-template-build.sh
+ssh -t root@<pve-host> bash /root/sbx/host/30-template-build.sh <name>
 ```
 
-The build takes 15 to 40 minutes. The VM powers off when the build is good. It
+Each build takes 15 to 40 minutes. The VM powers off when the build is good. It
 stays up when the build fails or stalls, and the script then prints the end of
-the provision log. For more detail:
+the provision log. The next build of that template removes the failed VM. For
+more detail:
 
 ```
-ssh -o PubkeyAuthentication=no -t root@<pve-host> bash /root/sbx/host/vm-diag.sh
+ssh -o PubkeyAuthentication=no -t root@<pve-host> bash /root/sbx/host/vm-diag.sh <vmid>
 ```
 
-Check: `qm config <template-vmid> | grep template` prints `template: 1`.
+Check: `qm list` shows a VM named `sbx-tpl-<name>-<date>`, and
+`qm config <vmid> | grep template` prints `template: 1`.
 
 If your SSH session drops during the build, the VM continues on its own. Run
-the script again with `--finish`: it attaches to the VM, waits, seals it, and
-converts it.
+the script again with `--finish <name>`: it attaches to the VM, waits, seals
+it, and converts it.
 
-Every later rebuild is one command on your Mac, once step 7 is done:
+Every later build is one command on your Mac, once step 7 is done:
 
 ```
-sbx template rebuild
+sbx template rebuild <name>
 ```
 
-It derives the version cache from your projects (`sbx versions`), copies the
-scripts to the host, asks for the root password once, and runs the build.
-Proxmox refuses to destroy a template while linked clones use it, so the
-command refuses while sandboxes exist; `--rm-sandboxes` destroys them first.
-A rebuild gives the API token its access to the new template again by itself.
+It adds the versions that your projects need (`sbx versions`), copies the
+scripts and the definitions to the host, asks for the root password once, and
+runs the build. Each build is a new version; the sandboxes of the old version
+keep it.
 
 ## 6. The API token
 
@@ -228,7 +236,7 @@ You can skip this step. `sbx setup --mac-only` in step 7 makes a token for
 each Mac by itself.
 
 Check, in the web UI: **Datacenter**, **Permissions**. The user `sbx@pve` has a
-role on `/pool/sbx`, on the template, on the storage, and on the two sandbox
+role on `/pool/sbx`, on `/pool/sbx-templates`, on the storage, and on the two sandbox
 bridges. It has no role on `/`, on `vmbr0`, or on a different VM.
 
 ## 7. Your Mac

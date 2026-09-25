@@ -31,7 +31,8 @@ _GIT_URL_RES = (
 )
 
 _INPUT_KEYS = {"name", "kind", "dest", "url", "required", "secret", "about", "placeholder", "agent"}
-_RECIPE_KEYS = {"setup", "env_file"}
+_RECIPE_KEYS = {"setup", "env_file", "template"}
+_TEMPLATE_RE = re.compile(r"^[a-z][a-z0-9-]{0,23}$")
 
 
 class ManifestError(ValueError):
@@ -55,6 +56,9 @@ class Input:
 class Manifest:
     setup: str = DEFAULT_SETUP
     env_file: str = DEFAULT_ENV_FILE
+    # The template to clone. Safe to take from an untrusted manifest: it can
+    # only choose among the templates that the user built.
+    template: str = ""
     inputs: tuple[Input, ...] = field(default_factory=tuple)
 
 
@@ -163,6 +167,9 @@ def parse(text: str) -> Manifest:
         raise ManifestError(f"[recipe] takes only {sorted(_RECIPE_KEYS)}")
     setup = safe_relpath(recipe.get("setup", DEFAULT_SETUP), "recipe.setup")
     env_file = safe_relpath(recipe.get("env_file", DEFAULT_ENV_FILE), "recipe.env_file")
+    template = recipe.get("template", "")
+    if template and not (isinstance(template, str) and _TEMPLATE_RE.match(template)):
+        raise ManifestError("recipe.template must be a template name (lowercase letters, digits, hyphens)")
 
     raw_inputs = raw.get("input", [])
     if not isinstance(raw_inputs, list):
@@ -179,4 +186,4 @@ def parse(text: str) -> Manifest:
             if item.dest in dests or item.dest == env_file:
                 raise ManifestError(f"input {item.name!r}: dest {item.dest!r} is used twice")
             dests.add(item.dest)
-    return Manifest(setup=setup, env_file=env_file, inputs=inputs)
+    return Manifest(setup=setup, env_file=env_file, inputs=inputs, template=template)

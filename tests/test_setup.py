@@ -60,16 +60,16 @@ class ProposeTest(unittest.TestCase):
         # 10.77/24 is on the Mac and 10.79/16 is on the host, so the pairs 77/78 and 79/80 are out.
         self.assertEqual((got["SBX_AGENT_NET"], got["SBX_PERSONAL_NET"]), ("10.81.0", "10.82.0"))
         # 9150 is taken, so the block moves to 10000.
-        self.assertEqual((got["SBX_TEMPLATE_VMID"], got["SBX_GW_CTID"], got["SBX_VMID_MIN"], got["SBX_VMID_MAX"]),
-                         ("10000", "10001", "10100", "10199"))
+        self.assertEqual((got["SBX_TEMPLATE_VMID_MIN"], got["SBX_TEMPLATE_VMID_MAX"], got["SBX_GW_CTID"],
+                          got["SBX_VMID_MIN"], got["SBX_VMID_MAX"]), ("10000", "10099", "10001", "10100", "10199"))
         # zfs over plain LVM, which cannot make a linked clone.
         self.assertEqual((got["SBX_VM_STORAGE"], got["SBX_GW_STORAGE"]), ("local-zfs", "local-zfs"))
         self.assertEqual((got["SBX_GW_TEMPLATE_STORAGE"], got["SBX_SNIPPET_STORAGE"]), ("local", "local"))
 
     def test_values_in_local_conf_stay(self):
-        current = {"SBX_AGENT_NET": "10.77.0", "SBX_TEMPLATE_VMID": "9000"}
+        current = {"SBX_AGENT_NET": "10.77.0", "SBX_TEMPLATE_VMID_MIN": "9000"}
         got = {c.key: c.value for c in hostsetup.propose(DISC, hostsetup.mac_networks(NETSTAT), current)}
-        self.assertEqual((got["SBX_AGENT_NET"], got["SBX_TEMPLATE_VMID"]), ("10.77.0", "9000"))
+        self.assertEqual((got["SBX_AGENT_NET"], got["SBX_TEMPLATE_VMID_MIN"]), ("10.77.0", "9000"))
 
     def test_no_bridge_or_no_clone_storage_stops(self):
         with self.assertRaisesRegex(hostsetup.SetupError, "no Linux bridge"):
@@ -81,7 +81,7 @@ class ProposeTest(unittest.TestCase):
     def test_typed_values_are_checked(self):
         mac = hostsetup.mac_networks(NETSTAT)
         good = {"SBX_DOMAIN": "lab.internal", "SBX_AGENT_NET": "10.81.0", "SBX_PERSONAL_NET": "10.82.0",
-                "SBX_TEMPLATE_VMID": "10000", "SBX_GW_CTID": "10001"}
+                "SBX_TEMPLATE_VMID_MIN": "10000", "SBX_GW_CTID": "10001"}
         self.assertEqual(hostsetup.check_choices(good, DISC, mac, {}), [])
         bad = {**good, "SBX_DOMAIN": "lab.local", "SBX_AGENT_NET": "192.168.1", "SBX_GW_CTID": "100"}
         problems = " | ".join(hostsetup.check_choices(bad, DISC, mac, {}))
@@ -152,6 +152,7 @@ class WizardTest(_WizardBase):
                         "",              # accept the values
                         "",              # the LAN has DHCP
                         "",              # the policy pause
+                        "rust minimal",  # the templates to build
                         "",              # the Include line
                         ])
         with mock.patch("builtins.input", lambda *_: next(answers)), mock.patch("builtins.print"):
@@ -160,7 +161,8 @@ class WizardTest(_WizardBase):
         steps = [c[-1] for c in self.cmds if c[0] == "ssh" and "/root/sbx/host/" in c[-1]]
         self.assertEqual([s.split("/host/")[1] for s in steps],
                          ["10-bridges.sh", "20-gw-create.sh", "20-gw-create.sh --tailscale",
-                          "30-template-build.sh", f"40-api-token.sh --rotate --emit --token-id {hostsetup.token_id()}"])
+                          "30-template-build.sh rust", "30-template-build.sh minimal",
+                          f"40-api-token.sh --rotate --emit --token-id {hostsetup.token_id()}"])
         # The copy goes before the first host script, and after local.conf exists.
         first_scp = next(i for i, c in enumerate(self.cmds) if c[0] == "scp")
         first_step = next(i for i, c in enumerate(self.cmds) if c[0] == "ssh" and "/root/sbx/host/" in c[-1])
@@ -175,13 +177,22 @@ class WizardTest(_WizardBase):
         # The address is in the certificate, so the CA is used, not the fingerprint.
         self.assertTrue(cfg.pve_ca_file.endswith("pve-root-ca.crt"))
         self.assertEqual(cfg.pve_fingerprint, "")
+        # The first template built becomes the default; the copy carries the definitions.
+        self.assertEqual(cfg.default_template, "rust")
+        scp = next(c for c in self.cmds if c[0] == "scp")
+        self.assertTrue(any(a.endswith("/templates") for a in scp) and any(a.endswith("/sbxlib") for a in scp))
 
     def test_a_done_host_skips_every_host_step(self):
         self.cmds = []
         self.local.write_text("SBX_AGENT_NET=10.81.0\nSBX_PERSONAL_NET=10.82.0\n")
         done = self.respond
+        disc = {**DISC, "guests": DISC["guests"] + [
+            {"vmid": 9000, "name": "sbx-tpl-rails-20260925-1200", "type": "qemu", "template": True,
+             "tags": ["sbx-template", "sbx-tpl-rails", "sbx-h-abc"]}]}
 
         def respond(argv, data):
+            if argv[0] == "ssh" and argv[-1] == "bash -s":
+                return json.dumps(disc)
             if argv[0] == "ssh" and any(k in argv[-1] for k in ("ip link show", "tailscale status", "pct status", "qm config")):
                 self.cmds.append(argv)
                 return ""
@@ -202,7 +213,9 @@ class ExistingInstallTest(_WizardBase):
         # The gateway exists under the default id and name, with the default
         # bridge vmbr77: the wizard must not move to vmbr79 or new ids.
         self.cmds = []
-        disc = {**DISC, "guests": DISC["guests"] + [{"vmid": 9001, "name": "sbx-gw", "type": "lxc"}]}
+        disc = {**DISC, "guests": DISC["guests"] + [
+            {"vmid": 9001, "name": "sbx-gw", "type": "lxc"},
+            {"vmid": 9000, "name": "sbx-base-20260924", "type": "qemu", "template": True, "tags": ["sbx-template"]}]}
         respond = self.respond
 
         def responder(argv, data):
@@ -210,13 +223,17 @@ class ExistingInstallTest(_WizardBase):
                 return json.dumps(disc)
             return respond(argv, data)
 
-        answers = iter(["192.168.1.5", "", "", "", ""])
+        answers = iter(["192.168.1.5", "", "", "", "", ""])  # host, values, policy, adopt, Include, spare
         with mock.patch("builtins.input", lambda *_: next(answers)), mock.patch("builtins.print"), \
                 mock.patch("sbxlib.hostsetup.socket.gethostbyname", return_value="10.77.0.1"):
             hostsetup.cmd_setup(mock.Mock(host=None, mac_only=False), load(), Runner(responder=responder))
         written = parse_env_file(self.local.read_text())
-        self.assertEqual((written["SBX_AGENT_BRIDGE"], written["SBX_AGENT_NET"], written["SBX_TEMPLATE_VMID"]),
+        self.assertEqual((written["SBX_AGENT_BRIDGE"], written["SBX_AGENT_NET"], written["SBX_TEMPLATE_VMID_MIN"]),
                          ("vmbr77", "10.77.0", "9000"))
+        steps = [c[-1].split("/host/")[1] for c in self.cmds if c[0] == "ssh" and "/root/sbx/host/" in c[-1]]
+        self.assertIn("30-template-build.sh --adopt 9000 default", steps)
+        self.assertFalse([s for s in steps if s.startswith("30-template-build.sh") and "--adopt" not in s])
+        self.assertEqual(load().default_template, "default")
 
 
 class MacOnlyTest(_WizardBase):
@@ -248,6 +265,38 @@ class MacOnlyTest(_WizardBase):
         steps = [c[-1].split("/host/")[1] for c in self.cmds if c[0] == "ssh" and "/root/sbx/host/" in c[-1]]
         self.assertEqual(steps, ["40-api-token.sh --rotate --emit --token-id cli-coworkers-macbook"])
         self.assertEqual(load().domain, "lab.internal")
+
+    def test_the_hosts_local_templates_come_along_but_never_over_mine(self):
+        import base64
+        import io
+        import tarfile
+        repo = self.local.parent / "repo"
+        (repo / "templates" / "local").mkdir(parents=True)
+        (repo / "templates" / "local" / "mine.toml").write_text("# my own copy\n")
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            for name, body in (("templates/local/web.toml", b"components = []\n"),
+                               ("templates/local/mine.toml", b"# the host's copy\n"),
+                               ("../escape.toml", b"no")):
+                info = tarfile.TarInfo(name)
+                info.size = len(body)
+                tar.addfile(info, io.BytesIO(body))
+        payload = base64.b64encode(buf.getvalue()).decode()
+        respond = self.respond
+
+        def responder(argv, data):
+            if argv[0] == "ssh" and "tar -cf -" in argv[-1]:
+                return payload
+            return respond(argv, data)
+
+        self.cmds = []
+        wizard = hostsetup.Wizard(mock.Mock(host="192.168.1.5", mac_only=True), Runner(responder=responder))
+        wizard.target = "root@192.168.1.5"
+        with mock.patch("sbxlib.hostsetup.REPO_ROOT", repo), mock.patch("builtins.print"):
+            wizard._fetch_local_templates()
+        self.assertEqual((repo / "templates" / "local" / "web.toml").read_text(), "components = []\n")
+        self.assertEqual((repo / "templates" / "local" / "mine.toml").read_text(), "# my own copy\n")
+        self.assertFalse((repo.parent / "escape.toml").exists())
 
     def test_a_different_local_conf_is_replaced_only_on_a_yes(self):
         self.local.write_text("SBX_DOMAIN=other.internal\n")

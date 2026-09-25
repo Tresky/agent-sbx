@@ -60,15 +60,52 @@ def mac_checks(cfg: Config, runner: Runner) -> list[Check]:
 
 def token_path_allowed(cfg: Config, path: str) -> bool:
     """The paths where host/40-api-token.sh gives the token a right. A VM in
-    the sandbox id range inherits its rights from the pool."""
-    allowed = {f"/pool/{cfg.pve_pool}", f"/vms/{cfg.template_vmid}", f"/storage/{cfg.vm_storage}",
+    the sandbox or the template id range inherits its rights from a pool (a
+    template from before named templates had a right on its own id)."""
+    allowed = {f"/pool/{cfg.pve_pool}", f"/pool/{cfg.template_pool}", f"/storage/{cfg.vm_storage}",
                f"/sdn/zones/localnetwork/{cfg.agent_bridge}", f"/sdn/zones/localnetwork/{cfg.personal_bridge}"}
     if cfg.gpu_mapping:
         allowed.add(f"/mapping/pci/{cfg.gpu_mapping}")
     if path in allowed:
         return True
     vmid = path.removeprefix("/vms/")
-    return path.startswith("/vms/") and vmid.isdigit() and cfg.vmid_min <= int(vmid) <= cfg.vmid_max
+    return path.startswith("/vms/") and vmid.isdigit() and (
+        cfg.vmid_min <= int(vmid) <= cfg.vmid_max or cfg.template_vmid_min <= int(vmid) <= cfg.template_vmid_max)
+
+
+def template_checks(cfg: Config, pve) -> list[Check]:
+    """One line per built template: current, out of date, or from before
+    named templates. A FAIL when none is built, or the default is missing."""
+    from . import cli
+    built = pve.templates()
+    if not built:
+        return [Check("FAIL", "templates", "none is built. Build one: sbx template rebuild <name>")]
+    out = []
+    if cfg.default_template and cfg.default_template not in built:
+        out.append(Check("FAIL", "default template", f"'{cfg.default_template}' is not built: "
+                                                     f"sbx template rebuild {cfg.default_template}"))
+    try:
+        defs = cli._definitions()
+    except Exception as exc:
+        return out + [Check("WARN", "templates", f"a definition does not load: {exc}")]
+    for name, versions in built.items():
+        newest = versions[-1]
+        label = f"template {name}"
+        old = f"; {len(versions) - 1} old version(s) kept for sandboxes" if len(versions) > 1 else ""
+        if newest.fingerprint == "legacy" and newest.vm_name.startswith("sbx-base"):
+            out.append(Check("WARN", label, f"VM {newest.vmid} is from before named templates. "
+                                            f"Adopt it: sbx template adopt {newest.vmid} {name}"))
+            continue
+        state = cli._state(defs.get(name), versions)
+        if state == "current":
+            out.append(Check("ok", label, f"{newest.vm_name}{old}"))
+        elif state == "no definition":
+            out.append(Check("WARN", label, f"{newest.vm_name} has no definition on this Mac; "
+                                            f"`sbx template new {name}` writes one"))
+        else:
+            out.append(Check("WARN", label, f"{newest.vm_name} is older than its definition: "
+                                            f"sbx template rebuild {name}{old}"))
+    return out
 
 
 def api_checks(cfg: Config, runner: Runner, api=None) -> list[Check]:
@@ -81,12 +118,9 @@ def api_checks(cfg: Config, runner: Runner, api=None) -> list[Check]:
         return [Check("FAIL", "Proxmox API", f"{exc}")]
     out = [Check("ok", "Proxmox API", f"{cfg.pve_api}, Proxmox {version.get('version', '?')}")]
     try:
-        tpl = cli._template_info(pve)
+        out += template_checks(cfg, pve)
     except PveError as exc:
-        return out + [Check("FAIL", "template", str(exc))]
-    out.append(Check("ok", "template", f"{tpl['vmid']} {tpl.get('name', '')}") if tpl
-               else Check("FAIL", "template", f"{cfg.template_vmid} is not visible to the token. "
-                                              "Build it (`sbx setup`), then run host/40-api-token.sh --acl-only"))
+        return out + [Check("FAIL", "templates", str(exc))]
     try:
         perms = pve.api("GET", "/access/permissions") or {}
     except PveError as exc:
@@ -94,7 +128,7 @@ def api_checks(cfg: Config, runner: Runner, api=None) -> list[Check]:
     wide = [p for p, privs in perms.items() if any(privs.values()) and not token_path_allowed(cfg, p)]
     out.append(Check("FAIL", "token scope", "the token has rights on " + ", ".join(wide)
                      + "; it must have only the rights of host/40-api-token.sh") if wide
-               else Check("ok", "token scope", f"pool {cfg.pve_pool}, the template, the two sandbox bridges"))
+               else Check("ok", "token scope", f"pool {cfg.pve_pool}, the templates, the two sandbox bridges"))
     return out
 
 

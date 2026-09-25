@@ -1,0 +1,5 @@
+description = "Rust"
+components  = ["rust"]
+
+[rust]
+toolchains = ["stable"]

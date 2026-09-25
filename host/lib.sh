@@ -39,3 +39,15 @@ render() {
   done
   printf '%s\n' "$out"
 }
+
+# write_build_conf <file> — every SBX_ variable, one `declare` line each, for
+# the template build to source in the VM. By NAME, not by a filter over `set`:
+# a multi-line variable of another name can hold lines that start with SBX_,
+# and they would overwrite the real values when the file is sourced.
+write_build_conf() {
+  local name
+  : > "$1"
+  for name in $(compgen -v SBX_); do
+    declare -p "$name" >> "$1"
+  done
+}

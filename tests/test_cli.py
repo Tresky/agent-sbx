@@ -85,6 +85,7 @@ class NewTest(unittest.TestCase):
         subprocess.run(git + ["remote", "add", "origin", "git@github.com:me/app.git"], check=True)
 
         self.agent_keys = 0  # ssh-add -l exit code: 0 = keys present
+        self.more_resources = []  # more built templates, for the template choice
         self.patches = [mock.patch.dict(os.environ, {"SBX_CONFIG_DIR": str(home)}),
                         mock.patch("sbxlib.cli.resolves", return_value=True),
                         mock.patch("sbxlib.cli.dns_has", return_value=True),
@@ -120,7 +121,9 @@ class NewTest(unittest.TestCase):
                 Path(args[args.index("-key-file") + 1]).write_text("KEY")
             return ""
 
-        code = cli.main(["new", *argv], runner=Runner(responder=responder), api=FakeApi(events, existing))
+        api = FakeApi(events, existing)
+        api.resources += self.more_resources
+        code = cli.main(["new", *argv], runner=Runner(responder=responder), api=api)
         return code, events, payloads
 
     @staticmethod
@@ -129,6 +132,40 @@ class NewTest(unittest.TestCase):
             if event[0] == kind and all(f in " ".join(map(str, event[1:])) for f in fragments):
                 return i
         raise AssertionError(f"no {kind} event with {fragments}")
+
+    RUST = {"type": "qemu", "vmid": 9002, "name": "sbx-tpl-rust-20260925-1200", "node": "pve", "template": 1,
+            "tags": "sbx-template;sbx-tpl-rust;sbx-h-abc"}
+    RUST_OLD = {"type": "qemu", "vmid": 9003, "name": "sbx-tpl-rust-20260101-0900", "node": "pve", "template": 1,
+                "tags": "sbx-template;sbx-tpl-rust;sbx-h-old"}
+
+    def clones(self, events):
+        return [e[2] for e in events if e[0] == "api" and e[1] == "POST" and e[2].endswith("/clone")]
+
+    def test_two_templates_and_no_choice_make_no_vm(self):
+        self.more_resources = [self.RUST]
+        code, events, _ = self.run_new("lab")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.clones(events), [])
+
+    def test_template_option_clones_the_newest_version(self):
+        self.more_resources = [self.RUST_OLD, self.RUST]
+        code, events, _ = self.run_new("lab", "--template", "rust")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.clones(events), ["/nodes/pve/qemu/9002/clone"])
+        config = next(e[3] for e in events if e[0] == "api" and e[1] == "PUT" and e[2].endswith("/config"))
+        self.assertIn("sbx-tpl-rust", config["tags"])
+
+    def test_a_template_that_is_not_built_makes_no_vm(self):
+        code, events, _ = self.run_new("lab", "--template", "go")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.clones(events), [])
+
+    def test_the_manifest_names_the_template(self):
+        self.more_resources = [self.RUST]
+        (self.app / ".sandbox/sandbox.toml").write_text('[recipe]\ntemplate = "rust"\n' + MANIFEST)
+        code, events, _ = self.run_new("lab", "--project", str(self.app), "--with", "key")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.clones(events), ["/nodes/pve/qemu/9002/clone"])
 
     def test_agent_without_a_decision_makes_no_vm(self):
         code, events, _ = self.run_new("myapp", "--project", str(self.app))
@@ -154,7 +191,7 @@ class NewTest(unittest.TestCase):
         self.assertEqual(events[clone][3], {"newid": 9101, "name": "sbx-myapp", "pool": "sbx"})
         params = events[config][3]
         self.assertEqual(params["net0"], "virtio,bridge=vmbr77")
-        self.assertRegex(params["tags"], r"^sbx;sbx-agent;sbx-exp-\d{8};sbx-proj-app$")
+        self.assertRegex(params["tags"], r"^sbx;sbx-agent;sbx-tpl-default;sbx-exp-\d{8};sbx-proj-app$")
         self.assertEqual(events[snapshot][3], {"snapname": "clean"})
         pos("cmd", "git clone -q -- git@github.com:me/ui.git code/ui")
 
@@ -172,7 +209,7 @@ class NewTest(unittest.TestCase):
         code, events, _ = self.run_new("lab", "--profile", "personal", "--project", str(self.app))
         self.assertEqual(code, 0)
         params = events[self.pos(events, "api", "PUT", "/config")][3]
-        self.assertEqual((params["net0"], params["tags"]), ("virtio,bridge=vmbr78", "sbx;sbx-personal;sbx-proj-app"))
+        self.assertEqual((params["net0"], params["tags"]), ("virtio,bridge=vmbr78", "sbx;sbx-personal;sbx-tpl-default;sbx-proj-app"))
         self.assertFalse([e for e in events if e[0] == "api" and e[2].endswith("/snapshot")])
         forwarded = [e[1] for e in events if e[0] == "cmd" and "ForwardAgent=yes" in e[1]]
         self.assertTrue(forwarded and all("git clone" in line for line in forwarded),
@@ -406,7 +443,7 @@ class GuideTest(unittest.TestCase):
         self.assertEqual(outs[0], outs[1])
         text = outs[0]
         for needle in ("sbx new lab", "sbx git-token", "sbx.internal", "agent", "personal", "usage.md",
-                       "9001 sbx-gw", "9000 sbx-base-*", "vmbr77, vmbr78", "10.77.0.0/24"):
+                       "9001 sbx-gw", "sbx-tpl-*", "sbx template rebuild", "vmbr77, vmbr78", "10.77.0.0/24"):
             self.assertIn(needle, text)
         self.assertLess(text.count("\n"), 80, "the guide must fit two screens at most")
 
@@ -428,7 +465,7 @@ class SmallTests(unittest.TestCase):
         self.assertEqual(env, {"A": "1", "B": "x y", "C": ""})
         none = Path("/nonexistent")
         cfg = load(config_path=none, local_path=none)
-        self.assertEqual((cfg.domain, cfg.agent_bridge, cfg.template_vmid), ("sbx.internal", "vmbr77", 9000))
+        self.assertEqual((cfg.domain, cfg.agent_bridge, cfg.template_pool), ("sbx.internal", "vmbr77", "sbx-templates"))
 
     def test_config_defaults_match_defaults_conf(self):
         # A Config() made in code must agree with the file that the host reads.

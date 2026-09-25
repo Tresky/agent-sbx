@@ -7,6 +7,8 @@ setup    = ".sandbox/setup.sh"
 # dotenv-rails and Vite both read this file, so the app sees the env inputs
 # with no `source` step.
 env_file = ".env.local"
+# The template to clone. Build it first: sbx template rebuild rails
+# template = "rails"
 
 [[input]]
 name     = "rails-master-key"

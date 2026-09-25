@@ -140,6 +140,15 @@ class Sandbox:
         return ""
 
     @property
+    def template(self) -> str:
+        # A sandbox from before named templates is a clone of the one old
+        # template, which counts as "default".
+        for tag in self.tags:
+            if tag.startswith("sbx-tpl-"):
+                return tag[8:]
+        return "default"
+
+    @property
     def expires(self) -> dt.date | None:
         for tag in self.tags:
             if tag.startswith("sbx-exp-"):
@@ -150,9 +159,25 @@ class Sandbox:
         return None
 
 
+@dataclass
+class TemplateVm:
+    """One built version of a template. host/30-template-build.sh tags it
+    sbx-template, sbx-tpl-<name> and sbx-h-<fingerprint>. A template from
+    before named templates has the first tag only: it counts as "default"."""
+    vmid: int
+    node: str
+    vm_name: str
+    name: str
+    fingerprint: str
+
+
+def _tags(resource: dict) -> tuple[str, ...]:
+    return tuple(t for t in (resource.get("tags") or "").replace(",", ";").split(";") if t)
+
+
 class Pve:
     def __init__(self, cfg: Config, api):
-        self.cfg, self.api, self._template_node = cfg, api, None
+        self.cfg, self.api = cfg, api
 
     # --- plumbing ---
     def _vm(self, node: str, vmid: int, tail: str = "") -> str:
@@ -178,19 +203,33 @@ class Pve:
     def resources(self) -> list[dict]:
         return [r for r in self.api("GET", "/cluster/resources", {"type": "vm"}) or []]
 
-    def template_node(self) -> str:
-        if self._template_node is None:
-            hit = next((r for r in self.resources() if int(r["vmid"]) == self.cfg.template_vmid), None)
-            if hit is None:
-                raise PveError(f"template {self.cfg.template_vmid} is not visible to the token; "
-                               "run host/30-template-build.sh, then host/40-api-token.sh")
-            self._template_node = hit["node"]
-        return self._template_node
+    def templates(self, resources: list[dict] | None = None) -> dict[str, list[TemplateVm]]:
+        """Every built template, by name; each name's versions oldest first.
+        The newest version is the one that a new sandbox clones."""
+        out: dict[str, list[TemplateVm]] = {}
+        for r in self.resources() if resources is None else resources:
+            tags = _tags(r)
+            if r.get("type") != "qemu" or not r.get("template") or "sbx-template" not in tags:
+                continue
+            name = next((t[8:] for t in tags if t.startswith("sbx-tpl-")), "default")
+            fp = next((t[6:] for t in tags if t.startswith("sbx-h-")), "legacy")
+            out.setdefault(name, []).append(TemplateVm(int(r["vmid"]), r.get("node", ""), r.get("name", ""), name, fp))
+        for versions in out.values():
+            versions.sort(key=lambda v: (v.vm_name, v.vmid))
+        return dict(sorted(out.items()))
+
+    def template(self, name: str) -> TemplateVm:
+        built = self.templates()
+        if name not in built:
+            known = ", ".join(built) or "none"
+            raise PveError(f"template {name!r} is not built (built: {known}). "
+                           f"Build it: sbx template rebuild {name}")
+        return built[name][-1]
 
     def sandboxes(self) -> list[Sandbox]:
         out = []
         for r in self.resources():
-            tags = tuple(t for t in (r.get("tags") or "").replace(",", ";").split(";") if t)
+            tags = _tags(r)
             if r.get("type") != "qemu" or r.get("template") or "sbx" not in tags:
                 continue
             out.append(Sandbox(int(r["vmid"]), r.get("name", ""), r.get("node", ""), r.get("status", ""), tags))
@@ -231,16 +270,16 @@ class Pve:
         return None
 
     # --- lifecycle ---
-    def create(self, vmid: int, hostname: str, profile: str, pubkey: str, *, cores: int,
-               memory_mb: int, disk_gb: int | None, expires: dt.date | None,
+    def create(self, template: TemplateVm, vmid: int, hostname: str, profile: str, pubkey: str, *,
+               cores: int, memory_mb: int, disk_gb: int | None, expires: dt.date | None,
                project: str = "") -> str:
         """Returns the node the sandbox lives on."""
-        cfg, node = self.cfg, self.template_node()
+        cfg, node = self.cfg, template.node
         # A template clones as a LINKED clone by default: seconds, not minutes.
         # `pool` puts the VM where the token's permissions apply.
-        self._wait(node, self.api("POST", self._vm(node, cfg.template_vmid, "/clone"),
+        self._wait(node, self.api("POST", self._vm(node, template.vmid, "/clone"),
                                   {"newid": vmid, "name": hostname, "pool": cfg.pve_pool}))
-        tags = ["sbx", f"sbx-{profile}"] + ([f"sbx-exp-{expires:%Y%m%d}"] if expires else [])
+        tags = ["sbx", f"sbx-{profile}", f"sbx-tpl-{template.name}"] + ([f"sbx-exp-{expires:%Y%m%d}"] if expires else [])
         if project:
             tags.append(projects.tag(project))
         self.api("PUT", self._vm(node, vmid, "/config"), {

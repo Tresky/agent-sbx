@@ -28,7 +28,8 @@ sbx doctor --isolation     # proves the setup, with one probe sandbox per profil
 
 ## What you get
 
-- A new VM in approximately one minute. It is a linked clone of one template.
+- A new VM in approximately one minute. It is a linked clone of one of your
+  templates: one for Rails, one for Rust, one of your own.
 - A DNS name for each VM: `sbx-<name>.sbx.internal`. No record is written
   when you make a VM, and no record is removed when you destroy it.
 - Each port is direct, with the same port number: `https://sbx-myapp.sbx.internal:4400`.
@@ -47,7 +48,8 @@ sbx doctor --isolation     # proves the setup, with one probe sandbox per profil
 | `bin/sbx`, `sbxlib/` | your Mac | the command line tool |
 | `host/` | the Proxmox host | makes the bridges, the gateway, the template, and the scoped API token. `host/local.conf` holds your values |
 | `gw/` | the gateway container | dnsmasq, the nftables guard, Tailscale |
-| `template/` | the template VM | the toolchains and the `sbx-mirror` service. `template/extras/` holds the optional parts |
+| `template/` | the template VMs | the core build, the components (`template/components/`), and the `sbx-mirror` service |
+| `templates/` | your Mac and the host | the template definitions: one per kind of project |
 | `tailscale/` | the Tailscale admin console | the policy that the design needs |
 | `examples/` | a project repository | recipes and manifests to copy |
 | `tests/` | your Mac (some need Docker) | unit tests and four behavior tests |
@@ -59,6 +61,7 @@ sbx doctor --isolation     # proves the setup, with one probe sandbox per profil
 | [docs/setup.md](docs/setup.md) | set up sbx on your own host and Mac |
 | [docs/usage.md](docs/usage.md) | make, reach and remove sandboxes each day |
 | [docs/projects.md](docs/projects.md) | give a project its recipe, inputs and pane layout |
+| [docs/templates.md](docs/templates.md) | have one template for each kind of project, and make your own |
 | [docs/security.md](docs/security.md) | know what an agent in a sandbox can and cannot reach |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | fix a problem that `sbx doctor` does not explain |
 | [docs/reference.md](docs/reference.md) | look up a command, a setting or a file |

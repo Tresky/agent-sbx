@@ -15,6 +15,7 @@ in this repository connects to another person's host.
 | The setup, step by step, with a check for each step | `docs/setup.md` |
 | Daily use: profiles, sandboxes, ports, Claude, snapshots | `docs/usage.md` |
 | A project's recipe, manifest and pane layout (`.sandbox/`) | `docs/projects.md` |
+| Templates: which exist, and how to make or change one | `docs/templates.md` |
 | What an agent sandbox can reach, and why | `docs/security.md` |
 | A symptom and its fix | `docs/troubleshooting.md` |
 | Every command, setting and file | `docs/reference.md` |
@@ -32,7 +33,9 @@ in this repository connects to another person's host.
 | `sbxlib/doctor.py` | the Mac | `sbx doctor`: the checks of `docs/setup.md` |
 | `host/` | the Proxmox host, as root | the bridges, the gateway, the template, the API token |
 | `gw/` | the gateway container | dnsmasq, the nftables guard, Tailscale |
-| `template/` | the template VM | the toolchains; `template/extras/` holds the optional parts |
+| `template/` | the template VMs | the core build (`provision.sh`) and the components (`template/components/`) |
+| `templates/` | the Mac and the host | the template definitions; `templates/local/` is the user's own, not in git |
+| `sbxlib/templates.py` | the Mac and the host | reads a definition; the host runs it during a build |
 | `tailscale/` | the Tailscale admin console | the policy fragment |
 
 The settings come from three layers, lowest first:
@@ -55,12 +58,13 @@ A shared key (the domain, the bridges, the subnets, the IDs) belongs in
 - **Ask before a command that changes the host or makes VMs.** These commands
   change real infrastructure:
   - `sbx setup` without `--mac-only` (it changes the host network and builds VMs)
-  - `sbx template rebuild` (it destroys and rebuilds the template)
+  - `sbx template rebuild`, `rm`, `prune` and `adopt` (they build or remove template VMs)
   - `sbx doctor --isolation` (it makes two VMs and removes them)
   - `sbx new`, `sbx rm`, `sbx gc`, `sbx rollback`
 - **These commands are safe to run at any time:** `sbx doctor`, `sbx guide`,
   `sbx list`, `sbx projects`, `sbx inputs <project>`, `sbx versions`,
-  `sbx template status`, and the unit tests.
+  `sbx template list`, `sbx template show`, `sbx template components`, and the
+  unit tests.
 
 ## How to set up sbx for a user
 
@@ -87,7 +91,8 @@ terminal. The agent prepares, explains, and checks.
 
 4. **Tell the user which command to run in their own terminal:**
    - A new host: `sbx setup`. It takes about 30 to 50 minutes, because it
-     builds the template.
+     builds a template. Ask the user which kinds of projects they work on,
+     and suggest the matching templates (`sbx template list` shows them).
    - A host that is set up already: `sbx setup --mac-only`. It does not change
      the host.
 
@@ -119,6 +124,20 @@ host with an existing gateway keeps its values.
    sandbox needs `--with <input>` or `--without <input>` for each input.
 5. If the recipe fails, read `~/.local/state/sbx/recipe.log` in the sandbox:
    `sbx ssh <name> -- tail -n 50 .local/state/sbx/recipe.log`.
+
+## How to give a user the template they need
+
+1. Ask which languages and tools their projects use.
+2. Run `sbx template list` and `sbx template components`. A shared
+   definition often fits already.
+3. If none fits, run `sbx template new <name> --from <closest>` and edit
+   `templates/local/<name>.toml`. `docs/templates.md` lists every key.
+4. A tool with no component needs a new file in
+   `template/components/local/<name>.sh`. `docs/templates.md`, "Write your own
+   component", has the rules.
+5. The user runs `sbx template rebuild <name>` (it asks for the host's root
+   password). Then set `default_template`, or `[recipe] template` in the
+   project.
 
 ## When something fails
 

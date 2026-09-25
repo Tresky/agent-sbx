@@ -1,0 +1,7 @@
+# The core only: base tools, Docker, Node, Chrome, Claude Code, herdr and the
+# port mirror. A good start for a project whose recipe installs its own tools.
+description = "the core: Node, Docker, Chrome, Claude Code"
+components  = []
+
+[node]
+versions = ["lts/*"]

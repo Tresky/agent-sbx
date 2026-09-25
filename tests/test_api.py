@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from sbxlib.config import Config, ConfigError
-from sbxlib.pve import HttpApi, Pve, PveError
+from sbxlib.pve import HttpApi, Pve, TemplateVm, PveError
 from sbxlib.run import Runner
 
 TOKEN = "sbx@pve!cli=12345678-1234-1234-1234-123456789abc"
@@ -149,7 +149,8 @@ class HttpApiTest(unittest.TestCase):
         self.server.script = script
 
         with mock.patch("sbxlib.pve.time.sleep"):
-            node = Pve(cfg, api).create(9101, "sbx-myapp", "agent", PUBKEY, cores=4, memory_mb=8192,
+            node = Pve(cfg, api).create(TemplateVm(9000, "pve", "sbx-tpl-rails-20260925-1200", "rails", "abc"),
+                                        9101, "sbx-myapp", "agent", PUBKEY, cores=4, memory_mb=8192,
                                         disk_gb=None, expires=None)
         self.assertEqual(node, "pve")
         self.assertEqual(len(polls), 2, "create must block until the clone task has stopped")
@@ -163,7 +164,7 @@ class HttpApiTest(unittest.TestCase):
         # After the form decode, the key is STILL URL-encoded: that is the form Proxmox expects.
         self.assertEqual(config["sshkeys"], [urllib.parse.quote(PUBKEY, safe="")])
         self.assertEqual(config["net0"], ["virtio,bridge=vmbr77"])
-        self.assertEqual(config["tags"], ["sbx;sbx-agent"])
+        self.assertEqual(config["tags"], ["sbx;sbx-agent;sbx-tpl-rails"])
 
     def test_a_failed_task_is_an_error(self):
         api, cfg = self.api(pve_fingerprint=self.fingerprint)

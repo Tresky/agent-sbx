@@ -6,8 +6,8 @@ The version managers own the versions. rvm reads .ruby-version, nvm reads
 A project therefore always gets its own versions, whatever the template
 holds. The template is a cache: a Ruby that is in it costs nothing, one that
 is not costs a compile of about eight minutes at recipe time. So the list
-in host/local.conf is derived from the projects, and a rebuild bakes the
-union of what is in use. Docker images follow the same rule: the ones that
+that a template caches is derived from the projects that use it, and a
+rebuild bakes the union of what is in use. Docker images follow the same rule: the ones that
 the projects' compose files name are pulled into the template.
 """
 from __future__ import annotations
@@ -109,13 +109,16 @@ def _sort_versions(values) -> list[str]:
     return sorted(values, key=key)
 
 
-def table(needs: Needs, have_ruby: set[str], have_node: set[str], have_images: set[str]) -> str:
+def table(needs: Needs, have_ruby: set[str], have_node: set[str], have_images: set[str],
+          has_ruby: bool = True) -> str:
     rows = [("KIND", "VERSION", "IN TEMPLATE", "PROJECTS")]
     for kind, data, have in (("ruby", needs.ruby, have_ruby), ("node", needs.node, have_node),
                              ("go", needs.go, None), ("image", needs.images, have_images)):
         for value in _sort_versions(data):
             if have is None:
                 status = "any: go.mod picks the toolchain"
+            elif kind == "ruby" and not has_ruby:
+                status = "NO: the template has no ruby component"
             else:
                 status = "yes" if value in have else "NO"
             rows.append((kind, value, status, ", ".join(sorted(data[value]))))
@@ -123,14 +126,16 @@ def table(needs: Needs, have_ruby: set[str], have_node: set[str], have_images: s
     return "\n".join("  ".join(cell.ljust(w) for cell, w in zip(r, widths)).rstrip() for r in rows)
 
 
-def conf_lines(needs: Needs) -> dict[str, str]:
-    """The host/local.conf values: the union, oldest first, so the first Ruby
-    and Node become the template's defaults."""
-    return {
-        "SBX_RUBY_VERSIONS": " ".join(_sort_versions(needs.ruby)),
-        "SBX_NODE_VERSIONS": " ".join(_sort_versions(needs.node)),
-        "SBX_DOCKER_IMAGES": " ".join(sorted(needs.images)),
+def derived_values(needs: Needs, defn) -> dict[str, dict[str, list[str]]]:
+    """What a template should cache for its projects, as tables of its
+    definition: oldest version first. Ruby only when the template has Ruby."""
+    out: dict[str, dict[str, list[str]]] = {
+        "node": {"versions": _sort_versions(needs.node)},
+        "docker": {"images": sorted(needs.images)},
     }
+    if "ruby" in defn.components:
+        out["ruby"] = {"versions": _sort_versions(needs.ruby)}
+    return out
 
 
 def write_local_conf(path: Path, values: dict[str, str], header: str = "") -> None:
@@ -146,8 +151,7 @@ def write_local_conf(path: Path, values: dict[str, str], header: str = "") -> No
         else:
             out.append(line)
     if not lines:
-        out.append(header or "# Written by `sbx versions --write`: what the registered projects need.\n"
-                             "# Rebuild the template after a change: host/30-template-build.sh --replace")
+        out.append(header or "# The values of this setup. host/defaults.conf explains each key.")
     for key, value in values.items():
         if key not in seen:
             out.append(f'{key}="{value}"')

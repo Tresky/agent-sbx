@@ -18,7 +18,7 @@ inside?** An AI agent with full permissions, or you.
 | Claude Remote Control | Never. | Yes, so claude.ai/code and the Claude phone app can drive the sandbox. |
 | Expiry | Three days by default. | None. |
 
-The two profiles share everything else: the template, the tools, the names,
+The two profiles share everything else: the templates, the tools, the names,
 the certificate, and the ports. [security.md](security.md) explains how the
 profiles are enforced.
 
@@ -93,9 +93,10 @@ only. `sbx doctor` checks it.
 - The user is `dev`, with sudo and no password.
 - A project is in `~/code/<project>`.
 - The recipe's output is in `~/.local/state/sbx/recipe.log`.
-- The template has Ruby (rvm), Node (nvm), Go, Docker with compose, Caddy,
-  Chrome (through `agent-browser`), Claude Code, herdr, and the extras that
-  your `host/local.conf` names.
+- Every template has Node (nvm), Docker with compose, Caddy, Chrome (through
+  `agent-browser`), Claude Code and herdr. It also has the components of its
+  definition: Ruby, Go, Rust, Python, and so on. `cat /etc/sbx/template` in
+  the sandbox shows which.
 - Rails and Vite accept the sandbox's name as a `Host` header with no change
   in the project.
 
@@ -196,25 +197,25 @@ sbx git-token app              store a git token for the project's agent sandbox
 
 [projects.md](projects.md) explains recipes, inputs and git tokens.
 
-## Keep the template current
+## Templates
 
-The template caches the Ruby and Node versions and the Docker images that your
-projects use. A project always gets its own versions at recipe time; a version
-that the template caches costs nothing.
+Each sandbox is a clone of one template. You can have one template for each
+kind of project: `rails`, `rust`, your own.
 
 ```
-sbx versions              what the projects need, and what the template has
-sbx versions --write      write the list into host/local.conf
-sbx template status       the template, what the next build caches, and its clones
-sbx template rebuild      build the template again (35 to 40 minutes)
+sbx new lab --template rust     a sandbox from a named template
+sbx template list               the definitions, and which are built and current
+sbx template rebuild rust       build a new version (15 to 40 minutes)
+sbx template new web --from rails   start your own definition
 ```
 
-**Caution:** Proxmox cannot destroy a template while sandboxes use it.
-`sbx template rebuild` refuses while sandboxes exist. `--rm-sandboxes`
-destroys them first.
+A project can name its template in `.sandbox/sandbox.toml`
+(`[recipe] template = "rails"`). Without a name, `sbx new` uses
+`default_template` from `config.toml`.
 
-`sbx template rebuild` asks for the root password of the host one time. If
-your SSH session drops during the build, run `sbx template finish`.
+A rebuild makes a new version. Sandboxes keep the version that they were
+cloned from, so a rebuild never destroys a sandbox. [templates.md](templates.md)
+explains templates in full.
 
 ## The GPU
 

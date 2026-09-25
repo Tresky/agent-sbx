@@ -3,7 +3,7 @@
 # rvm and nvm are shell functions, so a shell that skips this file has no
 # `ruby` and no `node`. Keep this file fast: every tool call pays for it.
 
-export PATH="$HOME/.local/bin:$HOME/go/bin:/usr/local/go/bin:/opt/odin:$PATH"
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/go/bin:/usr/local/go/bin:/opt/odin:$PATH"
 
 # The Claude subscription token that `sbx claude-token` writes. Every shell
 # reads it, so a renewed token reaches each new shell at once.

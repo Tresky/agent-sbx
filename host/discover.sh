@@ -43,7 +43,8 @@ print(json.dumps({
                  "active": bool(s.get("active")), "avail": s.get("avail", 0)}
                 for s in load("SBX_STORAGE")],
     "guests": [{"vmid": int(g["vmid"]), "name": g.get("name", ""), "type": g.get("type", ""),
-                "pool": g.get("pool", ""), "template": bool(g.get("template"))}
+                "pool": g.get("pool", ""), "template": bool(g.get("template")),
+                "tags": [x for x in (g.get("tags") or "").replace(",", ";").split(";") if x]}
                for g in load("SBX_GUESTS")],
     "routes": [{"dst": r.get("dst", ""), "dev": r.get("dev", ""), "gateway": r.get("gateway", "")}
                for r in load("SBX_ROUTES")],

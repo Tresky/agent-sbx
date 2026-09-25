@@ -19,10 +19,14 @@ The tables below list the problems that `sbx doctor` does not explain.
 | Tailscale refuses the gateway's tag | the tailnet policy does not name the tag yet | merge the policy fragment first; `sbx setup` shows it |
 | `the container got no default route on lan0` | the host's LAN has no DHCP server | answer "no" to the DHCP question in `sbx setup`, or set `SBX_GW_LAN_IP` and `SBX_GW_LAN_GW` in `host/local.conf` |
 | `no active storage holds VM disks` | no storage can make linked clones | add an LVM-thin, ZFS or directory storage in Proxmox |
-| the template build stops with `PROVISION FAILED` | a step in `template/provision.sh` failed | the script prints the end of the log; run `bash /root/sbx/host/vm-diag.sh` on the host for more |
+| the template build stops with `PROVISION FAILED` | a step in `template/provision.sh` or in a component failed | the script prints the end of the log; run `bash /root/sbx/host/vm-diag.sh <vmid>` on the host for more. Fix the cause, then build again: the new build removes the failed VM |
 | the template build prints nothing for many minutes | a compile is quiet for minutes | wait; the script warns after 15 quiet minutes and stops after 45 |
-| the SSH session dropped during the build | the build VM continues by itself | `sbx template finish` |
-| `SBX_TEMPLATE_EXTRAS names '<x>'` | no `template/extras/<x>.sh` | correct the name in `host/local.conf` |
+| the SSH session dropped during the build | the build VM continues by itself | `sbx template finish <name>` |
+| `no component '<x>'`, or `needs <y> before it` | the definition names a component that does not exist, or lists them in the wrong order | `sbx template components` lists them; correct the definition |
+| `template '<x>' is not built` | `sbx new` needs a built template | `sbx template rebuild <x>` |
+| `more than one template is built` | `sbx new` cannot choose | pass `--template`, set `[recipe] template` in the project, or set `default_template` in `config.toml` |
+| `sbx doctor` says a template is older than its definition | the definition or a component changed after the build | `sbx template rebuild <name>`, when convenient; the old template still works |
+| `sbx doctor` says a template is from before named templates | the setup predates named templates | `sbx template adopt <vmid> default` |
 | `rvm install 3.4` fails | rvm cannot complete a partial Ruby version | write full versions, for example `3.4.1` |
 | `'<key>' is a shared setting` | `config.toml` sets a value that `host/local.conf` owns | move the value to `host/local.conf`, and remove it from `config.toml` |
 

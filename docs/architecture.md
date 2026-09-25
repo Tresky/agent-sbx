@@ -23,7 +23,7 @@ For the security view of the same design, read [security.md](security.md).
                        │            │
                 agent sandboxes   personal sandboxes        (linked clones)
                        ▲
-                 the template VM (sbx-base-*)
+           the templates (sbx-tpl-<name>-<date>)
 ```
 
 Three things on the host are not sandboxes. `sbx setup` makes them one time:
@@ -31,14 +31,14 @@ Three things on the host are not sandboxes. `sbx setup` makes them one time:
 | Thing | What it is |
 |---|---|
 | `sbx-gw`, one unprivileged container | The DHCP and DNS server of the sandboxes, their NAT route to the internet, the firewall, and the Tailscale subnet router. It runs only dnsmasq, nftables and Tailscale, and installs security updates by itself. |
-| `sbx-base-*`, the template VM | An Ubuntu 24.04 VM with every tool installed, built once, then converted to a Proxmox template. A sandbox is a linked clone of it. |
+| The templates, `sbx-tpl-<name>-<date>` | One Ubuntu 24.04 VM for each template definition and each version, converted to a Proxmox template, in its own pool. A sandbox is a linked clone of one. |
 | Two bridges | Linux bridges with no physical port. The host holds no address on them, so a sandbox cannot reach the hypervisor. |
 
 The `sbx` command on the Mac makes and destroys everything else. The default
 numbers are in [reference.md](reference.md): subnets `10.77.0.0/24` and
-`10.78.0.0/24`, bridges `vmbr77` and `vmbr78`, template `9000`, gateway
-`9001`, sandboxes `9100` to `9199`, DHCP from `.50` to `.250` with one-hour
-leases.
+`10.78.0.0/24`, bridges `vmbr77` and `vmbr78`, templates from `9000` to
+`9099`, gateway `9001`, sandboxes `9100` to `9199`, DHCP from `.50` to `.250`
+with one-hour leases.
 
 ### Settings
 
@@ -240,7 +240,7 @@ token that `host/40-api-token.sh` makes. The token belongs to the user
 | Path | Role | Rights |
 |---|---|---|
 | `/pool/<pool>` | SbxOperator | allocate, clone into, configure, start and stop, snapshot, destroy VMs in the pool; read the guest agent |
-| `/vms/<template>` | SbxTemplateUser | clone the template and read it; not change or destroy it |
+| `/pool/<templates pool>` | SbxTemplateUser | clone each template and read it; not change or destroy one |
 | `/storage/<vm storage>` | SbxStorage | allocate disk space |
 | `/sdn/zones/localnetwork/<agent bridge>`, `<personal bridge>` | SbxBridge | attach a network card to those two bridges, and no other |
 | `/mapping/pci/<mapping>` (optional) | SbxMapping | use the GPU mapping |
@@ -259,8 +259,10 @@ fails when the token has a right on any other path.
 - The token sees only its pool, so a VM ID that another guest holds is
   invisible in the resource list. The CLI asks `/cluster/nextid` for each
   candidate ID instead.
-- `qm destroy` removes every access entry on the destroyed VM's path. A
-  template rebuild therefore runs `40-api-token.sh --acl-only` at its end.
+- The token reaches each template through the templates pool, so a new
+  version needs no ACL of its own. A template from before named templates had
+  an ACL on its own ID; `--adopt` moves it into the pool and removes that
+  ACL.
 
 ## What `sbx setup` does
 
@@ -276,15 +278,19 @@ fails when the token has a right on any other path.
    IDs, and a storage that can make linked clones. A value that
    `host/local.conf` has already stays. When the gateway exists, every current
    value stays.
-3. It copies `host/`, `gw/` and `template/` to `/root/sbx/`, then runs each host
-   script whose check fails: the bridges, the gateway, Tailscale, the
-   template. It stops at each manual step in the Tailscale admin console.
-4. It makes this Mac's token (`40-api-token.sh --emit`) and stores it in the
+3. It copies `host/`, `gw/`, `template/`, `templates/` and `sbxlib/` to
+   `/root/sbx/`, then runs each host script whose check fails: the bridges,
+   the gateway, Tailscale. It stops at each manual step in the Tailscale admin
+   console.
+4. The templates: it adopts a template from before named templates, or asks
+   which definitions to build, builds them, and sets `default_template`.
+5. It makes this Mac's token (`40-api-token.sh --emit`) and stores it in the
    keychain, or keeps the one in the keychain and applies the ACLs again.
-5. It sets up the Mac and runs `sbx doctor`.
+6. It sets up the Mac and runs `sbx doctor`.
 
-`--mac-only` skips steps 2 and 3: it copies `/root/sbx/host/local.conf` from
-the host instead, so the second Mac and the host agree.
+`--mac-only` skips steps 2 to 4: it copies `/root/sbx/host/local.conf`, and the
+local template definitions and components that this Mac lacks, from the host
+instead, so the second Mac and the host agree.
 
 ## What `sbx new` does
 
@@ -295,12 +301,15 @@ the host instead, so the second Mac and the host agree.
    git access (for `personal`, the SSH agent must hold a key that GitHub
    accepts; for `agent`, the project's token must read each repository), the
    SSH key, the mkcert CA, and a free VM ID.
-2. **Clone.** `POST /nodes/<node>/qemu/<template>/clone` with `newid`, `name`
-   and `pool`. A template clones as a linked clone: seconds, not minutes.
+2. **Clone.** The template is `--template`, the manifest's `[recipe]
+   template`, `default_template`, or the only one that is built; `sbx new`
+   clones its newest version with `POST /nodes/<node>/qemu/<vmid>/clone`
+   (`newid`, `name`, `pool`). A template clones as a linked clone: seconds,
+   not minutes.
 3. **Configure.** The network card on the profile's bridge, cores, memory, the
    cloud-init user, `ip=dhcp`, the sandbox public key (URL-encoded inside the
    form body, which the API expects), and the tags `sbx`, the profile, the
-   expiry and the project.
+   template, the expiry and the project.
 4. **Start**, and remove the old host key of that name from the CLI's own
    `known_hosts`.
 5. **Connect.** Poll dnsmasq for the name. When the guest agent reports an
@@ -378,52 +387,99 @@ dialogs into `~/.claude.json`: the workspace trust and the Remote Control
 consent. A full login carries `org:create_api_key` among its scopes, which is
 why an agent sandbox never gets one: every entry point checks the profile.
 
-## The template
+## The templates
 
-**Versions.** The managers own them, and the template caches them. rvm reads
+A setup has one template for each kind of project. Each one comes from a
+**definition** (`templates/<name>.toml`, or `templates/local/<name>.toml`,
+which wins) that names its **components** (`template/components/*.sh`, or
+`template/components/local/`) and their settings. [templates.md](templates.md)
+is the user's guide; this section is the mechanism.
+
+**The definition parser** is `sbxlib/templates.py`. It imports nothing else
+from sbxlib, so the host runs it as a script during a build
+(`python3 sbxlib/templates.py env <name>`), and the Mac and the host read a
+definition the same way. It checks the definition: each component exists,
+appears once, and comes after the components that its `# requires:` line
+names; each settings table belongs to a listed component or to `node` or
+`docker`. It turns a setting `[ruby] versions = [...]` into the build variable
+`SBX_RUBY_VERSIONS`.
+
+**The fingerprint** is a hash of the build variables, `provision.sh`,
+`seal.sh`, the files in `template/files/`, and each component that the
+definition lists. The build tags the template with it (`sbx-h-<hash>`), and
+`sbx template list` compares the tag with the definition on the Mac. The three
+files that `sbx new` refreshes from the checkout (`zshenv`, `zshrc`,
+`sbx_mirror.py`) do not count, because a change to them needs no rebuild.
+
+**Versions.** The managers own them, and each template caches them. rvm reads
 `.ruby-version`, nvm reads `.nvmrc`, and Go downloads the toolchain that
 `go.mod` names, so a project always gets its own versions. `sbx versions`
-scans the registered projects for those files and for the images in their
-compose files, and `--write` puts the union into `host/local.conf`. The first
-Ruby and Node in each list become the template's defaults.
+scans the registered projects, groups them by the template that their
+sandboxes use, and `--write` saves each group in `templates/local/versions.toml`.
+A build adds those after the definition's own versions, so the definition's
+first version stays the default.
 
-**What is in it.** Ubuntu 24.04, and on top of it:
+**What is in a template.** Ubuntu 24.04 and the **core**, which every template
+has:
 
 - build tools, shells (zsh, tmux), and command-line tools (jq, ripgrep, fd,
-  fzf, direnv, gh, ffmpeg);
-- libraries for Ruby gems: OpenSSL, readline, zlib, YAML, ffi, gmp, libpq,
-  sqlite3, libvips, ImageMagick, and the Postgres and Redis clients;
-- Docker with compose, Caddy, the Mesa software Vulkan driver;
-- Node through nvm, Ruby through rvm, Go from the official tarball, and the
-  cached Docker images;
+  fzf, direnv, gh);
+- the OpenSSL, zlib and ffi headers that most native builds need;
+- Docker with compose, Caddy, and the Docker images of `[docker] images`;
+- Node through nvm, with yarn and pnpm, at the versions of `[node] versions`;
 - Chrome through `agent-browser`, with Playwright's system libraries;
 - Claude Code and herdr;
-- the extras that `SBX_TEMPLATE_EXTRAS` names (`template/extras/*.sh`);
 - `sbx-mirror`, the DHCP-hostname unit, `sbx-recipe-run`, and a `~/.zshenv`
   that loads `rvm`, `nvm` and the PATH for every shell, including the
-  non-interactive one of `ssh host command` and an agent's tool call.
+  non-interactive one of `ssh host command` and an agent's tool call;
+- `/etc/sbx/template`: the template's name, fingerprint and components.
+
+Then the definition's apt packages, and its components in order. A component
+is sourced by `provision.sh` as root, with its helpers (`step`, `as_user`,
+`$U`) and its error trap. It adds its commands to `CHECK_TOOLS`, and the final
+check proves that each one is on the user's PATH in a non-interactive shell.
 
 The user `dev` has zsh, sudo with no password, `~/code`, and lingering on,
 because herdr and an agent run for hours with no login session.
 
-**How it is built.** `host/30-template-build.sh` makes the VM from the cloud
-image (q35 and OVMF, so that a clone can take a PCIe GPU later). It puts the
-provision script and its files into a cloud-init snippet as a base64 payload,
-and starts the VM on the agent bridge. It proves within three minutes that
-DHCP and DNS reached the VM, from the gateway's lease file. Then it watches the
-provision through the guest agent: each new log line, a failure marker, a
-warning after 15 quiet minutes, a stop after 45. On success the VM seals
-itself (it deletes cloud-init's state, the machine ID, the SSH host keys and
-the payload) and powers off. The host script then removes the snippet, turns
-off the first-boot upgrade, converts the VM to a template, and gives the token
-its access back. `--finish` attaches to a build VM that is already up.
-`host/vm-diag.sh` shows what a build VM is doing, through the guest agent,
-because the host has no route to a sandbox subnet.
+**How a version is built.** `host/30-template-build.sh <name>` loads the
+definition through the parser, removes an earlier build VM of the same name
+that failed (it stays up for its log until then), takes the first free ID in
+the template range,
+and names the VM `sbx-tpl-<name>-<date>`, tagged `sbx-template`,
+`sbx-tpl-<name>`, `sbx-h-<hash>` and `sbx-building`. It makes the VM from the
+cloud image (q35 and OVMF, so that a clone can take a PCIe GPU later), puts
+the provision script, the components and the build variables into a cloud-init
+snippet as a base64 payload, and starts the VM on the agent bridge. The build
+variables go into `build.conf` through `write_build_conf` in `host/lib.sh`: one
+`declare -p` line for each `SBX_` variable, by name. It proves
+within three minutes that DHCP and DNS reached the VM, from the gateway's
+lease file. Then it watches the provision through the guest agent: each new
+log line, a failure marker, a warning after 15 quiet minutes, a stop after 45.
+On success the VM seals itself (it deletes cloud-init's state, the machine ID,
+the SSH host keys and the payload) and powers off. The host script then
+removes the snippet, turns off the first-boot upgrade, converts the VM to a
+template, drops the `sbx-building` tag, and moves it into the templates pool.
 
-**An extra** is a shell file in `template/extras/`, sourced by `provision.sh`
-after the core packages, with its helpers and its error trap. It adds its
-tools to `CHECK_TOOLS`, and the final check proves that they are on the user's
-PATH in a non-interactive shell.
+**Versions of a template, and their cleanup.** A rebuild never destroys the
+version that sandboxes use: Proxmox refuses to destroy a template with linked
+clones, and a rebuild must not depend on removing sandboxes. `sbx new` clones
+the newest version of a name (by the date in the VM name). After each build,
+the host script removes each OLDER version of that name that no VM uses any
+more. A linked clone's disk names its base (`base-<vmid>-disk-N`) on every
+storage type, so a search of `/etc/pve/nodes/*/qemu-server/*.conf` finds the
+users of a version. That cleanup needs root, and runs over SSH as part of
+`sbx template rebuild` or `sbx template prune`: the API token can still clone
+and read templates only.
+
+**A template from before named templates** carries only the `sbx-template` tag.
+The CLI shows it as `default`, and each sandbox with no `sbx-tpl-*` tag counts
+as its clone. `30-template-build.sh --adopt <vmid> <name>` renames and tags
+it, moves it into the templates pool, and removes the old ACL on its ID.
+
+`--finish <name>` attaches to a build VM that is already up.
+`host/vm-diag.sh <vmid>` shows what a build VM is doing, through the guest
+agent, because the host has no route to a sandbox subnet.
 
 ## The GPU
 
@@ -472,6 +528,8 @@ Each of these cost real time. Keep them in mind when you change the code.
 | `herdr machine add` from a tool | with a terminal on stdin and output in a pipe, herdr may ask a question nobody sees | run it with stdin closed; never let it fail the sandbox |
 | a forwarded SSH agent and a key named in ssh config | the sandbox sees the agent only | `ssh-add --apple-use-keychain ~/.ssh/<key>`; the CLI checks before a VM exists |
 | a Python f-string with `\"` inside `{}` | a syntax error before Python 3.12 | different quotes, or a heredoc |
+| `set \| grep '^SBX_'` to save variables | a multi-line variable of another name has lines that start with `SBX_`; they pass the filter and overwrite the real values when the file is sourced | `declare -p` for each name from `compgen -v SBX_` |
+| `a && b && c` as the last command of a loop, under `set -e` and pipefail | when the last item does not match, the failed chain becomes the loop's status, and the script stops | an `if` statement; `\|\| true` after a `grep` that may find nothing |
 
 ## What is tested, and how
 
@@ -491,6 +549,17 @@ dependencies):
 - `sbx setup`: the values proposed for a new host, an existing host that keeps
   its values, the order of the host steps, `--mac-only`, and the per-Mac token;
 - `sbx doctor`: the token scope;
+- the template definitions: every shipped preset loads, the settings become
+  build variables, a local file wins, each mistake is refused, the derived
+  versions come after the definition's own, the fingerprint follows exactly
+  what goes into a template, and bash reads the host entry point's output;
+  `sbx template` passes the right steps to the host (`tests/test_template.py`);
+- the template build's shell helpers, run under their own `set -euo pipefail`
+  with a stub `pvesh` and `qm`: `build.conf` carries each value whole and
+  nothing else, and the cleanup removes an unused old version, keeps one that
+  a sandbox uses, and does not fail on a template from before named templates;
+- the choice of the template in `sbx new`: the option, the manifest, the
+  newest version, and a refusal with no VM made when it is not clear;
 - the Rails example recipe against three kinds of application, with stubbed
   tools (`tests/test_rails_example.py`);
 - the settings: the Python defaults equal `defaults.conf`, and
@@ -519,7 +588,7 @@ repeats that pair on any setup.
 
 **Not tested automatically**, because each one needs a real host:
 
-- `template/provision.sh` and the extras. A download URL or a package name can
+- `template/provision.sh` and the components. A download URL or a package name can
   change.
 - That Tailscale routes a subnet from an unprivileged container on your host.
 - `sbx setup` against a real host (the unit tests use a fake host).
@@ -543,6 +612,7 @@ sbxlib/
   remotecontrol.py          Remote Control in a personal sandbox
   projects.py               the project registry; the project tag
   versions.py               sbx versions
+  templates.py              the template definitions; the host runs it during a build
   herdr.py                  saved machines
   layout.py                 a project's .sandbox/herdr.toml panes
   names.py                  the host name rules
@@ -553,16 +623,17 @@ host/
   discover.sh               prints what sbx setup needs to know about the host
   10-bridges.sh             the two bridges
   20-gw-create.sh           the gateway container, its config, Tailscale
-  30-template-build.sh      the template: build, --replace, --finish
+  30-template-build.sh      a template version: build, --finish, --prune, --rm, --adopt
   40-api-token.sh           the scoped token: --rotate, --acl-only, --emit, --token-id
   vm-diag.sh                what a build VM is doing, through the guest agent
 gw/
   dnsmasq.conf.tmpl         DHCP and DNS
   nftables.conf.tmpl        the guard tables and NAT
   setup.sh                  runs inside the container
+templates/                  the shared template definitions; local/ is each person's own
 template/
-  provision.sh              everything installed, once, on the first boot
-  extras/                   the optional parts
+  provision.sh              the core, then the components, once, on the first boot
+  components/               the optional parts that a definition lists
   seal.sh                   what must differ between clones is removed
   files/                    sbx_mirror.py and its unit, the DHCP-hostname unit,
                             sbx-recipe-run, zshenv, zshrc, Caddyfile

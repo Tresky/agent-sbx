@@ -18,17 +18,20 @@ application with no edit, and it shows each file.
 - Put a part in the template if it is slow and many projects use it.
 - Put a part in the recipe if it is specific to one project and fast.
 
-The template caches the Ruby and Node versions and the Docker images of your
+A project picks its template in the manifest (`[recipe] template = "rails"`).
+The template caches the Ruby and Node versions and the Docker images of its
 projects. The recipe still asks for its own versions (`rvm install`,
 `nvm install`); a version that the template caches costs nothing, and any
 other version costs a compile or a download at recipe time. `sbx versions`
-shows what the projects need and what the template caches.
+shows what the projects need and what each template caches.
+[templates.md](templates.md) explains templates.
 
 ## How a recipe runs
 
 - `sbx-recipe-run` starts the recipe with `bash`, from the project directory.
-- The shell has `ruby`, `node`, `go`, `docker`, and the `rvm` and `nvm`
-  functions. It also has the tools of the extras in `SBX_TEMPLATE_EXTRAS`.
+- The shell has `node`, `docker` and the `nvm` function in every template. It
+  also has the tools of its template's components: `ruby` and the `rvm`
+  function with `ruby`, `go` with `go`, `cargo` with `rust`, and so on.
 - The `env` inputs are exported for the recipe. They are also in the file that
   `env_file` names.
 - Three variables come from sbx itself, first in that file:
@@ -79,6 +82,7 @@ safe to repeat:
 [recipe]
 setup    = ".sandbox/setup.sh"   # the default
 env_file = ".sandbox.env"        # the default; ".env.local" suits Rails and Vite
+template = "rails"               # optional: the template to clone
 
 [[input]]
 name        = "rails-master-key"

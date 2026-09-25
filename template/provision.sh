@@ -26,29 +26,29 @@ trap 'echo "PROVISION FAILED at line $LINENO: $BASH_COMMAND"; touch /var/lib/sbx
 trap 'code=$?; [[ $code -eq 0 || -e /var/lib/sbx/provision.ok || -e /var/lib/sbx/provision.failed ]] \
       || { echo "PROVISION FAILED (exit $code)"; touch /var/lib/sbx/provision.failed; }' EXIT
 
-# The tools that the final check requires. An extra adds its own.
+# The tools that the final check requires. A component adds its own.
 CHECK_TOOLS="node claude herdr agent-browser"
-if [[ -n "${SBX_RUBY_VERSIONS:-}" ]]; then CHECK_TOOLS+=" ruby bundle"; fi
-if [[ -n "${SBX_GO_VERSION:-}" ]]; then CHECK_TOOLS+=" go"; fi
 
 step() { printf '\n\033[1m=== %s ===\033[0m\n' "$*"; }
 as_user() { sudo -u "$U" -H zsh -c "$1"; }
 
 export DEBIAN_FRONTEND=noninteractive
 
+step "template ${SBX_TEMPLATE_NAME:-?}: the core, then ${SBX_COMPONENTS:-no components}"
+
 step "base packages"
+# The CORE: what every template has, whatever its components. Language
+# toolchains and the libraries of one kind of app are components.
 apt-get update -q
 apt-get install -y -q --no-install-recommends \
   qemu-guest-agent ca-certificates curl wget gnupg unzip zip git git-lfs make pkg-config \
   build-essential clang lld g++ python3 python3-venv \
   zsh tmux htop jq ripgrep fd-find fzf direnv rsync openssh-client \
-  libssl-dev libreadline-dev zlib1g-dev libyaml-dev libffi-dev libgmp-dev \
-  libpq-dev libsqlite3-dev sqlite3 libvips-dev imagemagick postgresql-client redis-tools \
-  ffmpeg fonts-liberation fonts-dejavu fonts-noto-color-emoji \
-  mesa-vulkan-drivers vulkan-tools libvulkan1
-if [[ -n "${SBX_EXTRA_APT_PACKAGES:-}" ]]; then
+  libssl-dev zlib1g-dev libffi-dev \
+  fonts-liberation fonts-dejavu fonts-noto-color-emoji
+if [[ -n "${SBX_APT_PACKAGES:-}" ]]; then
   # shellcheck disable=SC2086  # a space-separated list
-  apt-get install -y -q --no-install-recommends $SBX_EXTRA_APT_PACKAGES
+  apt-get install -y -q --no-install-recommends $SBX_APT_PACKAGES
 fi
 systemctl enable --now qemu-guest-agent || true
 ln -sf "$(command -v fdfind)" /usr/local/bin/fd
@@ -133,20 +133,7 @@ install -m 0644 "$FILES/sbx-dhcp-hostname.service" /etc/systemd/system/sbx-dhcp-
 systemctl daemon-reload
 systemctl enable caddy sbx-mirror sbx-dhcp-hostname
 
-if [[ -n "${SBX_GO_VERSION:-}" ]]; then
-step "go $SBX_GO_VERSION"
-# The official tarball, not Ubuntu's package, which lags by years. Modules and
-# built binaries go to ~/go, which ~/.zshenv puts on the PATH. The old tree is
-# removed first, as the Go instructions require: a tarball over an old tree
-# leaves stale files behind.
-tmp="$(mktemp -d)"
-wget -q --tries=5 --waitretry=5 --retry-connrefused "https://go.dev/dl/go${SBX_GO_VERSION}.linux-amd64.tar.gz" -O "$tmp/go.tgz"
-rm -rf /usr/local/go
-tar -C /usr/local -xzf "$tmp/go.tgz"
-rm -rf "$tmp"
-/usr/local/go/bin/go version
-fi
-
+SBX_NODE_VERSIONS="${SBX_NODE_VERSIONS:-lts/*}"
 step "node (nvm): $SBX_NODE_VERSIONS"
 as_user 'curl -fsSL --retry 5 --retry-delay 5 https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | PROFILE=/dev/null bash'
 first=1
@@ -155,26 +142,6 @@ for v in $SBX_NODE_VERSIONS; do
   if [[ $first -eq 1 ]]; then as_user "nvm alias default '$v'"; first=0; fi
 done
 as_user 'npm install -g yarn pnpm'
-
-if [[ -n "${SBX_RUBY_VERSIONS:-}" ]]; then
-step "ruby (rvm): $SBX_RUBY_VERSIONS"
-as_user 'curl -fsSL --retry 5 --retry-delay 5 https://rvm.io/mpapis.asc | gpg --import - && curl -fsSL --retry 5 --retry-delay 5 https://rvm.io/pkuczynski.asc | gpg --import -'
-# The installer downloads its own tarball from GitHub. When that download
-# fails it stops with "There has been an error fetching the ruby interpreter",
-# and it does not try again. This loop does, with a pause between attempts.
-for attempt in 1 2 3; do
-  if as_user 'curl -fsSL --retry 5 --retry-delay 5 https://get.rvm.io | bash -s stable --ignore-dotfiles'; then break; fi
-  if [[ $attempt -eq 3 ]]; then echo "ERROR: the rvm installer failed three times" >&2; false; fi
-  echo "the rvm installer failed (attempt $attempt of 3); next attempt in 30 s"
-  sleep 30
-done
-first=1
-for v in $SBX_RUBY_VERSIONS; do
-  as_user "rvm install '$v'"
-  if [[ $first -eq 1 ]]; then as_user "rvm alias create default '$v'"; first=0; fi
-done
-as_user 'gem install bundler --no-document'
-fi
 
 step "headless browser"
 # The system libraries come from Playwright's own list, which tracks what the
@@ -188,11 +155,19 @@ as_user 'curl -fsSL --retry 5 --retry-delay 5 https://claude.ai/install.sh | bas
 # remote PATH and starts the server side itself; no service is needed.
 as_user 'curl -fsSL --retry 5 --retry-delay 5 https://herdr.dev/install.sh | sh'
 
-for extra in ${SBX_TEMPLATE_EXTRAS:-}; do
-  [[ -f "$PAYLOAD/template/extras/$extra.sh" ]] || { echo "PROVISION FAILED: no template/extras/$extra.sh"; false; }
+# The components, in the order of the definition. A local component (not in
+# git) wins over a shared one of the same name.
+for comp in ${SBX_COMPONENTS:-}; do
+  file="$PAYLOAD/template/components/local/$comp.sh"
+  [[ -f "$file" ]] || file="$PAYLOAD/template/components/$comp.sh"
+  [[ -f "$file" ]] || { echo "PROVISION FAILED: no component $comp"; false; }
   # shellcheck disable=SC1090
-  source "$PAYLOAD/template/extras/$extra.sh"
+  source "$file"
 done
+
+# What this template is, for a person or a tool inside a sandbox.
+printf 'SBX_TEMPLATE_NAME=%s\nSBX_TEMPLATE_HASH=%s\nSBX_COMPONENTS="%s"\n' \
+  "${SBX_TEMPLATE_NAME:-}" "${SBX_TEMPLATE_HASH:-}" "${SBX_COMPONENTS:-}" > /etc/sbx/template
 
 step "checks"
 docker --version; caddy version

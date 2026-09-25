@@ -19,7 +19,8 @@
 #SBX_PERSONAL_NET=10.78.0
 
 # Proxmox IDs. They must not collide with a VM or a container that exists.
-#SBX_TEMPLATE_VMID=9000
+#SBX_TEMPLATE_VMID_MIN=9000
+#SBX_TEMPLATE_VMID_MAX=9099
 #SBX_GW_CTID=9001
 #SBX_VMID_MIN=9100
 #SBX_VMID_MAX=9199
@@ -34,6 +35,5 @@
 #SBX_GW_LAN_IP=192.168.1.2/24
 #SBX_GW_LAN_GW=192.168.1.1
 
-# Optional parts of the template (template/extras/), and more apt packages.
-#SBX_TEMPLATE_EXTRAS="odin gis"
-#SBX_EXTRA_APT_PACKAGES=""
+# What goes into each template is a template definition, not a host setting:
+# templates/*.toml, and your own in templates/local/. See docs/templates.md.

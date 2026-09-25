@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import DEFAULTS_ENV, REPO_ROOT, Config, ConfigError, load, local_conf_path, parse_env_file, state_dir
+from .templates import load_all
 from .run import Runner
 
 PVE_TOKEN_SERVICE = "sbx-pve-token"
@@ -85,8 +86,9 @@ def _pick_storage(storage: list[dict], content: str, types: tuple[str, ...]) -> 
 
 
 def _free_ids(used: set[int]) -> int | None:
-    """The first base B where B (the template), B+1 (the gateway) and
-    B+100..B+199 (the sandboxes) are all free."""
+    """The first base B where B (the first template), B+1 (the gateway) and
+    B+100..B+199 (the sandboxes) are all free. The templates take the free ids
+    of B..B+99 as they are built."""
     for base in range(9000, 999_000, 1000):
         if not ({base, base + 1} | set(range(base + 100, base + 200))) & used:
             return base
@@ -142,7 +144,8 @@ def propose(disc: dict, mac_nets: list[ipaddress.IPv4Network], current: dict[str
     base = _free_ids(used)
     if base is None:
         raise SetupError("no free block of VM ids; set the SBX_*VMID* keys by hand")
-    add("SBX_TEMPLATE_VMID", str(base), "a free id")
+    add("SBX_TEMPLATE_VMID_MIN", str(base), "the templates take free ids from here")
+    add("SBX_TEMPLATE_VMID_MAX", str(base + 99), "to here")
     add("SBX_GW_CTID", str(base + 1), "a free id")
     add("SBX_VMID_MIN", str(base + 100), "a free range of 100 ids")
     add("SBX_VMID_MAX", str(base + 199), "a free range of 100 ids")
@@ -188,7 +191,7 @@ def check_choices(values: dict[str, str], disc: dict, mac_nets: list[ipaddress.I
     if values.get("SBX_AGENT_NET") == values.get("SBX_PERSONAL_NET"):
         problems.append("SBX_AGENT_NET and SBX_PERSONAL_NET must differ")
     used = {g["vmid"] for g in disc.get("guests", [])}
-    for key in ("SBX_TEMPLATE_VMID", "SBX_GW_CTID"):
+    for key in ("SBX_GW_CTID",):
         if key in fresh and fresh[key].isdigit() and int(fresh[key]) in used:
             problems.append(f"{key} {fresh[key]} is taken by a VM or a container")
     return problems
@@ -338,6 +341,7 @@ class Wizard:
         if here != remote:
             local.write_text(remote)
             self.cli.info(f"wrote {local} from the host")
+        self._fetch_local_templates()
         self.cfg = load()
         if not any(g["vmid"] == self.cfg.gw_ctid for g in disc.get("guests", [])):
             raise SetupError(f"the gateway {self.cfg.gw_ctid} does not exist on the host; "
@@ -372,15 +376,8 @@ class Wizard:
         info(f"wrote {local}")
         self.cfg = load()
 
-        self.step("copy the scripts to the host")
-        scp = ["scp", *self.cli._host_ssh(self.cfg), "-q", "-r", str(REPO_ROOT / "host"),
-               str(REPO_ROOT / "gw"), str(REPO_ROOT / "template"), f"{self.target}:/root/sbx/"]
-        done = self.runner.run(scp, capture=False, check=False)
-        if done.code != 0 and self.ssh("mkdir -p /root/sbx").code == 0:
-            done = self.runner.run(scp, capture=False, check=False)
-        if done.code != 0:
-            raise SetupError("the copy to the host failed")
-        info("copied host/, gw/ and template/ to /root/sbx/")
+        self.step("copy the scripts and the template definitions to the host")
+        self.cli._copy_to_host(self.cfg, self.runner)
 
         c = self.cfg
         self.step(f"the sandbox bridges {c.agent_bridge} and {c.personal_bridge}")
@@ -414,12 +411,78 @@ class Wizard:
             self._host_script("20-gw-create.sh --tailscale")
         self._tailscale_dns()
 
-        self.step(f"the template {c.template_vmid}")
-        if self.ssh(f"qm config {c.template_vmid} 2>/dev/null | grep -q '^template: 1'").code == 0:
-            info("the template exists; skipped (to rebuild it: sbx template rebuild)")
-        else:
-            print("The build takes 15 to 40 minutes. If the SSH session drops, run: sbx template finish")
-            self._host_script("30-template-build.sh")
+        self._templates(disc)
+
+    def _templates(self, disc: dict) -> None:
+        """Adopt a template from before named templates, or build the first
+        ones. A setup with named templates already skips the step."""
+        self.step("the templates")
+        info = self.cli.info
+        ours = [g for g in disc.get("guests", []) if g.get("template") and "sbx-template" in g.get("tags", [])]
+        named = [g for g in ours if any(tag.startswith("sbx-tpl-") for tag in g.get("tags", []))]
+        legacy = [g for g in ours if g not in named]
+        conf = state_dir() / "config.toml"
+        if legacy:
+            g = legacy[-1]
+            print(f"VM {g['vmid']} ({g['name']}) is a template from before named templates.")
+            if _yes(f"Adopt it as the template 'default'? It stays as it is; `sbx new` uses it by that name."):
+                self._host_script(f"30-template-build.sh --adopt {g['vmid']} default")
+                if not self.cfg.default_template:
+                    set_toml_keys(conf, {"default_template": "default"})
+                if "default" not in load_all():
+                    print("Write its definition, so that you can rebuild it: sbx template new default --from rails")
+        if named:
+            info("templates exist: " + ", ".join(sorted({g["name"] for g in named}))
+                 + "; skipped (`sbx template list` shows them)")
+            return
+        if legacy:
+            return
+        defs = load_all()
+        print("Each template is a definition in templates/ (shared) or templates/local/ (yours):")
+        for name, d in defs.items():
+            print(f"  {name:<10} {d.description}  [core{', ' if d.components else ''}{', '.join(d.components)}]")
+        while True:
+            wanted = _ask("Which templates to build now, separated by spaces", "minimal").split()
+            unknown = [n for n in wanted if n not in defs]
+            if wanted and not unknown:
+                break
+            self.cli.warn(f"no definition for {', '.join(unknown) or 'nothing'}; choose from the list")
+        print(f"Each build takes 15 to 40 minutes. If the SSH session drops, run: sbx template finish <name>")
+        for name in wanted:
+            self._host_script(f"30-template-build.sh {name}")
+        if not self.cfg.default_template:
+            set_toml_keys(conf, {"default_template": wanted[0]})
+            info(f"default_template = {wanted[0]} in config.toml; `sbx new --template <name>` picks another")
+        self.cfg = load()
+
+    def _fetch_local_templates(self) -> None:
+        """--mac-only: the host has the local definitions and components that
+        its setup built; this Mac takes the ones that it does not have."""
+        import base64
+        import io
+        import tarfile
+        got = self.ssh("cd /root/sbx 2>/dev/null && tar -cf - $(ls -d templates/local "
+                       "template/components/local 2>/dev/null) 2>/dev/null | base64")
+        data = base64.b64decode(got.stdout) if got.code == 0 and got.stdout.strip() else b""
+        if not data:
+            return
+        taken, differ = [], []
+        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+            for member in tar.getmembers():
+                if not member.isfile() or member.name.startswith("/") or ".." in Path(member.name).parts:
+                    continue
+                dest = REPO_ROOT / member.name
+                body = tar.extractfile(member).read()
+                if not dest.exists():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(body)
+                    taken.append(member.name)
+                elif dest.read_bytes() != body:
+                    differ.append(member.name)
+        if taken:
+            self.cli.info("from the host: " + ", ".join(taken))
+        if differ:
+            self.cli.warn("these differ from the host's copy, and this Mac keeps its own: " + ", ".join(differ))
 
     def _mac_steps(self) -> None:
         self.step("this Mac")

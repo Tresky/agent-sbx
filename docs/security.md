@@ -75,7 +75,7 @@ sandbox.
   your Mac.
 - **Daily work** uses the Proxmox API with a narrow token. The token can:
   - manage the VMs in one pool;
-  - clone and read the template, but not change or destroy it;
+  - clone and read the templates, but not change or destroy one;
   - allocate space on one storage;
   - attach a network card to the two sandbox bridges, and no other bridge.
 - The last right protects the whole design. Even a compromised Mac cannot put

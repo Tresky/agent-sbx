@@ -6,3 +6,6 @@ examples/**/config/master.key
 examples/**/.env*
 # Each setup's own values. host/local.conf.example shows what goes in it.
 host/local.conf
+# Each person's own template definitions and components.
+templates/local/
+template/components/local/

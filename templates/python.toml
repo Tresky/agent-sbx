@@ -1,0 +1,5 @@
+description = "Python, through uv"
+components  = ["python"]
+
+[python]
+versions = ["3.13"]

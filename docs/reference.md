@@ -39,6 +39,7 @@ Options of `sbx new`:
 | Option | Meaning |
 |---|---|
 | `--profile agent\|personal` | the profile. The default is `default_profile` in `config.toml`. |
+| `--template NAME` | the template to clone. The default is the project's `[recipe] template`, then `default_template` in `config.toml`, then the only template that is built. |
 | `--project <project>` | clone this project and run its recipe |
 | `--branch <b>` | the branch to clone. The default is the checkout's branch. |
 | `--from <checkout>` | the checkout that `file` inputs come from, when `--project` is a URL |
@@ -70,14 +71,23 @@ Options of `sbx new`:
 | `sbx claude-token --remove` | forgets the token, and deletes it from each sandbox |
 | `sbx remote-control <name> [--mode M] [--status] [--off]` | signs a personal sandbox in to claude.ai and runs its Remote Control server |
 
-### The template
+### Templates
 
 | Command | What it does |
 |---|---|
-| `sbx versions [--write]` | the Ruby and Node versions, Go versions and Docker images that the projects need, and what the template caches. `--write` puts the list in `host/local.conf`. |
-| `sbx template status` | the template, what the next build caches, and its linked clones |
-| `sbx template rebuild [--rm-sandboxes] [--no-versions] [-y]` | builds the template again (35 to 40 minutes). `--rm-sandboxes` destroys each sandbox first. `--no-versions` keeps `host/local.conf` as it is. |
-| `sbx template finish` | attaches to a build that is running on the host, after a dropped SSH session |
+| `sbx template list` | each definition and each built template: shared or local, current or out of date, the newest version, and the sandboxes that use it |
+| `sbx template show <name>` | one template: its definition, components, build settings, fingerprint, versions and sandboxes |
+| `sbx template components` | the components that a definition can list, with a description of each |
+| `sbx template new <name> [--from TEMPLATE]` | writes `templates/local/<name>.toml`, empty or as a copy of another definition |
+| `sbx template rebuild [NAME ...] [--all] [--changed] [--no-versions] [-y]` | builds a new version of each named template, of every definition (`--all`), or of each one that is not current (`--changed`). 15 to 40 minutes each. The old version stays for its sandboxes. `--no-versions` does not add the versions that the projects need. |
+| `sbx template finish <name>` | attaches to a build that is running on the host, after a dropped SSH session |
+| `sbx template prune` | removes the old versions that no sandbox uses |
+| `sbx template rm <name> [-y]` | removes every version of a template that no sandbox uses. The definition stays. |
+| `sbx template adopt <vmid> <name>` | makes a template from before named templates the first version of `<name>` |
+| `sbx versions [--write]` | for each template: the Ruby and Node versions, Go versions and Docker images that its projects need, and what it caches. `--write` saves them for the next build. |
+
+The commands that build or remove a template ask for the host's root
+password one time. The others use the API token only.
 
 `-v` before any command prints each process that sbx starts.
 
@@ -114,7 +124,9 @@ layer 2: sbx stops with an error.
 | `SBX_UPSTREAM_DNS` | | `1.1.1.1 9.9.9.9` | the DNS servers that the gateway asks |
 | `SBX_DHCP_LEASE` | | `1h` | the DHCP lease time |
 | `SBX_TAILSCALE_TAG` | `tailscale_tag` | `tag:sbx-gw` | the Tailscale tag of the gateway |
-| `SBX_TEMPLATE_VMID` | `template_vmid` | `9000` | the ID of the template |
+| `SBX_TEMPLATE_POOL` | `template_pool` | `sbx-templates` | the Proxmox pool of the templates. The token may clone and read them only. |
+| `SBX_TEMPLATE_VMID_MIN` | `template_vmid_min` | `9000` | the first ID that a template version can take |
+| `SBX_TEMPLATE_VMID_MAX` | `template_vmid_max` | `9099` | the last ID that a template version can take. An ID in use is skipped. |
 | `SBX_VMID_MIN` | `vmid_min` | `9100` | the first sandbox ID |
 | `SBX_VMID_MAX` | `vmid_max` | `9199` | the last sandbox ID |
 | `SBX_VM_STORAGE` | `vm_storage` | `local-lvm` | the storage of the VM disks. It must make linked clones. |
@@ -123,19 +135,7 @@ layer 2: sbx stops with an error.
 | `SBX_POOL` | `pve_pool` | `sbx` | the Proxmox pool of the sandboxes. The token is scoped to it. |
 | `SBX_GPU_MAPPING` | `gpu_mapping` | | the name of a PCI Resource Mapping. Empty refuses `--gpu`. |
 | `SBX_VM_USER` | `vm_user` | `dev` | the user in each sandbox |
-| `SBX_TEMPLATE_CORES` | | `8` | the cores of the build VM |
-| `SBX_TEMPLATE_MEMORY_MB` | | `8192` | the memory of the build VM |
-| `SBX_TEMPLATE_DISK_GB` | | `60` | the disk of the template |
-| `SBX_UBUNTU_IMAGE_URL` | | Ubuntu 24.04 cloud image | the base image |
-| `SBX_RUBY_VERSIONS` | `template_ruby` | `3.4.10` | the Rubies that the template caches. Full versions only. Empty = no Ruby. |
-| `SBX_NODE_VERSIONS` | `template_node` | `lts/*` | the Node versions that the template caches |
-| `SBX_DOCKER_IMAGES` | `template_images` | | the Docker images that the template pulls |
-| `SBX_GO_VERSION` | | `1.27.1` | the Go version. Empty = no Go. |
-| `SBX_TEMPLATE_EXTRAS` | | | the optional parts, from `template/extras/`: `odin`, `gis` |
-| `SBX_EXTRA_APT_PACKAGES` | | | more apt packages for the template |
-| `SBX_ODIN_VERSION` | | `dev-2025-11` | the Odin version of the `odin` extra |
-| `SBX_WGPU_VERSION` | | `v27.0.2.0` | the wgpu-native version of the `odin` extra |
-| `SBX_PREMAKE_VERSION` | | `5.0.0-beta8` | the premake version of the `odin` extra |
+| `SBX_UBUNTU_IMAGE_URL` | | Ubuntu 24.04 cloud image | the image that each template starts from. A definition can name another. |
 
 ### Mac settings (`~/.config/sbx/config.toml`)
 
@@ -148,6 +148,7 @@ layer 2: sbx stops with an error.
 | `pve_ssh` | `root@<pve_api host>` | the root shell for `sbx setup` and `sbx template rebuild` |
 | `pve_ssh_options` | `["-o", "PubkeyAuthentication=no"]` | more `ssh` options for that shell |
 | `default_profile` | `agent` | the profile of `sbx new` |
+| `default_template` | | the template of `sbx new` when neither `--template` nor the project names one. Empty: the only template that is built. `sbx setup` sets it. |
 | `cores` | `8` | the cores of a new sandbox |
 | `memory_mb` | `6144` | the memory of a new sandbox |
 | `agent_ttl_days` | `3` | the expiry of a new agent sandbox. `0` = none. |
@@ -158,6 +159,37 @@ layer 2: sbx stops with an error.
 
 The shared keys of the table above (`domain`, `agent_bridge`, and so on) are
 also accepted, but only with the same value as in `host/local.conf`.
+
+### Template definitions (`templates/<name>.toml`, `templates/local/<name>.toml`)
+
+A local definition wins over a shared one of the same name. [templates.md](templates.md)
+explains them.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `description` | | one line for `sbx template list` |
+| `components` | `[]` | the components, in order, from `template/components/` (or `template/components/local/`) |
+| `apt` | `[]` | more apt packages |
+| `cores`, `memory_mb` | `8`, `8192` | the size of the build VM |
+| `disk_gb` | `60` | the disk of the template. A sandbox can grow it with `--disk`. |
+| `image_url` | `SBX_UBUNTU_IMAGE_URL` | the cloud image to start from |
+| `[<component>]` | | the settings of one listed component, or of `node` or `docker` |
+
+The settings of each component. A setting `[ruby] versions` reaches the
+component as `SBX_RUBY_VERSIONS`.
+
+| Table | Key | Default | Meaning |
+|---|---|---|---|
+| `[node]` | `versions` | `["lts/*"]` | the Node versions (nvm); the first is the default. Every template has Node. |
+| `[docker]` | `images` | `[]` | the Docker images to pull. Every template has Docker. |
+| `[ruby]` | `versions` | `["3.4.10"]` | the Rubies (rvm), full versions only; the first is the default |
+| `[go]` | `version` | `1.27.1` | the Go version |
+| `[rust]` | `toolchains` | `["stable"]` | the rustup toolchains; the first is the default |
+| `[rust]` | `components` | `"clippy rustfmt"` | more rustup components |
+| `[python]` | `versions` | `["3.13"]` | the Pythons that uv caches |
+| `[odin]` | `version`, `wgpu_version`, `premake_version` | see `template/components/odin.sh` | the Odin, wgpu-native and premake releases |
+
+`rails`, `gis` and `media` take no settings.
 
 ### Project bindings (`~/.config/sbx/bindings/<project>.toml`)
 
@@ -185,6 +217,15 @@ the pane layout (`.sandbox/herdr.toml`).
 | `projects.toml` | the project registry |
 | `claude-token.toml` | the date of the Claude token. The token itself is in the keychain. |
 
+### In the repository, not in git
+
+| Path | What it is |
+|---|---|
+| `host/local.conf` | the host settings of this setup |
+| `templates/local/*.toml` | your own template definitions |
+| `templates/local/versions.toml` | what `sbx versions --write` found, per template |
+| `template/components/local/*.sh` | your own components |
+
 ### In the macOS keychain
 
 | Item | What it is |
@@ -203,6 +244,7 @@ the pane layout (`.sandbox/herdr.toml`).
 | `~/.config/sbx/claude.env` | the Claude token, read by every shell |
 | `/etc/sbx/tls/` | the sandbox's certificate |
 | `/etc/sbx/mirror.toml` | optional: the ports that the port mirror skips or forces |
+| `/etc/sbx/template` | the template of the sandbox: its name, fingerprint and components |
 | `/usr/local/bin/sbx-recipe-run` | runs a recipe: `sbx-recipe-run <dir> <script> [env-file]` |
 
 ### Proxmox tags on a sandbox
@@ -213,10 +255,20 @@ the pane layout (`.sandbox/herdr.toml`).
 | `sbx-agent`, `sbx-personal` | the profile |
 | `sbx-exp-YYYYMMDD` | the expiry date |
 | `sbx-proj-<project>` | the project |
+| `sbx-tpl-<name>` | the template it was cloned from |
+
+### Proxmox tags on a template
+
+| Tag | Meaning |
+|---|---|
+| `sbx-template` | the VM is a template of sbx |
+| `sbx-tpl-<name>` | the template's name. A template with no such tag is from before named templates, and counts as `default`. |
+| `sbx-h-<fingerprint>` | the fingerprint of what was built; `sbx template list` compares it with the definition |
+| `sbx-building` | the version is still being built |
 
 ### On the host
 
 | Path | What it is |
 |---|---|
-| `/root/sbx/` | the copy of `host/`, `gw/` and `template/` that the setup runs |
+| `/root/sbx/` | the copy of `host/`, `gw/`, `template/`, `templates/` and `sbxlib/` that the setup and the builds run |
 | `/root/sbx/host/local.conf` | the values of this setup. `sbx setup --mac-only` reads it. |
