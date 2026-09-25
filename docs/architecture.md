@@ -575,7 +575,10 @@ dependencies):
   tools (`tests/test_rails_example.py`);
 - the settings: the Python defaults equal `defaults.conf`, and
   `docs/reference.md` names every command and every key
-  (`tests/test_docs.py`).
+  (`tests/test_docs.py`);
+- the sidecar prototype's handlers (`tests/test_sidecar.py`), with in-memory
+  sockets and a fake upstream: the credential swap, the refusal of a wrong
+  placeholder, and that only the trusted side opens a port.
 
 **Behaviour tests** (Docker):
 
@@ -587,6 +590,9 @@ dependencies):
 - `tests/run-mirror-test.sh`: the port mirror with a real Caddy.
 - `tests/run-finish-test.sh`: `30-template-build.sh --finish` with a fake `qm`
   and the real seal script.
+- `tests/run-sidecar-test.sh`: the sidecar prototype (`sidecar/`) and the
+  VLAN-per-sandbox wiring, against the real gateway rules, with a control for
+  every refusal. Run it after each change under `sidecar/`.
 
 **On the reference host,** by hand: the gateway, the template build, the
 token, `sbx new` in 24 seconds, the first-boot naming from the boot journal,
