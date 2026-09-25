@@ -167,6 +167,22 @@ token and the section.
 Without a `[git]` section, sbx uses `git_token_command` in `config.toml`. Without
 that, an agent sandbox can clone public repositories only.
 
+### A sandbox that runs already
+
+`sbx new` installs the token only into a new agent sandbox. A personal sandbox
+has your forwarded SSH agent for its clone and for `sbx ssh`, and nothing
+else: a herdr pane or an agent inside it has no git credential. To give any
+running sandbox the token:
+
+```
+sbx git-token ~/code/myapp --push lab
+```
+
+With a token in the keychain already, it asks for none and installs that
+one. It writes `~/.git-credentials` in the sandbox, sets git's `store`
+credential helper, and rewrites `git@github.com:` and `ssh://git@github.com/`
+remotes to HTTPS, so every git command in every shell uses the token.
+
 ## A second repository
 
 A project that builds against a sibling checkout declares it as a `repo` input

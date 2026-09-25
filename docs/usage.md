@@ -193,6 +193,7 @@ sbx project add ~/code/app     record a checkout
 sbx project rm app             forget a project
 sbx inputs app                 what the recipe asks for, and where each value comes from
 sbx git-token app              store a git token for the project's agent sandboxes
+sbx git-token app --push lab   ... and install it into a sandbox that runs already
 ```
 
 [projects.md](projects.md) explains recipes, inputs and git tokens.

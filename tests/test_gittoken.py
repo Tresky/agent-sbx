@@ -120,6 +120,40 @@ class CommandTest(unittest.TestCase):
         self.assertTrue(any(c[0] == "security" and c[1] == "delete-generic-password" for c in calls))
         self.assertFalse((self.home / "bindings" / "app.toml").exists())
 
+    def test_push_installs_the_stored_token_into_a_running_sandbox(self):
+        """With a token in the keychain, --push asks for none: it writes the
+        credential file into the VM over ssh, on stdin, and sets the rewrite."""
+        calls, stdins = [], []
+
+        def responder(args, data):
+            calls.append(list(args))
+            stdins.append(data)
+            if args[0] == "git" and args[1] == "-C":
+                done = subprocess.run(args, capture_output=True)
+                return Result(done.returncode, done.stdout.decode(), done.stderr.decode())
+            if args[0] == "security" and args[1] == "find-generic-password":
+                return Result(0, TOKEN + "\n", "")
+            return ""
+
+        class Api:
+            def __call__(self, method, path, params=None):
+                if path == "/cluster/resources":
+                    return [{"type": "qemu", "vmid": 9101, "name": "sbx-lab", "node": "pve", "status": "running",
+                             "tags": "sbx;sbx-personal"}]
+                return None
+
+        (self.home / "id_ed25519").write_text("PRIV")
+        with mock.patch("sbxlib.cli.getpass.getpass", side_effect=AssertionError("no prompt with a stored token")):
+            code = cli.main(["git-token", str(self.app), "--push", "lab"], runner=Runner(responder=responder), api=Api())
+        self.assertEqual(code, 0)
+        # The credential travels on stdin to the VM, never in an argv.
+        self.assertFalse([c for c in calls if TOKEN in " ".join(c)])
+        self.assertIn(f"https://x-access-token:{TOKEN}@github.com\n".encode(), stdins)
+        ssh = [c for c in calls if c[0] == "ssh"]
+        self.assertTrue(any(".git-credentials" in " ".join(c) for c in ssh))
+        rewrite = next(c for c in ssh if "insteadOf" in " ".join(c))
+        self.assertIn("--replace-all", " ".join(rewrite))      # a second push must not add a third value
+
 
 if __name__ == "__main__":
     unittest.main()

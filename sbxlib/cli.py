@@ -729,36 +729,56 @@ def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
     repos = _project_repos(project)
     if not repos:
         raise InputError(f"{project.name}: no origin remote, so there is nothing for a token to cover")
-    print(f"project: {project.name}")
-    print("the token must cover: " + ", ".join(repos))
-    if args.host == "github.com":
-        print("make it at github.com > Settings > Developer settings > Fine-grained tokens:")
-        print("  Only select repositories (the ones above); Contents: Read, or Read and write to push")
 
-    if args.stdin:
-        token = sys.stdin.readline().strip()
+    # `--push` alone, with a token in the keychain already, installs that one:
+    # the usual case is a sandbox that exists and needs the token now.
+    token = gittoken.stored(runner, project.name) if args.push and not args.stdin else ""
+    if token:
+        info(f"using the token stored for {project.name}; `sbx git-token {args.project} --remove` first to replace it")
     else:
-        if not sys.stdin.isatty():
-            raise InputError("no terminal to ask for the token; pass --stdin and pipe it in")
-        token = getpass.getpass(f"token for {project.name} (hidden): ").strip()
-    if not token or any(c.isspace() for c in token):
-        raise InputError("the token is empty or has whitespace in it")
+        print(f"project: {project.name}")
+        print("the token must cover: " + ", ".join(repos))
+        if args.host == "github.com":
+            print("make it at github.com > Settings > Developer settings > Fine-grained tokens:")
+            print("  Only select repositories (the ones above); Contents: Read, or Read and write to push")
 
-    if not args.no_check:
-        checks = gittoken.check_token(runner, token, args.host, repos)
-        for c in checks:
-            print(f"  {c.status:<12} {c.repo}")
-        if any(c.status == "bad token" for c in checks):
-            raise InputError("the git host does not know this token; nothing stored")
-        if any(c.status == "no access" for c in checks):
-            raise InputError("the token does not cover every repository above; nothing stored. "
-                             "Add the missing ones to its repository access, or pass --no-check")
+        if args.stdin:
+            token = sys.stdin.readline().strip()
+        else:
+            if not sys.stdin.isatty():
+                raise InputError("no terminal to ask for the token; pass --stdin and pipe it in")
+            token = getpass.getpass(f"token for {project.name} (hidden): ").strip()
+        if not token or any(c.isspace() for c in token):
+            raise InputError("the token is empty or has whitespace in it")
 
-    service = gittoken.store(runner, project.name, token)
-    gittoken.write_binding(binding, project.name, args.host, args.username)
-    info(f"stored in the keychain as {service}")
-    info(f"wrote [git] in {binding}")
-    print(f"an agent sandbox of {project.name} now clones with this token: sbx new <name> --project {args.project}")
+        if not args.no_check:
+            checks = gittoken.check_token(runner, token, args.host, repos)
+            for c in checks:
+                print(f"  {c.status:<12} {c.repo}")
+            if any(c.status == "bad token" for c in checks):
+                raise InputError("the git host does not know this token; nothing stored")
+            if any(c.status == "no access" for c in checks):
+                raise InputError("the token does not cover every repository above; nothing stored. "
+                                 "Add the missing ones to its repository access, or pass --no-check")
+
+        service = gittoken.store(runner, project.name, token)
+        gittoken.write_binding(binding, project.name, args.host, args.username)
+        info(f"stored in the keychain as {service}")
+        info(f"wrote [git] in {binding}")
+
+    # Into sandboxes that run already, either profile. `sbx new` does this on
+    # its own for an agent sandbox; a personal sandbox has the forwarded SSH
+    # agent for its clone and for `sbx ssh` only, so a pane or an agent in it
+    # has no git credential until a token is pushed.
+    if args.push:
+        pve = _pve(cfg, runner, api)
+        for name in args.push:
+            box = pve.require(names.hostname(name))
+            _install_git_token(Vm(cfg, runner, box.hostname), args.username, args.host, token)
+            info(f"{box.hostname}: git uses the token for {args.host} now, in every shell")
+    else:
+        print(f"an agent sandbox of {project.name} now clones with this token: sbx new <name> --project {args.project}")
+        print(f"a sandbox that runs already gets it with: sbx git-token {args.project} --push <name>")
     return 0
 
 
@@ -993,14 +1013,21 @@ def _git_auth(cfg: Config, runner: Runner, vm: Vm, profile: str, project: Projec
     if access is None:
         return False
     token = runner.run(access.token_command).stdout.strip()
-    host = access.host
-    vm.put(f"https://{access.username}:{token}@{host}\n".encode(), ".git-credentials")
+    _install_git_token(vm, access.username, access.host, token)
+    return False
+
+
+def _install_git_token(vm: Vm, username: str, host: str, token: str) -> None:
+    """A stored credential for the host, and an SSH-to-HTTPS rewrite, so every
+    git command in the VM uses the token, in any shell or pane, with no agent.
+    Safe to run again: the rewrite is replaced, never added to."""
+    vm.put(f"https://{username}:{token}@{host}\n".encode(), ".git-credentials")
     q = shlex.quote
+    https = q(f"https://{host}/")
     # The manifest and `origin` may use the SSH form; the token works over HTTPS.
     vm.run("git config --global credential.helper store && "
-           f"git config --global url.{q(f'https://{host}/')}.insteadOf {q(f'git@{host}:')} && "
-           f"git config --global --add url.{q(f'https://{host}/')}.insteadOf {q(f'ssh://git@{host}/')}")
-    return False
+           f"git config --global --replace-all url.{https}.insteadOf {q(f'git@{host}:')} && "
+           f"git config --global --add url.{https}.insteadOf {q(f'ssh://git@{host}/')}")
 
 
 def _setup_project(vm: Vm, project: Project, decisions, forward_agent: bool, profile: str = "agent") -> int:
@@ -1515,6 +1542,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--stdin", action="store_true", help="read the token from stdin instead of a hidden prompt")
     s.add_argument("--no-check", action="store_true", help="store without asking the git host about it")
     s.add_argument("--remove", action="store_true", help="forget the token and the binding")
+    s.add_argument("--push", action="append", default=[], metavar="NAME",
+                   help="also install the token into this running sandbox (repeatable); "
+                        "with a token in the keychain already, install that one")
     s.set_defaults(fn=cmd_git_token)
 
     s = sub.add_parser("claude-token", help="sign Claude Code in every sandbox in to your Claude subscription")

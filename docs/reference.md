@@ -63,7 +63,7 @@ Options of `sbx new`:
 | `sbx project add <project>` | records a checkout, so `--project <name>` works by name |
 | `sbx project rm <name>` | forgets a project. Its token and its bindings stay. |
 | `sbx inputs <project> [--branch B] [--from PATH]` | shows what the recipe asks for, and where each value comes from. It makes nothing. |
-| `sbx git-token <project> [--host H] [--username U] [--stdin] [--no-check] [--remove]` | stores the project's git token in the keychain, after a check that it covers each repository. `--no-check` skips the check. `--remove` forgets it. |
+| `sbx git-token <project> [--host H] [--username U] [--stdin] [--no-check] [--remove] [--push NAME]` | stores the project's git token in the keychain, after a check that it covers each repository. `--no-check` skips the check. `--remove` forgets it. `--push NAME` also installs the token into that running sandbox, either profile (repeatable); with a token in the keychain already, it asks for none and installs that one. |
 | `sbx claude-token` | runs `claude setup-token` and stores the Claude token |
 | `sbx claude-token --stdin` | reads a new Claude token from stdin |
 | `sbx claude-token --push [name ...]` | writes the stored token into running sandboxes, and into the named ones |

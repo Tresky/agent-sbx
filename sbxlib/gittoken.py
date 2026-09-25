@@ -75,6 +75,13 @@ def store(runner: Runner, project: str, token: str) -> str:
     return service
 
 
+def stored(runner: Runner, project: str) -> str:
+    """The project's token from the keychain, or "" when there is none."""
+    done = runner.run(["security", "find-generic-password", "-s", keychain_service(project), "-a", "sbx", "-w"],
+                      check=False)
+    return done.stdout.strip() if done.code == 0 else ""
+
+
 def forget(runner: Runner, project: str) -> bool:
     done = runner.run(["security", "delete-generic-password", "-s", keychain_service(project), "-a", "sbx"], check=False)
     return done.code == 0
