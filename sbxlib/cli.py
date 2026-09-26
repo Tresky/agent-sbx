@@ -889,10 +889,12 @@ def _remote_control_setup(cfg: Config, runner: Runner, vm: Vm, hostname: str, pr
             warn(f"Remote Control needs a sign-in, which needs a terminal. Later: sbx remote-control {hostname[4:]}")
             return False
         url = remotecontrol.start_login(vm, directory)
-        print("\nRemote Control: sign the sandbox in. A browser opens on this Mac; click Authorize,")
+        print("\nRemote Control: sign the sandbox in. Open the link, click Authorize,")
         print(f"copy the code the page shows, and paste it here.\n  {url}")
-        if runner.run(["open", url], check=False).code != 0:
-            print("  (the browser did not open; use the link above)")
+        # macOS has `open`; a Linux desktop has `xdg-open`; a server has neither.
+        opener = shutil.which("open" if sys.platform == "darwin" else "xdg-open")
+        if opener is None or runner.run([opener, url], check=False).code != 0:
+            print("  (no browser opened here; open the link above yourself)")
         code = getpass.getpass("code (hidden): ").strip()
         remotecontrol.finish_login(vm, code)
         info(f"{hostname} is signed in to claude.ai")

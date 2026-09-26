@@ -49,7 +49,8 @@ Each item below was open before; each is now proved.
 
 Also proved there: a web server in an agent sandbox (port 4400), reached from
 a tailnet device at the sandbox's name, through the gateway, the sidecar and
-the VLAN.
+the VLAN; and Remote Control in a personal sandbox, signed in by
+`sbx remote-control` and listed at claude.ai/code.
 
 What the host found, each fixed with a test:
 
@@ -66,7 +67,9 @@ What the host found, each fixed with a test:
   the gateway answers. The server skips the lookup now.
 - **Setup assumed a Mac.** Off macOS, the secrets are files in
   `~/.config/sbx/secrets/` ([the secret store](reference.md#the-secret-store)),
-  and the local routes come from `ip -4 route`.
+  and the local routes come from `ip -4 route`. `sbx remote-control` ran
+  macOS's `open` for the sign-in link and quit without it; it uses
+  `xdg-open`, or only prints the link.
 
 ## What remains
 

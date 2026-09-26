@@ -109,6 +109,25 @@ class ProfileTest(unittest.TestCase):
         events = []
         return cli.main(["new", *argv], runner=Runner(responder=lambda a, d: ""), api=FakeApi(events))
 
+    def test_the_sign_in_works_without_a_browser_opener(self):
+        # A Linux server has neither `open` nor `xdg-open` (shutil.which is
+        # None here): the link is printed, and nothing tries to run an opener.
+        calls = []
+        runner = Runner(responder=lambda a, d: calls.append(a) or "")
+        with mock.patch("sbxlib.cli.remotecontrol.logged_in", return_value=False), \
+             mock.patch("sbxlib.cli.remotecontrol.start_login", return_value=URL), \
+             mock.patch("sbxlib.cli.remotecontrol.finish_login") as finish, \
+             mock.patch("sbxlib.cli.sys.stdin") as stdin, \
+             mock.patch("sbxlib.cli.getpass.getpass", return_value="the-code"), \
+             mock.patch("builtins.print") as out:
+            stdin.isatty.return_value = True
+            ok = cli._remote_control_setup(cli.load_config(), runner, mock.Mock(), "sbx-p", "personal", None,
+                                           "acceptEdits")
+        self.assertTrue(ok)
+        finish.assert_called_once_with(mock.ANY, "the-code")
+        self.assertIn(URL, " ".join(str(c) for c in out.call_args_list))
+        self.assertFalse([a for a in calls if a[0] in ("open", "xdg-open")])
+
     def test_personal_starts_the_server_and_agent_never_does(self):
         enable = cli.remotecontrol.enable
         self.assertEqual(self.run_new("p", "--profile", "personal"), 0)

@@ -57,7 +57,7 @@ token, so a new token on one Mac does not stop the others.
 
 ### A Linux machine instead of a Mac
 
-sbx runs on Linux too, with the same steps. Four things differ:
+sbx runs on Linux too, with the same steps. Five things differ:
 
 - **Tailscale** is the Linux package (`tailscale up`), not the app. Linux
   ignores the routes of a subnet router until you accept them, so run this
@@ -79,6 +79,9 @@ sbx runs on Linux too, with the same steps. Four things differ:
   `172.17.0.0/16` counts.
 - **Your git key** for a personal sandbox goes into the agent with a plain
   `ssh-add ~/.ssh/<key>`; `--apple-use-keychain` is macOS only.
+- **A sign-in link** (`sbx remote-control`) opens with `xdg-open` on a
+  desktop. On a machine with no browser, open the printed link on any
+  device, and paste the code back at the prompt.
 
 ## The values of your setup
 
