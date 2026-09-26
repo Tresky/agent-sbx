@@ -633,3 +633,43 @@ class SmallTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExtendTest(unittest.TestCase):
+    """sbx extend: the expiry tag is replaced, and the other tags stay."""
+
+    def run_extend(self, tags, *argv):
+        import datetime as dt
+        from sbxlib.pve import Sandbox
+        box = Sandbox(9107, "sbx-app", "pve", "running", tuple(tags))
+        pve = mock.Mock()
+        pve.require.return_value = box
+        with mock.patch("sbxlib.cli._pve", return_value=pve):
+            code = cli.main(["extend", "app", *argv], runner=Runner(responder=lambda a, d: ""))
+        return code, pve.set_expiry.call_args, dt
+
+    def test_never_removes_the_expiry(self):
+        code, call, _ = self.run_extend(["sbx", "sbx-agent", "sbx-exp-20260929"], "--never")
+        self.assertEqual(code, 0)
+        self.assertIsNone(call.args[1])
+
+    def test_days_count_from_the_later_of_today_and_the_expiry(self):
+        import datetime as dt
+        today = dt.date.today()
+        later = today + dt.timedelta(days=10)
+        _, call, _ = self.run_extend(["sbx", f"sbx-exp-{later:%Y%m%d}"], "--days", "5")
+        self.assertEqual(call.args[1], later + dt.timedelta(days=5))
+        _, call, _ = self.run_extend(["sbx", "sbx-exp-20200101"], "--days", "5")
+        self.assertEqual(call.args[1], today + dt.timedelta(days=5))
+
+    def test_set_expiry_keeps_the_other_tags(self):
+        import datetime as dt
+        from sbxlib.pve import Pve, Sandbox
+        calls = []
+        pve = Pve.__new__(Pve)
+        pve.api = lambda method, path, body=None: calls.append((method, path, body))
+        box = Sandbox(9107, "sbx-app", "pve", "running", ("sbx", "sbx-agent", "sbx-proj-app", "sbx-exp-20260929"))
+        pve.set_expiry(box, dt.date(2026, 10, 9))
+        self.assertEqual(calls[-1][2], {"tags": "sbx;sbx-agent;sbx-proj-app;sbx-exp-20261009"})
+        pve.set_expiry(box, None)
+        self.assertEqual(calls[-1][2], {"tags": "sbx;sbx-agent;sbx-proj-app"})

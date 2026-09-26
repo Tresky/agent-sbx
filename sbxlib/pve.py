@@ -235,6 +235,14 @@ class Pve:
             out.append(Sandbox(int(r["vmid"]), r.get("name", ""), r.get("node", ""), r.get("status", ""), tags))
         return sorted(out, key=lambda s: s.hostname)
 
+    def set_expiry(self, box: Sandbox, expires: dt.date | None) -> None:
+        """Replace the sbx-exp tag; None removes it (never expires). The other
+        tags stay as they are."""
+        tags = [t for t in box.tags if not t.startswith("sbx-exp-")]
+        if expires:
+            tags.append(f"sbx-exp-{expires:%Y%m%d}")
+        self.api("PUT", self._vm(box.node, box.vmid, "/config"), {"tags": ";".join(tags)})
+
     def find(self, hostname: str) -> Sandbox | None:
         return next((s for s in self.sandboxes() if s.hostname == hostname), None)
 

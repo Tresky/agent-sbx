@@ -1643,6 +1643,24 @@ def _confirm(question: str, yes: bool) -> bool:
         return False
 
 
+def cmd_extend(args, cfg: Config, runner: Runner, api=None) -> int:
+    pve = _pve(cfg, runner, api)
+    box = pve.require(names.hostname(args.name))
+    if args.never:
+        pve.set_expiry(box, None)
+        info(f"{box.hostname} never expires now; `sbx gc` leaves it alone")
+        return 0
+    if args.days is None or args.days < 1:
+        raise InputError("give --days N (1 or more), or --never")
+    # From today, or from the current expiry if that is later: extending
+    # never shortens.
+    start = max(dt.date.today(), box.expires or dt.date.today())
+    expires = start + dt.timedelta(days=args.days)
+    pve.set_expiry(box, expires)
+    info(f"{box.hostname} expires {expires}")
+    return 0
+
+
 def cmd_rm(args, cfg: Config, runner: Runner, api=None) -> int:
     pve = _pve(cfg, runner, api)
     box = pve.require(names.hostname(args.name))
@@ -1894,6 +1912,13 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument("name")
         s.add_argument("label", nargs="?", default="clean")
         s.set_defaults(fn=fn)
+
+    s = sub.add_parser("extend", help="move a sandbox's expiry later, or remove it")
+    s.add_argument("name")
+    how = s.add_mutually_exclusive_group(required=True)
+    how.add_argument("--days", type=int, metavar="N", help="N more days, from today or the current expiry")
+    how.add_argument("--never", action="store_true", help="no expiry: `sbx gc` never removes it")
+    s.set_defaults(fn=cmd_extend)
 
     s = sub.add_parser("rm", help="destroy a sandbox and its snapshots")
     s.add_argument("name")

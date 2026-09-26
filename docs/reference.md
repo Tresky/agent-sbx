@@ -26,6 +26,8 @@ path, a git URL, or a name that `sbx projects` lists.
 | `sbx ssh <name> [--sidecar] [-- command]` | a shell in the sandbox, or one command. `--sidecar`: the sandbox's sidecar instead (the sandbox's name, port 2222). |
 | `sbx snap <name> [label]` | takes a snapshot. The default label is `clean`. |
 | `sbx rollback <name> [label]` | returns to a snapshot. The default label is `clean`. |
+| `sbx extend <name> --days N` | moves the expiry N days later, from today or from the current expiry, whichever is later |
+| `sbx extend <name> --never` | removes the expiry: `sbx gc` never removes the sandbox |
 | `sbx rm <name> [-y]` | destroys the sandbox and its snapshots |
 | `sbx gc [-y]` | destroys each expired sandbox, after a confirmation |
 | `sbx herdr <name> [--attach]` | adds the sandbox to the herdr sidebar. `--attach` opens one full herdr window on it. |

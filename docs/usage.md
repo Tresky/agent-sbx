@@ -230,6 +230,8 @@ returns it to a sandbox that is ready for work.
 sbx list          every sandbox, with its profile, project and expiry
 sbx rm lab        destroy one sandbox and its snapshots
 sbx gc            destroy each expired sandbox (it asks first)
+sbx extend lab --days 7    seven more days
+sbx extend lab --never     no expiry
 ```
 
 - The expiry is a soft limit. Nothing destroys a sandbox by itself. `sbx list`
