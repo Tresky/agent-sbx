@@ -107,9 +107,11 @@ class Quiet(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # the sidecar logs its own lines
         pass
 
-    def reply(self, code: int, obj) -> None:
+    def reply(self, code: int, obj, headers: dict | None = None) -> None:
         data = json.dumps(obj).encode()
         self.send_response(code)
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -146,7 +148,12 @@ class Proxy(Quiet):
     def handle_any(self):
         if not presented_secret(self):
             log(f"proxy {self.command} {self.path} -> 401 (not this sandbox's secret)")
-            return self.reply(401, {"error": "unknown sandbox credential"})
+            # git asks first with no credential. Its HTTP library sends the
+            # stored one only when the 401 names a scheme, as GitHub's does;
+            # without this header git retries empty-handed, gets a second 401,
+            # and deletes the placeholder from ~/.git-credentials.
+            return self.reply(401, {"error": "unknown sandbox credential"},
+                              {"WWW-Authenticate": 'Basic realm="sbx sidecar"'})
         body = self.body()
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
         if self.path.startswith("/github/"):

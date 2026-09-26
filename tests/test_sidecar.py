@@ -168,9 +168,12 @@ class ProxyTest(Base):
         wrong_basic = base64.b64encode(b"sbx:wrong").decode()
         for headers in ({"Authorization": "Bearer wrong"}, {"x-api-key": "wrong"},
                         {"Authorization": f"Basic {wrong_basic}"}, {"Authorization": "Basic %%%"}, {}):
-            status, _, body = request(sidecar.Proxy, "agent", "GET", "/v1/models", headers)
+            status, got, body = request(sidecar.Proxy, "agent", "GET", "/v1/models", headers)
             self.assertEqual(status, 401, headers)
             self.assertIn("unknown sandbox credential", body.decode())
+            # git's HTTP library sends a stored credential only after a 401
+            # that names the scheme; without it, git deletes the credential.
+            self.assertEqual(got.get("www-authenticate"), 'Basic realm="sbx sidecar"')
         self.assertEqual(FakeUpstream.calls, [])
 
     def test_upstream_status_and_hop_headers(self):

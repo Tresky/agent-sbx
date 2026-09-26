@@ -169,6 +169,9 @@ contains "Claude call carries the real token upstream"                 "$out" "B
 out="$(c agentA -u "sbx:$SA" http://10.79.0.1:8080/github/o/r.git/info/refs)"
 contains "git call carries the git token upstream, as basic auth"      "$out" "Basic $(printf 'x-access-token:ghp_REAL_A' | base64 -w0)"
 contains "git call keeps its path"                                     "$out" '"path": "/o/r.git/info/refs"'
+# git asks without a credential first; libcurl (git's HTTP library, and curl
+# --anyauth) sends the stored one only after a 401 that names the scheme.
+report "git's way: a credential sent only after the 401"             "$(code agentA --anyauth -u "sbx:$SA" http://10.79.0.1:8080/github/o/r.git/info/refs)" 200
 report   "wrong placeholder is refused"          "$(code agentA -H 'Authorization: Bearer wrong' http://10.79.0.1:8080/v1/messages)" 401
 report   "no credential is refused"              "$(code agentA http://10.79.0.1:8080/v1/messages)" 401
 report   "A's placeholder is useless at sidecar B" "$(code agentB -H "Authorization: Bearer $SA" http://10.79.0.5:8080/v1/messages)" 401
