@@ -37,6 +37,9 @@ import urllib.parse
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
        "transfer-encoding", "upgrade", "host", "authorization", "x-api-key", "content-length"}
 PORT_MIN, PORT_MAX = 1024, 32767
+# The sidecar's own sshd and expose API: in the range, but never the VM's.
+# The firewall keeps them too (nftables.conf.tmpl).
+RESERVED = {2222, 8081}
 # Claude Code sends this beta header with a subscription (OAuth) token. The
 # proxy adds it when the real token is one, because Claude Code in the sandbox
 # only sees a placeholder and does not know. Unverified with the real API.
@@ -238,6 +241,8 @@ class Expose(Quiet):
         port = obj.get("port") if isinstance(obj, dict) else None
         if not isinstance(port, int) or isinstance(port, bool) or not (PORT_MIN <= port <= PORT_MAX):
             return self.reply(400, {"error": f"port must be an integer from {PORT_MIN} to {PORT_MAX}"})
+        if port in RESERVED | {CFG.net_expose_port}:
+            return self.reply(400, {"error": f"port {port} is the sidecar's own"})
         if self.path == "/expose":
             if side != "agent":
                 return self.reply(403, {"error": "the sandbox asks for its own ports"})
@@ -264,6 +269,14 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     def __init__(self, addr, handler, side: str = ""):
         self.side = side
         super().__init__(addr, handler)
+
+    # HTTPServer.server_bind asks DNS for the fully qualified name of the
+    # address before it listens. With no resolver in reach, that waits out the
+    # resolver's timeouts, and the port refuses connections meanwhile. The
+    # name is only used in CGI variables, so the sidecar skips the lookup.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def main(argv=None) -> int:

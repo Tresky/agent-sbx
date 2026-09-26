@@ -74,6 +74,9 @@ table ip sbx_sidecar_nat {
 		# Another sidecar gets no translation: its packet then meets the input
 		# chain, which drops it.
 		iifname "@SBX_SIDECAR_NET_IF@" ip saddr @SBX_AGENT_NET@.0/24 ip saddr != @SBX_AGENT_NET@.1 return
+		# The sidecar's own sshd and expose API stay the sidecar's: they are in
+		# the open range, and the VM must never answer in their place.
+		iifname "@SBX_SIDECAR_NET_IF@" tcp dport { 2222, 8081 } return
 		iifname "@SBX_SIDECAR_NET_IF@" tcp dport 22 dnat to @SBX_SIDECAR_VM@
 		iifname "@SBX_SIDECAR_NET_IF@" tcp dport @approved dnat to @SBX_SIDECAR_VM@
 		@SBX_SIDECAR_OPEN_RULE@

@@ -188,6 +188,21 @@ expect_tcp fail "LAN host -> sidecar A port 4400"                      lan    10
 report "trusted side denies"                     "$(code ts -d '{"port":4400}' http://10.77.0.57:8081/deny)" 200
 expect_tcp fail "tailnet device -> port 4400 after denial"             ts 10.77.0.57 4400
 report "a port outside the range is refused"     "$(code agentA -H "Authorization: Bearer $SA" -d '{"port":22}' http://10.79.0.1:8081/expose)" 400
+report "the sidecar's own API port is refused"   "$(code agentA -H "Authorization: Bearer $SA" -d '{"port":8081}' http://10.79.0.1:8081/expose)" 400
+
+echo "== open mode: every port in the range reaches the VM, except the sidecar's own"
+# A stand-in for the sidecar's sshd; the VM has nothing on 2222.
+# http.server asks DNS for its own name before it listens, and no resolver is
+# in reach here: wait for the socket, not for a fixed time.
+ns sideA python3 -m http.server 2222 --bind 10.77.0.57 >/dev/null 2>&1 &
+for _ in $(seq 60); do ns sideA ss -ltn | grep -q ':2222 ' && break; sleep 0.5; done
+SBX_SIDECAR_VM=10.79.0.2 SBX_SIDECAR_OPEN_RULE='iifname "net0" tcp dport 1024-32767 dnat to 10.79.0.2' \
+  render "$SIDECAR_TMPL" > /tmp/sideA-open.conf
+ns sideA nft -f /tmp/sideA-open.conf || { echo "open-mode rules failed to load"; exit 2; }
+report "tailnet device -> port 4400, no approval" "$(code ts http://10.77.0.57:4400/)" 200
+report "tailnet device -> 8081 is still the expose API" "$(code ts http://10.77.0.57:8081/requests)" 200
+report "tailnet device -> 2222 is still the sidecar's" "$(code ts http://10.77.0.57:2222/)" 200
+ns sideA nft -f /tmp/sideA.conf || { echo "sidecar rules failed to reload"; exit 2; }
 
 echo "== control 1: sidecar rules deleted (the gateway's own layer still holds)"
 for s in sideA sideB; do ns "$s" nft delete table inet sbx_sidecar; done
