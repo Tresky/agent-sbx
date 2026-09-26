@@ -117,9 +117,34 @@ In the order they were discussed, none started:
 
 - **A lab VLAN at home** for the Proxmox host and the gateway's LAN leg, so
   a gateway compromise lands away from the house devices.
-- **Public apps behind Cloudflare Access.** An outbound tunnel from a
-  sidecar, a hostname per sandbox, approved through the expose API. Tailscale
-  Serve fronts loopback only, so Caddy on the sidecar sits in between.
+- **Previews behind Cloudflare Access**, for you only: a sandbox's web app
+  at a public hostname that asks for your sign-in first. The design:
+  - **`cloudflared` runs on the sidecar**, one tunnel per sandbox, and points
+    straight at the VM on the wire (`http://10.79.0.2:<port>`). No Caddy: the
+    tunnel reaches any address, unlike Tailscale Serve. Not the gateway: one
+    tunnel there would put every sandbox's exposure in the container on the
+    LAN.
+  - **The Cloudflare API token stays on the Mac**, in the secret store.
+    `sbx` makes the tunnel, its DNS record and its ingress through the API.
+    The sidecar gets only that tunnel's connector token; the tunnel is
+    remotely managed, so a sidecar cannot add a hostname or change a target.
+  - **Access comes first.** Setup makes one wildcard Access application for
+    `*.<zone>`, allowing only your email, before any hostname exists. A new
+    hostname is covered from its first second; there is no per-hostname race.
+  - **A separate zone**, not your main domain: an agent serves what it wants
+    there, and must not reach your domain's cookies or lend it to phishing.
+  - **Publishing is its own step.** Opening a port means your tailnet;
+    publishing means the internet behind Access. `sbx publish <name> <port>`
+    (and `--off`), never a side effect of `sidecar_ports = "open"`. It
+    belongs with `sbx ports` above.
+  - **No bypass of Access.** No webhooks, no service tokens, no public paths:
+    the use is previews for you.
+  - **Cleanup:** `sbx rm` deletes the tunnel and its DNS record; `sbx gc`
+    removes the tunnels and records whose sandbox is gone.
+  - **Proof:** the netns test covers the sidecar side (the tunnel's outbound
+    connection is allowed, and it reaches the published port of its own VM
+    only). On the host: publish from `lab`, get the Access login page
+    without a sign-in, and the app after it.
 - **Fork a sandbox and run a workflow in the fork.** A full clone from a
   snapshot with a fresh machine id, host keys and name; a prompt over SSH
   stdin into a tmux session; the child reports back through the Mac, since
