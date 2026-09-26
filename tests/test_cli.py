@@ -208,13 +208,15 @@ class NewTest(unittest.TestCase):
         sc_params = events[sc_config][3]
         # The sidecar: one leg on the sandbox's VLAN with the wire address, one
         # untagged on the agent bridge with DHCP from the gateway.
-        self.assertEqual((sc_params["net0"], sc_params["net1"]), ("virtio,bridge=vmbr77,tag=9101", "virtio,bridge=vmbr77"))
+        # VLAN 3: the second id of the range (9100 is taken), since a VLAN id
+        # stops at 4094 and the VM id cannot be the tag.
+        self.assertEqual((sc_params["net0"], sc_params["net1"]), ("virtio,bridge=vmbr77,tag=3", "virtio,bridge=vmbr77"))
         self.assertEqual((sc_params["ipconfig0"], sc_params["ipconfig1"]), ("ip=10.79.0.1/30", "ip=dhcp"))
         self.assertEqual(sc_params["tags"], "sbx-sidecar;sbx-of-sbx-myapp;sbx-tpl-sidecar")
         params = events[config][3]
         # The sandbox: its only NIC on its own VLAN, a static wire address, the
         # sidecar as its router, the gateway as its resolver.
-        self.assertEqual(params["net0"], "virtio,bridge=vmbr77,tag=9101")
+        self.assertEqual(params["net0"], "virtio,bridge=vmbr77,tag=3")
         self.assertEqual(params["ipconfig0"], "ip=10.79.0.2/30,gw=10.79.0.1")
         self.assertEqual((params["nameserver"], params["searchdomain"]), ("10.77.0.1", "sbx.internal"))
         self.assertRegex(params["tags"], r"^sbx;sbx-agent;sbx-tpl-default;sbx-exp-\d{8};sbx-proj-app$")
@@ -597,6 +599,15 @@ class SmallTests(unittest.TestCase):
         for env_key, field in _ENV_MAP.items():
             with self.subTest(key=env_key):
                 self.assertEqual(str(getattr(plain, field)), shared[env_key])
+
+    def test_vlan_follows_the_id_range_and_stays_in_range(self):
+        cfg = load()
+        self.assertEqual((cfg.vlan_for(9100), cfg.vlan_for(9101), cfg.vlan_for(9199)), (2, 3, 101))
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "local.conf"
+            local.write_text("SBX_VMID_MIN=100\nSBX_VMID_MAX=9999\n")
+            with self.assertRaisesRegex(ConfigError, "wider than the 4093 VLANs"):
+                load(local_path=local)
 
     def test_config_toml_cannot_disagree_with_a_shared_key(self):
         with tempfile.TemporaryDirectory() as tmp:

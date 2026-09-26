@@ -115,6 +115,13 @@ class Config:
         """Whether a sandbox of this profile gets a sidecar."""
         return profile == "agent" and self.agent_sidecar
 
+    def vlan_for(self, vmid: int) -> int:
+        """The VLAN of a sandbox and its sidecar. A VLAN id is 1 to 4094 and a
+        sandbox id is 9100 and up, so the id itself cannot be the tag: the
+        tag is the sandbox's place in the id range, from 2 (1 is the untagged
+        default of the bridge, where the sidecars and the gateway sit)."""
+        return vmid - self.vmid_min + 2
+
     @property
     def sidecar_addr(self) -> str:
         return f"{self.sidecar_link}.1"
@@ -210,6 +217,9 @@ def load(config_path: Path | None = None, defaults_path: Path = DEFAULTS_ENV,
         raise ConfigError("default_profile must be 'agent' or 'personal'")
     if cfg.sidecar_ports not in ("open", "ask"):
         raise ConfigError("sidecar_ports must be 'open' or 'ask'")
+    if cfg.vlan_for(cfg.vmid_max) > 4094:
+        raise ConfigError(f"the sandbox id range {cfg.vmid_min}-{cfg.vmid_max} is wider than the 4093 VLANs "
+                          "that one bridge has; narrow SBX_VMID_MIN/SBX_VMID_MAX in host/local.conf")
     if cfg.sidecar_claude not in ("direct", "proxy"):
         raise ConfigError("sidecar_claude must be 'direct' or 'proxy'")
     return cfg

@@ -1198,14 +1198,15 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
     # The per-sandbox secret: the sandbox presents it to its sidecar, and to
     # nothing else. It goes to both over SSH stdin and appears in no command.
     secret = secrets.token_urlsafe(24) if sidecar else ""
+    vlan = cfg.vlan_for(vmid)
     if sidecar:
-        info(f"cloning template {sc_template.name} into VM {sc_vmid} ({hostname}-sc, the sidecar; VLAN {vmid})")
-        pve.create_sidecar(sc_template, sc_vmid, hostname, vlan=vmid, pubkey=pubkey)
+        info(f"cloning template {sc_template.name} into VM {sc_vmid} ({hostname}-sc, the sidecar; VLAN {vlan})")
+        pve.create_sidecar(sc_template, sc_vmid, hostname, vlan=vlan, pubkey=pubkey)
     info(f"cloning template {template.name} ({template.vm_name}) into VM {vmid} ({hostname}, {profile})")
     node = pve.create(template, vmid, hostname, profile, pubkey,
                       cores=args.cores or cfg.cores, memory_mb=args.memory or cfg.memory_mb,
                       disk_gb=args.disk, expires=expires, project=project.name if project else "",
-                      vlan=vmid if sidecar else None,
+                      vlan=vlan if sidecar else None,
                       ipconfig=f"ip={cfg.sidecar_vm_addr}/30,gw={cfg.sidecar_addr}" if sidecar else "ip=dhcp",
                       nameserver=cfg.dns_server if sidecar else "", searchdomain=cfg.domain if sidecar else "")
     if args.gpu:

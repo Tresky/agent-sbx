@@ -71,7 +71,8 @@ CLI cannot put a sandbox on the LAN bridge.
 
 An agent sandbox does not sit on the agent bridge alone. The bridge is
 VLAN-aware (`host/10-bridges.sh`), and `sbx new` gives the sandbox's only
-network card the tag `<vmid>`. Beside it, `sbx new` clones a **sidecar** from
+network card a tag of its own: `2 + (vmid - vmid_min)`, because a VLAN id
+stops at 4094 and a sandbox id starts at 9100 (`Config.vlan_for`). Beside it, `sbx new` clones a **sidecar** from
 the `sidecar` template (`templates/sidecar.toml`, `bare = true`: nftables and
 one Python service, none of the core). The sidecar's `net0` carries the same
 tag, with the wire address `<sidecar_link>.1/30`; the sandbox has
@@ -365,7 +366,7 @@ instead, so the second Mac and the host agree.
    cloud-init user, `ip=dhcp`, the sandbox public key (URL-encoded inside the
    form body, which the API expects), and the tags `sbx`, the profile, the
    template, the expiry and the project. For `agent`: the card carries the
-   tag `<vmid>`, the address is the static wire address with the sidecar as
+   sandbox's VLAN tag, the address is the static wire address with the sidecar as
    router, and the resolver is the gateway. The sidecar gets its two cards,
    the wire address, DHCP on the second, and the tags `sbx-sidecar` and
    `sbx-of-<hostname>`.
@@ -610,6 +611,7 @@ Each of these cost real time. Keep them in mind when you change the code.
 | a forwarded SSH agent and a key named in ssh config | the sandbox sees the agent only | `ssh-add --apple-use-keychain ~/.ssh/<key>`; the CLI checks before a VM exists |
 | a Python f-string with `\"` inside `{}` | a syntax error before Python 3.12 | different quotes, or a heredoc |
 | `set \| grep '^SBX_'` to save variables | a multi-line variable of another name has lines that start with `SBX_`; they pass the filter and overwrite the real values when the file is sourced | `declare -p` for each name from `compgen -v SBX_` |
+| the VM id as a VLAN tag | `bridge vlan add ... vid 9150` says "Invalid VLAN ID": a VLAN id stops at 4094 | `Config.vlan_for`: the sandbox's place in the id range, from 2 |
 | `a && b && c` as the last command of a loop, under `set -e` and pipefail | when the last item does not match, the failed chain becomes the loop's status, and the script stops | an `if` statement; `\|\| true` after a `grep` that may find nothing |
 
 ## What is tested, and how

@@ -6,7 +6,7 @@
 # every firewall rule lives.
 #
 # The agent bridge is VLAN-aware: each agent sandbox and its sidecar share a
-# VLAN of their own (tag = the sandbox's VM id), and the sidecars and the
+# VLAN of their own (the tag follows the sandbox's place in the id range), and the sidecars and the
 # gateway sit untagged. The host's own interface on a bridge gets no IPv6
 # link-local address either, so a sandbox cannot reach the hypervisor that way.
 #

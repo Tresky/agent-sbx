@@ -5,8 +5,8 @@
 # (tests/run-sidecar-test.sh starts it). The container's own namespace plays
 # the Proxmox host: it holds the VLAN-aware bridge and no address on it.
 #
-#   agentA 10.79.0.2 ==VLAN 9150== agent0 sideA net0 10.77.0.57 --+
-#   agentB 10.79.0.6 ==VLAN 9151== agent0 sideB net0 10.77.0.58 --+-- vmbr77 (untagged) -- sbxa0 gw
+#   agentA 10.79.0.2 ==VLAN 52== agent0 sideA net0 10.77.0.57 --+
+#   agentB 10.79.0.6 ==VLAN 53== agent0 sideB net0 10.77.0.58 --+-- vmbr77 (untagged) -- sbxa0 gw
 #                                                                          gw lan0 ------- lan 192.168.50.10 (+ 203.0.113.10 = "internet",
 #                                                                                                             with a fake API on :9000)
 #                                                                          gw tailscale0 -- ts  100.64.0.2   (your Mac, on the tailnet)
@@ -48,14 +48,16 @@ link() { # link <nsA> <ifA> <nsB> <ifB>: a plain wire between two namespaces
 
 for n in gw agentA agentB sideA sideB lan ts; do ip netns add "$n"; ns "$n" ip link set lo up; done
 
-# The host: one VLAN-aware bridge, no address on it.
+# The host: one VLAN-aware bridge, no address on it. The VLANs are what
+# Config.vlan_for gives sandboxes 9150 and 9151: a VLAN id stops at 4094, so
+# the VM id itself cannot be the tag (the first run of this test found that).
 ip link add vmbr77 type bridge vlan_filtering 1
 ip link set vmbr77 up
-port tapA agentA eth0   9150
-port sA0  sideA  agent0 9150
+port tapA agentA eth0   52
+port sA0  sideA  agent0 52
 port sA1  sideA  net0
-port tapB agentB eth0   9151
-port sB0  sideB  agent0 9151
+port tapB agentB eth0   53
+port sB0  sideB  agent0 53
 port sB1  sideB  net0
 port gwp  gw     sbxa0
 link lan eth0 gw lan0
@@ -128,7 +130,7 @@ report() { # report <label> <got> <want>
 }
 probe() { ns "$1" ping -c1 -W1 "$2" >/dev/null 2>&1 && ns "$1" timeout 2 bash -c "exec 3<>/dev/tcp/$2/8000" 2>/dev/null; }
 probe_ping() { ns "$1" ping -c1 -W1 "$2" >/dev/null 2>&1; }
-tcp() { ns "$1" timeout 2 bash -c "exec 3<>/dev/tcp/$2/$3" 2>/dev/null; }
+tcp() { ns "$1" timeout 3 bash -c "exec 3<>/dev/tcp/$2/$3" 2>/dev/null; }
 # expect <pass|fail> <label> <ns> <target> [ping]
 expect() {
   local got=pass
@@ -196,8 +198,8 @@ expect     fail "agent A -> LAN host (gateway drops it)"               agentA 19
 expect     fail "agent A -> tailnet device (gateway drops it)"         agentA 100.64.0.2
 
 echo "== control 2: agent B moved onto agent A's VLAN"
-bridge vlan del dev tapB vid 9151
-bridge vlan add dev tapB vid 9150 pvid untagged
+bridge vlan del dev tapB vid 53
+bridge vlan add dev tapB vid 52 pvid untagged
 expect     pass "agent A -> agent B, directly on the bridge"           agentA 10.79.0.6 ping
 
 echo "== control 3: gateway guard deleted too (the topology itself is whole)"

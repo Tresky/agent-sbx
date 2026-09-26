@@ -48,8 +48,8 @@ inside, and able to reach the other agent sandboxes on that bridge.
 
 Every agent sandbox has a sidecar: a small VM cloned from the `sidecar`
 template, which is bare (nftables and one Python service, none of the core).
-The sandbox VM has ONE network card, on a VLAN that the hypervisor tags with
-the sandbox's VM id; the sidecar's first card is on that VLAN too, and its
+The sandbox VM has ONE network card, on a VLAN that the hypervisor tags for that
+sandbox alone; the sidecar's first card is on that VLAN too, and its
 second sits untagged on the agent bridge, where the gateway routes. Root in
 the sandbox cannot change the tag, so the sidecar cannot be routed around.
 
