@@ -162,7 +162,11 @@ def parse(text: str, name: str, path: Path, root: Path | None = None) -> Definit
     if not (isinstance(apt, list) and all(isinstance(p, str) and _APT_RE.match(p) for p in apt)):
         raise TemplateError(f"{where}: apt must be a list of package names")
     sizes = {}
-    for key, low, default in (("cores", 1, 8), ("memory_mb", 1024, 8192), ("disk_gb", 20, 60)):
+    # A bare template (a sidecar) runs a few small services: its floor is
+    # lower. 3 GB is the size of the smallest cloud image; a disk cannot shrink.
+    bare = data.get("bare", False) is True
+    for key, low, default in (("cores", 1, 8), ("memory_mb", 256 if bare else 1024, 8192),
+                              ("disk_gb", 3 if bare else 20, 60)):
         v = data.get(key, default)
         if not isinstance(v, int) or isinstance(v, bool) or v < low:
             raise TemplateError(f"{where}: {key} must be a whole number of at least {low}")

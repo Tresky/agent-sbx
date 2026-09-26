@@ -49,8 +49,8 @@ step "base packages"
 # toolchains and the libraries of one kind of app are components.
 apt-get update -q
 if [[ "$BARE" == 1 ]]; then
-  apt-get install -y -q --no-install-recommends \
-    qemu-guest-agent ca-certificates curl gnupg jq zsh python3 openssh-client
+  # As little as a sidecar needs; its component adds the rest.
+  apt-get install -y -q --no-install-recommends qemu-guest-agent ca-certificates curl python3
 else
   apt-get install -y -q --no-install-recommends \
     qemu-guest-agent ca-certificates curl wget gnupg unzip zip git git-lfs make pkg-config \
@@ -81,22 +81,27 @@ sysctl -q --system || true
 # for minutes on a first boot; the template is rebuilt to pick up updates.
 systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service 2>/dev/null || true
 
-# Host allow lists. Rails and Vite refuse a Host header they do not know, and
-# every request through the mirror carries the sandbox name. Set once here, so
-# no project needs a change.
-cat >> /etc/environment <<EOF
+if [[ "$BARE" != 1 ]]; then
+  # Host allow lists. Rails and Vite refuse a Host header they do not know, and
+  # every request through the mirror carries the sandbox name. Set once here,
+  # so no project needs a change.
+  cat >> /etc/environment <<EOF
 RAILS_DEVELOPMENT_HOSTS=.$SBX_DOMAIN
 __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=.$SBX_DOMAIN
 EOF
-
-ssh-keyscan -t ed25519,rsa github.com gitlab.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
+  ssh-keyscan -t ed25519,rsa github.com gitlab.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
+fi
 
 step "user $U"
-id "$U" >/dev/null 2>&1 || useradd -m -s /usr/bin/zsh -G sudo "$U"
+# A bare template has no zsh: its user is there for `sbx ssh --sidecar` only.
+if [[ "$BARE" == 1 ]]; then USER_SHELL=/bin/bash; else USER_SHELL=/usr/bin/zsh; fi
+id "$U" >/dev/null 2>&1 || useradd -m -s "$USER_SHELL" -G sudo "$U"
 echo "$U ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/90-$U"
 chmod 0440 "/etc/sudoers.d/90-$U"
-install -o "$U" -g "$U" -m 0644 "$FILES/zshenv" "/home/$U/.zshenv"
-install -o "$U" -g "$U" -m 0644 "$FILES/zshrc"  "/home/$U/.zshrc"
+if [[ "$BARE" != 1 ]]; then
+  install -o "$U" -g "$U" -m 0644 "$FILES/zshenv" "/home/$U/.zshenv"
+  install -o "$U" -g "$U" -m 0644 "$FILES/zshrc"  "/home/$U/.zshrc"
+fi
 # Every level is named: `install -d` gives the owner to the directories it is
 # told about and makes a missing parent as root. A root-owned ~/.local made
 # the Claude Code installer fail with EACCES on mkdir ~/.local/share.

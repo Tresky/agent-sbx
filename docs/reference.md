@@ -187,9 +187,9 @@ explains them.
 | `description` | | one line for `sbx template list` |
 | `components` | `[]` | the components, in order, from `template/components/` (or `template/components/local/`) |
 | `apt` | `[]` | more apt packages |
-| `cores`, `memory_mb` | `8`, `8192` | the size of the build VM |
-| `disk_gb` | `60` | the disk of the template. A sandbox can grow it with `--disk`. |
-| `bare` | `false` | `true` skips the core (Docker, Node, Chrome, Claude Code, herdr, the mirror): the base packages, the user and the components only. The `sidecar` definition is bare. |
+| `cores`, `memory_mb` | `8`, `8192` | the size of the build VM, and of a sidecar cloned from a bare template. At least 1024 MB; 256 when bare. |
+| `disk_gb` | `60` | the disk of the template. At least 20; 3 when bare (a disk cannot be smaller than its image). A sandbox can grow it with `--disk`. |
+| `bare` | `false` | `true` skips the core (Docker, Node, Chrome, Claude Code, herdr, the mirror): `qemu-guest-agent`, `ca-certificates`, `curl`, `python3`, a user with a bash shell, and the components only. The `sidecar` definition is bare. |
 | `image_url` | `SBX_UBUNTU_IMAGE_URL` | the cloud image to start from |
 | `[<component>]` | | the settings of one listed component, or of `node` or `docker` |
 

@@ -60,6 +60,12 @@ the page after a one-time PIN. `--off` and `sbx rm` left no tunnel, DNS record
 or Access application behind but the wildcard one. A sidecar from a template
 without `cloudflared` is refused before anything is made at Cloudflare.
 
+The sidecar moved to Debian 13's genericcloud image (a cloud kernel, no
+drivers or firmware) and a slimmer bare build, on the same host: 658 MB of a
+4 GB disk and 96 MB of 512 MB in use, against 2.3 GB of 20 GB and about
+330 MB of 1024 MB on Ubuntu. `sbx doctor --isolation` passed on it, and the
+sandbox's name, sshd on 2222, the proxy and `cloudflared` all work.
+
 What the host found, each fixed with a test:
 
 - **"open" mode took the sidecar's own ports.** Its DNAT of 1024 to 32767
@@ -129,9 +135,9 @@ In the order they were discussed, none started:
   snapshot with a fresh machine id, host keys and name; a prompt over SSH
   stdin into a tmux session; the child reports back through the Mac, since
   sandboxes no longer see each other.
-- **Debian and mise.** The `apt` key and `image_url` exist already. Debian
-  first with the same components, then a `mise` component that replaces
-  `ruby`, `go`, `rust`, `python` and the rvm/nvm shell setup, then a smaller
-  core.
+- **Debian and mise.** The sidecar is on Debian already (below). For the
+  sandboxes: Debian with the same components, then a `mise` component that
+  replaces `ruby`, `go`, `rust`, `python` and the rvm/nvm shell setup, then a
+  smaller core.
 - **Uploads through the proxy.** The proxy buffers whole requests; a
   `git push` with a chunked body needs streaming.

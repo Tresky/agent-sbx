@@ -55,7 +55,7 @@ The repository has these definitions in `templates/`:
 | Template | Components |
 |---|---|
 | `minimal` | the core only |
-| `sidecar` | `sidecar`, with `bare = true`: no core. The sidecar of each agent sandbox. `sbx setup` builds it. |
+| `sidecar` | `sidecar`, with `bare = true`: no core, on Debian 13 genericcloud (4 GB disk, 512 MB). The sidecar of each agent sandbox. `sbx setup` builds it. |
 | `rails` | `ruby`, `rails` |
 | `go` | `go` |
 | `rust` | `rust` |

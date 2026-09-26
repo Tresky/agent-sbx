@@ -334,7 +334,6 @@ class Pve:
         self.api("PUT", self._vm(node, vmid, "/config"), {
             "net0": f"virtio,bridge={cfg.agent_bridge},tag={vlan}",
             "net1": f"virtio,bridge={cfg.agent_bridge}",
-            "cores": 1, "memory": 1024,
             "ciuser": cfg.vm_user,
             "ipconfig0": f"ip={cfg.sidecar_addr}/30",
             "ipconfig1": "ip=dhcp",
