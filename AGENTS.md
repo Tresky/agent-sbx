@@ -123,8 +123,10 @@ host with an existing gateway keeps its values.
 2. Run `sbx inputs <checkout>`. It shows each input and where its value comes
    from, and it makes nothing.
 3. For an `agent` sandbox of a private repository, the user runs
-   `sbx git-token <checkout>` and pastes a fine-grained token at the hidden
-   prompt. Do not handle the token yourself.
+   `sbx git-token <checkout or git URL>` and pastes a fine-grained token at
+   the hidden prompt. Do not handle the token yourself. With a URL, no
+   checkout is needed on the Mac: `sbx new --project <URL>` reads the
+   recipe with that token.
 4. With the user's consent: `sbx new <name> --project <checkout>`. An agent
    sandbox needs `--with <input>` or `--without <input>` for each input.
 5. If the recipe fails, read `~/.local/state/sbx/recipe.log` in the sandbox:

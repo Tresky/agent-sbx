@@ -72,9 +72,13 @@ def _read_manifest(root: Path) -> Manifest | None:
 
 
 def resolve_project(spec: str, branch: str | None, from_path: str | None, runner: Runner,
-                    need_remote: bool = True) -> Project:
+                    need_remote: bool = True, manifest: bool = True) -> Project:
     """`spec` is a checkout path, a registered project name, or a git URL, in
-    that order. A checkout that resolves is recorded in the registry."""
+    that order. A checkout that resolves is recorded in the registry.
+
+    For a URL, the manifest is read with a sparse clone on this Mac, with the
+    project's own git token when one is stored. manifest=False skips it: `sbx
+    git-token` stores a token before this Mac can read the repository at all."""
     local = Path(spec).expanduser()
     if not local.is_dir() and "/" not in spec and ":" not in spec:
         known = projects_mod.load().get(spec)
@@ -110,21 +114,46 @@ def resolve_project(spec: str, branch: str | None, from_path: str | None, runner
         return Project(names.project_name(url), url, branch, local, _read_manifest(local))
 
     url = manifest_mod.check_git_url(spec, "--project")
+    checkout = Path(from_path).expanduser() if from_path else None
+    if checkout is not None and not checkout.is_dir():
+        raise InputError(f"--from {from_path}: not a directory")
+    name = names.project_name(url)
+    if not manifest:
+        return Project(name, url, branch, checkout, None)
     tmp = Path(tempfile.mkdtemp(prefix="sbx-manifest-"))
     try:
         # Only .sandbox/ is fetched: a sparse, shallow, blob-filtered clone
         # works against every git host, unlike a provider's contents API.
-        cmd = ["git", "clone", "-q", "--depth", "1", "--filter=blob:none", "--sparse"]
+        cmd = ["git"] + _url_credential_args(name, url, runner, tmp)
+        cmd += ["clone", "-q", "--depth", "1", "--filter=blob:none", "--sparse"]
         cmd += ["--branch", branch] if branch else []
         runner.run(cmd + ["--", url, str(tmp / "r")])
         runner.run(["git", "-C", str(tmp / "r"), "sparse-checkout", "set", ".sandbox"])
         found = _read_manifest(tmp / "r")
     finally:
+        # The credential file goes with the clone, whatever happened.
         shutil.rmtree(tmp, ignore_errors=True)
-    checkout = Path(from_path).expanduser() if from_path else None
-    if checkout is not None and not checkout.is_dir():
-        raise InputError(f"--from {from_path}: not a directory")
-    return Project(names.project_name(url), url, branch, checkout, found)
+    return Project(name, url, branch, checkout, found)
+
+
+def _url_credential_args(name: str, url: str, runner: Runner, tmp: Path) -> list[str]:
+    """git options that answer with the project's stored token, for an https
+    URL of the token's host; [] when there is none. The token goes into a file
+    of `tmp` (0600), which the caller removes: it is in no argv and no git
+    config, and the helper replaces any helper the user configured."""
+    access = inputs_mod.load_bindings(state_dir() / "bindings" / f"{name}.toml").git
+    parsed = gittoken.repo_path(url)
+    if access is None or not url.startswith("https://") or parsed is None or parsed[0] != access.host:
+        return []
+    token = runner.run(access.token_command).stdout.strip()
+    if not token:
+        return []
+    creds = tmp / "credentials"
+    fd = os.open(creds, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(f"username={access.username}\npassword={token}\n")
+    helper = f"!f() {{ test \"$1\" = get && cat {shlex.quote(str(creds))}; }}; f"
+    return ["-c", "credential.helper=", "-c", f"credential.helper={helper}"]
 
 
 def _bindings(project: Project) -> inputs_mod.Bindings:
@@ -720,7 +749,8 @@ def _project_repos(project: Project) -> list[str]:
 
 
 def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
-    project = resolve_project(args.project, args.branch, args.from_path, runner, need_remote=False)
+    # No manifest: for a URL, reading it needs the very token this stores.
+    project = resolve_project(args.project, args.branch, args.from_path, runner, need_remote=False, manifest=False)
     binding = state_dir() / "bindings" / f"{project.name}.toml"
 
     if args.remove:
@@ -735,6 +765,8 @@ def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
         raise InputError(f"{project.name}: no origin remote, so there is nothing for a token to cover")
     print(f"project: {project.name}")
     print("the token must cover: " + ", ".join(repos))
+    if project.checkout is None:
+        print("  (from the URL alone: a repository that the recipe adds is checked by `sbx new`)")
     if args.host == "github.com":
         print("make it at github.com > Settings > Developer settings > Fine-grained tokens:")
         print("  Only select repositories (the ones above); Contents: Read, or Read and write to push")
