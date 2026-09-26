@@ -8,6 +8,8 @@
 #   sbx-sidecar-apply                 apply the env file
 #   sbx-sidecar-apply --claude-token  read a new Claude token from stdin (one line;
 #                                     empty removes it), write it, restart the service
+#   sbx-sidecar-apply --tunnel-token  read the Cloudflare tunnel's connector token from
+#                                     stdin (one line; empty stops the tunnel and removes it)
 set -euo pipefail
 
 # SBX_SIDECAR_ROOT prefixes every path, so that a test can run this script
@@ -30,6 +32,24 @@ if [[ "${1:-}" == "--claude-token" ]]; then
   mv "$DIR/tokens.new" "$DIR/tokens"
   systemctl restart sbx-sidecar
   echo "claude token ${token:+updated}${token:-removed}"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--tunnel-token" ]]; then
+  IFS= read -r token || token=""
+  if [[ -z "$token" ]]; then
+    systemctl disable -q --now sbx-cloudflared 2>/dev/null || true
+    rm -f "$DIR/cloudflared.env"
+    echo "tunnel stopped"
+    exit 0
+  fi
+  [[ "$token" =~ ^[A-Za-z0-9+/=_-]+$ ]] || { echo "ERROR: that is not a tunnel token" >&2; exit 1; }
+  printf 'TUNNEL_TOKEN=%s\n' "$token" > "$DIR/cloudflared.env.new"
+  chmod 0600 "$DIR/cloudflared.env.new"
+  mv "$DIR/cloudflared.env.new" "$DIR/cloudflared.env"
+  systemctl enable -q sbx-cloudflared
+  systemctl restart sbx-cloudflared
+  echo "tunnel running"
   exit 0
 fi
 

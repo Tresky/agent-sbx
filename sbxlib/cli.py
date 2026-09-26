@@ -24,6 +24,7 @@ from . import inputs as inputs_mod
 from . import layout as layout_mod
 from . import manifest as manifest_mod
 from . import names
+from . import previews as previews_mod
 from . import projects as projects_mod
 from . import remotecontrol
 from . import secretstore
@@ -794,6 +795,99 @@ def cmd_claude_token(args, cfg: Config, runner: Runner, api=None) -> int:
     return _each_claude_sandbox(cfg, runner, api, args.sandboxes, None, "token updated", token)
 
 
+CLOUDFLARE_TOKEN_SERVICE = "sbx-cloudflare-token"
+
+
+def cmd_cloudflare_token(args, cfg: Config, runner: Runner, api=None) -> int:
+    conf = state_dir() / "config.toml"
+    if args.remove:
+        gone = secretstore.forget(runner, CLOUDFLARE_TOKEN_SERVICE)
+        hostsetup.set_toml_keys(conf, {"cloudflare_token_command": []})
+        info(f"token in {secretstore.where()} {'removed' if gone else 'was absent'}")
+        return 0
+    if args.stdin:
+        token = sys.stdin.readline().strip()
+    else:
+        if not sys.stdin.isatty():
+            raise InputError("no terminal to ask for the token; pass --stdin and pipe it in")
+        token = getpass.getpass("Cloudflare API token (hidden): ").strip()
+    if not token or any(c.isspace() for c in token):
+        raise InputError("the token is empty or has whitespace in it")
+    secretstore.store(runner, CLOUDFLARE_TOKEN_SERVICE, token)
+    hostsetup.set_toml_keys(conf, {"cloudflare_token_command": secretstore.command(CLOUDFLARE_TOKEN_SERVICE)})
+    info(f"stored in {secretstore.where()} as {CLOUDFLARE_TOKEN_SERVICE}")
+    return 0
+
+
+def _previews(cfg: Config, runner: Runner, cf=None) -> "previews_mod.Previews":
+    return previews_mod.Previews(cfg, cf or previews_mod.HttpApi(cfg, runner))
+
+
+def cmd_publish(args, cfg: Config, runner: Runner, api=None, cf=None) -> int:
+    pve = _pve(cfg, runner, api)
+    box = pve.require(names.hostname(args.name))
+    pv = _previews(cfg, runner, cf)
+    if args.port is None and not args.off:
+        rules = pv.published(box.hostname)
+        if not rules:
+            print(f"{box.hostname} publishes nothing; sbx publish {args.name} <port>")
+        for r in rules:
+            print(f"  https://{r['hostname']}  -> {r['service'].rsplit(':', 1)[-1]}  "
+                  f"(policy: {pv.policy_of(r['hostname'])})")
+        return 0
+    if args.port is not None and not 1 <= args.port <= 65535:
+        raise InputError("the port must be from 1 to 65535")
+    sidecar = pve.sidecars().get(box.hostname)
+    if sidecar is None:
+        raise InputError(f"{box.hostname} has no sidecar; a preview runs its tunnel in the sidecar, "
+                         "so only an agent sandbox with a sidecar can publish")
+    sc = Vm(cfg, runner, box.hostname, port=SIDECAR_SSH_PORT, alias=sidecar_alias(cfg, box.hostname))
+    if args.off:
+        if args.port is None and not args.host:
+            raise InputError("--off needs the port, or --host")
+        fqdn = pv.fqdn(previews_mod.label_for(box.hostname, args.port or 0, args.host))
+        if pv.withdraw(box.hostname, fqdn):
+            sc.run("sudo sbx-sidecar-apply --tunnel-token", input=b"\n")
+            if t := pv.tunnel(box.hostname):
+                pv.delete_tunnel(t["id"])
+            info(f"{fqdn} withdrawn; {box.hostname} publishes nothing now, and its tunnel is gone")
+        else:
+            info(f"{fqdn} withdrawn")
+        return 0
+    # A sidecar from a template before previews has no cloudflared. Ask before
+    # anything is made at Cloudflare, not after.
+    if sc.run("test -x /usr/bin/cloudflared", check=False).code != 0:
+        raise InputError(f"the sidecar of {box.hostname} has no cloudflared: its template is older than previews. "
+                         f"Run `sbx template rebuild {cfg.sidecar_template}`, then make the sandbox again")
+    policies = previews_mod.load_policies()
+    name = args.policy or previews_mod.DEFAULT_POLICY
+    if name not in policies:
+        raise InputError(f"no policy {name!r} in {previews_mod.policies_path()}; it has: " + ", ".join(sorted(policies)))
+    fqdn = pv.fqdn(previews_mod.label_for(box.hostname, args.port, args.host))
+    # With a certificate, the port mirror serves https and redirects http, so
+    # the tunnel speaks https. --plain: a server of its own on 0.0.0.0, no TLS.
+    tls = not args.plain and (state_dir() / "certs" / box.hostname).is_dir()
+    service = f"{'https' if tls else 'http'}://{cfg.sidecar_vm_addr}:{args.port}"
+    token, new = pv.publish(box.hostname, fqdn, service, policies[name], policies, tls=tls)
+    # The connector token goes to the sidecar on stdin: it is in no argv, and
+    # it never enters the sandbox.
+    sc.run("sudo sbx-sidecar-apply --tunnel-token", input=(token + "\n").encode())
+    info(f"https://{fqdn} -> port {args.port} of {box.hostname}, for policy {name!r}"
+         + (" (a new tunnel; the first visit can take a minute)" if new else ""))
+    return 0
+
+
+def _withdraw_previews(cfg: Config, runner: Runner, hostname: str, cf=None) -> None:
+    """sbx rm: what the sandbox published, and its tunnel. Never blocks a removal."""
+    if not (cfg.preview_zone and cfg.cloudflare_token_command):
+        return
+    try:
+        if gone := _previews(cfg, runner, cf).remove_all(hostname):
+            info(f"withdrew the previews of {hostname}: " + ", ".join(gone))
+    except (previews_mod.PreviewError, ConfigError, CommandError) as exc:
+        warn(f"the previews of {hostname} stay at Cloudflare ({exc}); `sbx gc` tries again")
+
+
 def _new_claude_token(args, runner: Runner) -> str:
     if args.stdin:
         token = sys.stdin.readline().strip()
@@ -1489,6 +1583,7 @@ def _remove(cfg: Config, runner: Runner, pve: Pve, box) -> None:
     known_hosts = str(state_dir() / "known_hosts")
     runner.run(["ssh-keygen", "-R", cfg.fqdn(box.hostname), "-f", known_hosts], check=False)
     if sc := pve.sidecars().get(box.hostname):
+        _withdraw_previews(cfg, runner, box.hostname)
         _remove_sidecar(cfg, runner, pve, box.hostname, sc)
     shutil.rmtree(state_dir() / "certs" / box.hostname, ignore_errors=True)
     if herdr_mod.remove(runner, box.hostname):
@@ -1529,6 +1624,20 @@ def cmd_gc(args, cfg: Config, runner: Runner, api=None) -> int:
     # A sidecar whose sandbox is gone (a removal that stopped halfway).
     names_ = {b.hostname for b in boxes}
     orphans = {h: s for h, s in pve.sidecars().items() if h not in names_}
+    # A tunnel whose sandbox is gone (a removal that could not reach Cloudflare).
+    stray = []
+    if cfg.preview_zone and cfg.cloudflare_token_command:
+        try:
+            pv = _previews(cfg, runner)
+            stray = [t for t in pv.tunnels() if t["name"] not in names_]
+        except (previews_mod.PreviewError, ConfigError, CommandError) as exc:
+            warn(f"cannot list the preview tunnels ({exc})")
+    if stray:
+        for t in stray:
+            print(f"  preview tunnel {t['name']}, whose sandbox is gone")
+        if _confirm(f"Withdraw {len(stray)} tunnel(s) and their previews?", args.yes):
+            for t in stray:
+                pv.remove_all(t["name"], t)
     if not expired and not orphans:
         print("no expired sandbox")
         return 0
@@ -1678,6 +1787,21 @@ def build_parser() -> argparse.ArgumentParser:
     how.add_argument("--remove", action="store_true", help="forget the token, and delete it from every sandbox")
     s.set_defaults(fn=cmd_claude_token)
 
+    s = sub.add_parser("cloudflare-token", help="store the Cloudflare API token that sbx publish uses")
+    s.add_argument("--stdin", action="store_true", help="read the token from stdin instead of a hidden prompt")
+    s.add_argument("--remove", action="store_true", help="forget the token")
+    s.set_defaults(fn=cmd_cloudflare_token)
+
+    s = sub.add_parser("publish", help="a sandbox's port at a public hostname, behind Cloudflare Access")
+    s.add_argument("name")
+    s.add_argument("port", nargs="?", type=int, help="the port in the sandbox (none: list what is published)")
+    s.add_argument("--policy", metavar="NAME", help="a policy of previews.toml (default: me)")
+    s.add_argument("--host", metavar="LABEL", help="the hostname label (default: <name>-<port>)")
+    s.add_argument("--plain", action="store_true",
+                   help="the server speaks plain http on 0.0.0.0 (default: https when the sandbox has a certificate)")
+    s.add_argument("--off", action="store_true", help="withdraw it")
+    s.set_defaults(fn=cmd_publish)
+
     s = sub.add_parser("new", help="make a sandbox")
     s.add_argument("name")
     s.add_argument("--profile", choices=("agent", "personal"))
@@ -1762,7 +1886,7 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, api=None) 
         cfg = load_config()
         return args.fn(args, cfg, runner or Runner(verbose=args.verbose), api) or 0
     except (ConfigError, ManifestError, InputError, names.NameError_, PveError, VmError, CommandError,
-            projects_mod.ProjectError, templates_mod.TemplateError) as exc:
+            projects_mod.ProjectError, templates_mod.TemplateError, previews_mod.PreviewError) as exc:
         print(f"sbx: error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

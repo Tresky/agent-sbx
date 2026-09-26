@@ -10,6 +10,15 @@
 step "sidecar"
 apt-get install -y -q --no-install-recommends nftables python3 iproute2
 
+# cloudflared, for `sbx publish`: from Cloudflare's own apt repository. It runs
+# only when a preview is published (sbx-cloudflared.service).
+install -d -m 0755 /usr/share/keyrings
+curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" \
+  > /etc/apt/sources.list.d/cloudflared.list
+apt-get update -q
+apt-get install -y -q --no-install-recommends cloudflared
+
 SC="$PAYLOAD/sidecar"
 [[ -d "$SC" ]] || { echo "PROVISION FAILED: the payload has no sidecar/ directory"; false; }
 install -d -m 0755 /usr/local/lib/sbx /etc/sbx
@@ -19,6 +28,7 @@ install -m 0644 "$SC/nftables.conf.tmpl"    /usr/local/lib/sbx/sidecar-nftables.
 install -m 0755 "$SC/sbx-sidecar-apply"     /usr/local/bin/sbx-sidecar-apply
 install -m 0644 "$SC/sbx-sidecar.service"       /etc/systemd/system/sbx-sidecar.service
 install -m 0644 "$SC/sbx-sidecar-apply.service" /etc/systemd/system/sbx-sidecar-apply.service
+install -m 0644 "$SC/sbx-cloudflared.service"   /etc/systemd/system/sbx-cloudflared.service
 
 # Port 22 of the sidecar's address belongs to the SANDBOX, by DNAT. The
 # sidecar's own sshd moves to 2222. Ubuntu starts sshd from a socket unit that

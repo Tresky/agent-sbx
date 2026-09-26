@@ -52,6 +52,14 @@ a tailnet device at the sandbox's name, through the gateway, the sidecar and
 the VLAN; and Remote Control in a personal sandbox, signed in by
 `sbx remote-control` and listed at claude.ai/code.
 
+Previews behind Cloudflare Access (`sbx publish`,
+[usage.md](usage.md#previews)), built after the items above and proved on the
+same host: a server on `127.0.0.1` in an agent sandbox, published through the
+tunnel in its sidecar, answered a 302 to the Access sign-in without one, and
+the page after a one-time PIN. `--off` and `sbx rm` left no tunnel, DNS record
+or Access application behind but the wildcard one. A sidecar from a template
+without `cloudflared` is refused before anything is made at Cloudflare.
+
 What the host found, each fixed with a test:
 
 - **"open" mode took the sidecar's own ports.** Its DNAT of 1024 to 32767
@@ -117,34 +125,6 @@ In the order they were discussed, none started:
 
 - **A lab VLAN at home** for the Proxmox host and the gateway's LAN leg, so
   a gateway compromise lands away from the house devices.
-- **Previews behind Cloudflare Access**, for you only: a sandbox's web app
-  at a public hostname that asks for your sign-in first. The design:
-  - **`cloudflared` runs on the sidecar**, one tunnel per sandbox, and points
-    straight at the VM on the wire (`http://10.79.0.2:<port>`). No Caddy: the
-    tunnel reaches any address, unlike Tailscale Serve. Not the gateway: one
-    tunnel there would put every sandbox's exposure in the container on the
-    LAN.
-  - **The Cloudflare API token stays on the Mac**, in the secret store.
-    `sbx` makes the tunnel, its DNS record and its ingress through the API.
-    The sidecar gets only that tunnel's connector token; the tunnel is
-    remotely managed, so a sidecar cannot add a hostname or change a target.
-  - **Access comes first.** Setup makes one wildcard Access application for
-    `*.<zone>`, allowing only your email, before any hostname exists. A new
-    hostname is covered from its first second; there is no per-hostname race.
-  - **A separate zone**, not your main domain: an agent serves what it wants
-    there, and must not reach your domain's cookies or lend it to phishing.
-  - **Publishing is its own step.** Opening a port means your tailnet;
-    publishing means the internet behind Access. `sbx publish <name> <port>`
-    (and `--off`), never a side effect of `sidecar_ports = "open"`. It
-    belongs with `sbx ports` above.
-  - **No bypass of Access.** No webhooks, no service tokens, no public paths:
-    the use is previews for you.
-  - **Cleanup:** `sbx rm` deletes the tunnel and its DNS record; `sbx gc`
-    removes the tunnels and records whose sandbox is gone.
-  - **Proof:** the netns test covers the sidecar side (the tunnel's outbound
-    connection is allowed, and it reaches the published port of its own VM
-    only). On the host: publish from `lab`, get the Access login page
-    without a sign-in, and the app after it.
 - **Fork a sandbox and run a workflow in the fork.** A full clone from a
   snapshot with a fresh machine id, host keys and name; a prompt over SSH
   stdin into a tmux session; the child reports back through the Mac, since

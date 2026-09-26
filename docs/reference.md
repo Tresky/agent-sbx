@@ -70,6 +70,10 @@ Options of `sbx new`:
 | `sbx claude-token --status` | shows whether a token is stored, and when it expires |
 | `sbx claude-token --remove` | forgets the token, and deletes it from each sandbox |
 | `sbx remote-control <name> [--mode M] [--status] [--off]` | signs a personal sandbox in to claude.ai and runs its Remote Control server |
+| `sbx cloudflare-token [--stdin] [--remove]` | stores the Cloudflare API token that `sbx publish` uses, and sets `cloudflare_token_command` |
+| `sbx publish <name> <port> [--policy P] [--host LABEL] [--plain]` | publishes a port of an agent sandbox at `https://<label>.<preview_zone>`, behind Cloudflare Access. The default label is `<name>-<port>`; the default policy is `me`. `--plain`: the server speaks plain http on `0.0.0.0`, though the sandbox has a certificate. See [Previews](usage.md#previews). |
+| `sbx publish <name>` | lists what a sandbox publishes, and the policy of each |
+| `sbx publish <name> <port> --off` | withdraws it (`--host LABEL --off` for a label of your own). The last one removes the tunnel too. |
 
 ### Templates
 
@@ -164,6 +168,10 @@ layer 2: sbx stops with an error.
 | `ssh_key` | `~/.config/sbx/id_ed25519` | the private key for the sandboxes |
 | `agent_sidecar` | `true` | every agent sandbox gets a sidecar: a small trusted VM on the sandbox's own VLAN that holds its credentials and its port policy. `false`: an agent sandbox sits on the agent bridge alone, as before sidecars. |
 | `sidecar_ports` | `open` | what a sidecar forwards to its sandbox. `open`: port 22 and every port from 1024 to 32767. `ask`: port 22, and a port only after the sandbox asked and you approved. |
+| `preview_zone` | | the domain of the previews, a zone on your Cloudflare account. Use one of its own, not your main domain. |
+| `cloudflare_account_id` | | the Cloudflare account of that zone |
+| `cloudflare_token_command` | | a command that prints the Cloudflare API token. `sbx cloudflare-token` writes it. |
+| `preview_session` | `336h` | how long a sign-in to a preview lasts (hours) |
 | `sidecar_claude` | `proxy` | how Claude Code in an agent sandbox reaches Claude. `proxy`: the token stays in the sidecar; the sandbox gets a placeholder and a base URL. `direct`: the subscription token goes into the sandbox. The proxy buffers each answer, so a long one arrives whole. |
 
 The shared keys of the table above (`domain`, `agent_bridge`, and so on) are
@@ -226,6 +234,7 @@ the pane layout (`.sandbox/herdr.toml`).
 | `bindings/` | the project bindings |
 | `projects.toml` | the project registry |
 | `claude-token.toml` | the date of the Claude token. The token itself is in the secret store. |
+| `previews.toml` | who may open a preview: one `[policy.<name>]` per policy, with `emails` and `email_domains` only. `[policy.me]` is required; it is the default. |
 | `secrets/` | the secret store off macOS: one file per secret, this user only (0700, the files 0600) |
 
 ### In the repository, not in git
@@ -250,6 +259,7 @@ secret, never the value.
 | `sbx-pve-token` | the Proxmox API token of this Mac |
 | `sbx-git-<project>` | the git token of one project |
 | `sbx-claude-token` | the Claude Code token |
+| `sbx-cloudflare-token` | the Cloudflare API token of `sbx publish` |
 
 ### In a sandbox
 
@@ -294,7 +304,9 @@ take it for a sandbox. Its VM is named `<sandbox>-sc`.
 | `/etc/sbx/sidecar/secret` | the per-sandbox placeholder that the sandbox presents |
 | `/etc/sbx/sidecar/tokens` | `claude=` and `github=`: the real credentials |
 | `/etc/nftables.conf` | the firewall, rendered from `sidecar/nftables.conf.tmpl` by `sbx-sidecar-apply` |
-| `/usr/local/bin/sbx-sidecar-apply` | renders the firewall, registers the sandbox's name, restarts the service. `--claude-token` reads a new token from stdin. |
+| `/usr/local/bin/sbx-sidecar-apply` | renders the firewall, registers the sandbox's name, restarts the service. `--claude-token` reads a new token from stdin; `--tunnel-token` the tunnel's connector token (empty: stop the tunnel). |
+| `/etc/sbx/sidecar/cloudflared.env` | `TUNNEL_TOKEN=`: the connector token of the sandbox's preview tunnel, while it publishes |
+| `sbx-cloudflared.service` | runs `cloudflared` for the previews, while the token file exists |
 | `/usr/local/lib/sbx/sidecar.py` | the credential proxy (`<wire>:8080`) and the expose API (`8081` on both sides) |
 
 ### Proxmox tags on a template

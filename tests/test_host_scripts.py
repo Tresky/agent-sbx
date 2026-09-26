@@ -131,6 +131,25 @@ esac
         self.apply("--claude-token", stdin="\n")
         self.assertEqual(sorted(tokens.read_text().splitlines()), ["claude=", "github=ghp_keep"])
 
+    def test_tunnel_token_starts_the_tunnel_and_an_empty_one_stops_it(self):
+        self.write_env()
+        env = self.root / "etc/sbx/sidecar/cloudflared.env"
+        self.apply("--tunnel-token", stdin="eyJhIjoiYWJjIn0=\n")
+        self.assertEqual(env.read_text(), "TUNNEL_TOKEN=eyJhIjoiYWJjIn0=\n")
+        self.assertEqual(stat.S_IMODE(env.stat().st_mode), 0o600)
+        self.assertIn("systemctl restart sbx-cloudflared", self.calls.read_text())
+        self.apply("--tunnel-token", stdin="\n")
+        self.assertFalse(env.exists())
+        self.assertIn("systemctl disable -q --now sbx-cloudflared", self.calls.read_text())
+
+    def test_a_tunnel_token_with_a_newline_trick_is_refused(self):
+        # The token becomes one line of an env file: nothing may add a second.
+        self.write_env()
+        done = subprocess.run([BASH, str(REPO / "sidecar/sbx-sidecar-apply"), "--tunnel-token"], env=self.env,
+                              input="abc ExecStart=x\n", capture_output=True, text=True)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertFalse((self.root / "etc/sbx/sidecar/cloudflared.env").exists())
+
     def test_a_missing_wire_is_an_error(self):
         self.write_env()
         self.env["IP_ADDR"] = IP_ADDR.replace("10.79.0.1/30", "10.79.0.9/30")

@@ -1,0 +1,17 @@
+[Unit]
+Description=sbx sidecar: the Cloudflare tunnel of the sandbox's previews
+After=network-online.target
+Wants=network-online.target
+# `sbx publish` writes the token; with no token there is nothing to run.
+ConditionPathExists=/etc/sbx/sidecar/cloudflared.env
+
+[Service]
+# TUNNEL_TOKEN: the connector token of this sandbox's tunnel only. The routes
+# live at Cloudflare, so this token cannot add a hostname or change a target.
+EnvironmentFile=/etc/sbx/sidecar/cloudflared.env
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

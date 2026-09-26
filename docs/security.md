@@ -60,6 +60,12 @@ The sidecar holds what the sandbox must not:
   placeholder, made for it alone, which works only against its own sidecar,
   and which a leak makes useless anywhere else. The sidecar swaps it for the
   real token on each call, and logs the call.
+- **The preview tunnel.** `sbx publish` runs `cloudflared` in the sidecar with
+  the connector token of the sandbox's own tunnel. The tunnel's routes live at
+  Cloudflare and only the Mac sets them, with an API token that never leaves
+  the Mac: a compromised sidecar cannot add a hostname or change a target.
+  Every hostname sits behind Cloudflare Access; the wildcard application for
+  the whole domain exists before the first name does.
 - **The port policy.** Port 22 of the sidecar's address is the sandbox's, by
   DNAT. With `sidecar_ports = "open"` every port from 1024 to 32767 is too, so
   the mirror's ports are direct as before. With `"ask"` a port opens only

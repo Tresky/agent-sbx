@@ -93,6 +93,52 @@ https://sbx-lab.sbx.internal:3000
 HTTPS needs the mkcert CA on your Mac. Without it, a sandbox serves `http://`
 only. `sbx doctor` checks it.
 
+### Previews
+
+`sbx publish` puts a port of an agent sandbox at a public hostname, behind
+Cloudflare Access: only the people that its policy names get past a sign-in.
+It is for previews, not for a public site.
+
+```
+sbx publish lab 3000                   https://lab-3000.<preview_zone>, for you
+sbx publish lab 3000 --policy team     for the people of [policy.team]
+sbx publish lab 3000 --host demo       https://demo.<preview_zone>
+sbx publish lab                        what lab publishes
+sbx publish lab 3000 --off             withdraw it
+```
+
+The tunnel reaches the port as your Mac does, through the port mirror: a
+server on `127.0.0.1` needs nothing. When the sandbox has a certificate, the
+tunnel speaks https to it; a server of its own on `0.0.0.0` with no TLS needs
+`--plain`. `sbx rm` withdraws a sandbox's previews; `sbx gc` withdraws the
+ones whose sandbox is gone.
+
+Set it up once:
+
+1. A Cloudflare account with a domain of its own for the previews (not your
+   main domain: an agent serves what it wants there), and Zero Trust turned
+   on, with the One-time PIN login method.
+2. An API token with Account "Cloudflare Tunnel: Edit" and "Access: Apps and
+   Policies: Edit", and Zone "DNS: Edit" for that domain. Store it:
+   `sbx cloudflare-token`.
+3. In `config.toml`: `preview_zone` and `cloudflare_account_id`.
+4. `~/.config/sbx/previews.toml`, with at least your own address:
+
+   ```
+   [policy.me]
+   emails = ["you@example.com"]
+
+   [policy.team]
+   emails = ["a@example.com"]
+   email_domains = ["example.org"]
+   ```
+
+The first `sbx publish` makes one Access application for every hostname of
+the domain, with the policy `me`, before it makes any name. A hostname with
+another policy gets an application of its own. A policy names emails and
+email domains only: sbx has no way to publish past a sign-in.
+[security.md](security.md) explains the tunnel and its token.
+
 ## Work in a sandbox
 
 - The user is `dev`, with sudo and no password.

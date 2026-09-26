@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import tomllib
 from dataclasses import dataclass, field
@@ -103,6 +104,13 @@ class Config:
     # a full claude.ai login can make API keys on the organization.
     remote_control_mode: str = "acceptEdits"
     ssh_key: str = ""                  # private key for the VMs; default <state>/id_ed25519
+    # `sbx publish`: previews behind Cloudflare Access (sbxlib/previews.py).
+    # The zone is a domain of its own, not your main one: an agent serves what
+    # it wants there. The token command prints a Cloudflare API token.
+    preview_zone: str = ""
+    cloudflare_account_id: str = ""
+    cloudflare_token_command: list[str] = field(default_factory=list)
+    preview_session: str = "336h"      # how long a sign-in lasts; Cloudflare's form, e.g. 24h
 
     @property
     def ssh_key_path(self) -> Path:
@@ -222,4 +230,6 @@ def load(config_path: Path | None = None, defaults_path: Path = DEFAULTS_ENV,
                           "that one bridge has; narrow SBX_VMID_MIN/SBX_VMID_MAX in host/local.conf")
     if cfg.sidecar_claude not in ("direct", "proxy"):
         raise ConfigError("sidecar_claude must be 'direct' or 'proxy'")
+    if not re.fullmatch(r"[1-9][0-9]*h", cfg.preview_session):
+        raise ConfigError("preview_session must be a number of hours, e.g. \"336h\"")
     return cfg
