@@ -27,6 +27,7 @@ A template adds **components**. A component is one shell file in
 | `odin` | Odin, with wgpu-native, premake, SDL2, Lua and software Vulkan |
 | `gis` | GEOS, GDAL and PROJ |
 | `media` | ffmpeg |
+| `mise` | mise, with its shims on the PATH of every shell. `[mise] tools` installs tools in the template, such as `["python@3.13"]`. |
 
 `sbx template components` lists them, with your own.
 
@@ -55,6 +56,7 @@ The repository has these definitions in `templates/`:
 | Template | Components |
 |---|---|
 | `minimal` | the core only |
+| `debian` | `mise`, on Debian 13 genericcloud instead of Ubuntu |
 | `sidecar` | `sidecar`, with `bare = true`: no core, on Debian 13 genericcloud (4 GB disk, 512 MB). The sidecar of each agent sandbox. `sbx setup` builds it. |
 | `rails` | `ruby`, `rails` |
 | `go` | `go` |

@@ -135,9 +135,12 @@ In the order they were discussed, none started:
   snapshot with a fresh machine id, host keys and name; a prompt over SSH
   stdin into a tmux session; the child reports back through the Mac, since
   sandboxes no longer see each other.
-- **Debian and mise.** The sidecar is on Debian already (below). For the
-  sandboxes: Debian with the same components, then a `mise` component that
-  replaces `ruby`, `go`, `rust`, `python` and the rvm/nvm shell setup, then a
-  smaller core.
+- **Debian and mise.** Done in part: the sidecar is on Debian, and the
+  `debian` template has the core and a `mise` component on Debian 13
+  genericcloud (git, Docker, Node, agent-browser with Playwright's libraries,
+  Claude Code, herdr, mise; a headless browser and a mise Python ran in a
+  sandbox of it, which used 3.3 GB of disk against 5.7 GB for `minimal`).
+  Next: mise in place of `ruby`, `go`, `rust`, `python` and the rvm/nvm
+  shell setup, then a smaller core.
 - **Uploads through the proxy.** The proxy buffers whole requests; a
   `git push` with a chunked body needs streaming.

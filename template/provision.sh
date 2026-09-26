@@ -67,14 +67,16 @@ systemctl enable --now qemu-guest-agent || true
 [[ "$BARE" == 1 ]] || ln -sf "$(command -v fdfind)" /usr/local/bin/fd
 
 step "system settings"
-# Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor, which
-# is what the Chromium sandbox is built on: without this every headless browser
-# dies with "No usable sandbox".
 cat > /etc/sysctl.d/90-sbx.conf <<'EOF'
-kernel.apparmor_restrict_unprivileged_userns = 0
 fs.inotify.max_user_watches = 524288
 fs.inotify.max_user_instances = 1024
 EOF
+# Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor, which
+# is what the Chromium sandbox is built on: without this every headless browser
+# dies with "No usable sandbox". Debian has no such switch.
+if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+  echo "kernel.apparmor_restrict_unprivileged_userns = 0" >> /etc/sysctl.d/90-sbx.conf
+fi
 sysctl -q --system || true
 
 # A clone must be usable the moment it boots. The apt timers take the dpkg lock
@@ -116,8 +118,11 @@ else
 
 step "docker"
 install -m 0755 -d /etc/apt/keyrings
-curl -fsSL --retry 5 --retry-delay 5 https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+# Docker keeps one repository per distribution: ubuntu or debian, by the image.
+OS_ID="$(. /etc/os-release && echo "$ID")"
+OS_CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+curl -fsSL --retry 5 --retry-delay 5 "https://download.docker.com/linux/$OS_ID/gpg" -o /etc/apt/keyrings/docker.asc
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$OS_ID $OS_CODENAME stable" \
   > /etc/apt/sources.list.d/docker.list
 
 step "caddy and gh repositories"

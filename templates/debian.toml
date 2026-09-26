@@ -1,0 +1,13 @@
+# The core on Debian 13 instead of Ubuntu, from Debian's genericcloud image (a
+# cloud kernel, no drivers or firmware): git, Docker, Node, Playwright's
+# browser libraries and agent-browser, Claude Code, herdr and the port mirror,
+# plus mise for the tool versions of each project.
+description = "the core on Debian 13, with mise"
+components  = ["mise"]
+image_url   = "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
+
+[node]
+versions = ["lts/*"]
+
+[mise]
+tools = []
