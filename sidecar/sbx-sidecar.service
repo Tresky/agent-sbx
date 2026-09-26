@@ -1,0 +1,19 @@
+[Unit]
+Description=sbx sidecar: the credential proxy and the expose API of one sandbox
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/sbx/sidecar.env
+EnvironmentFile=-/run/sbx/sidecar.env
+# ${VAR} is expanded by systemd itself; the addresses come from the env files
+# that sbx-sidecar-apply writes.
+ExecStart=/usr/bin/python3 /usr/local/lib/sbx/sidecar.py \
+  --agent-addr ${SBX_SIDECAR_LINK}.1 --vm-addr ${SBX_SIDECAR_LINK}.2 --net-addr ${SBX_SIDECAR_NET_ADDR} \
+  --secret-file /etc/sbx/sidecar/secret --tokens-file /etc/sbx/sidecar/tokens \
+  --claude-upstream ${SBX_CLAUDE_UPSTREAM} --github-upstream ${SBX_GIT_UPSTREAM}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

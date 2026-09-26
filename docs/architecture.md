@@ -67,6 +67,61 @@ range or a MAC prefix would give no protection.
 The API token may attach a card to the two sandbox bridges only, so even the
 CLI cannot put a sandbox on the LAN bridge.
 
+## The sidecar: one agent, one wire, one trusted neighbour
+
+An agent sandbox does not sit on the agent bridge alone. The bridge is
+VLAN-aware (`host/10-bridges.sh`), and `sbx new` gives the sandbox's only
+network card a tag of its own: `2 + (vmid - vmid_min)`, because a VLAN id
+stops at 4094 and a sandbox id starts at 9100 (`Config.vlan_for`). Beside it, `sbx new` clones a **sidecar** from
+the `sidecar` template (`templates/sidecar.toml`, `bare = true`: nftables and
+one Python service, none of the core). The sidecar's `net0` carries the same
+tag, with the wire address `<sidecar_link>.1/30`; the sandbox has
+`<sidecar_link>.2/30` from cloud-init, static, with the sidecar as its router
+and the gateway as its resolver. The sidecar's `net1` sits untagged on the
+bridge, where the gateway routes, and takes an address from dnsmasq. Every
+pair uses the same /30, because no two pairs share a segment. The tag is
+applied on the host side of the tap, so root in the VM cannot move it.
+
+**What the sidecar does** (`sidecar/`):
+
+- `nftables.conf.tmpl`, rendered by `sbx-sidecar-apply` with the two
+  interface names it finds: from the sandbox, the two services (8080, 8081),
+  a ping, DNS to the gateway, and the internet, nothing private; from the
+  shared network, the gateway side only, never another sidecar. Port 22 of the
+  sidecar's address is translated to the VM; with `sidecar_ports = open` so is
+  1024 to 32767, so the mirror's ports stay direct. With `ask`, a port is
+  translated once it is in the nftables set `approved`.
+- `sidecar.py`: the credential proxy on the wire (`8080`): the sandbox
+  presents its placeholder (bearer, `x-api-key`, or the basic-auth password
+  that git sends); the sidecar swaps in the real token and forwards. The
+  expose API (`8081`, on both sides): the sandbox asks for a port; only the
+  net side may approve, which adds the port to the set.
+- `sbx-sidecar-apply`: renders the firewall from `/etc/sbx/sidecar.env`,
+  sets the hostname to the SANDBOX's name and asks for the lease again, so
+  dnsmasq maps the sandbox's name to the sidecar. It runs after cloud-init on
+  each boot, because cloud-init sets the VM's own name back.
+
+**Why the sidecar is a VM, not a container.** A container would need a shell
+on the host to provision it (`pct exec`), which the token does not have. A VM
+gets its SSH key through cloud-init from the token, the guest agent reports
+its address, and the whole template machinery applies. Its sshd moves to 2222,
+since 22 is the sandbox's; the CLI keys its host key under
+`sidecar.<fqdn>` (`vm.py`).
+
+**What the token needs.** Nothing new: `VM.Config.Network` sets the tag, the
+bridge ACL covers a VLAN on that bridge, and the sidecar template sits in the
+templates pool. `_project_template` never counts the sidecar template as a
+sandbox's template.
+
+**The trap.** Proxmox's own "isolate ports" VNet option would have done the
+VLAN's job, but it isolates a container's port too, and the gateway is a
+container: every VM would lose its route. The VLAN per pair needs no such
+option.
+
+`tests/run-sidecar-test.sh` builds the whole thing in network namespaces and
+proves each refusal with a control; `tests/test_sidecar.py` drives the
+handlers with in-memory sockets.
+
 ## Names, with no configuration
 
 A sandbox gets its address and its name in one step, from one program:
@@ -305,26 +360,42 @@ instead, so the second Mac and the host agree.
    template`, `default_template`, or the only one that is built; `sbx new`
    clones its newest version with `POST /nodes/<node>/qemu/<vmid>/clone`
    (`newid`, `name`, `pool`). A template clones as a linked clone: seconds,
-   not minutes.
+   not minutes. For `agent`, the sidecar is cloned first, from the `sidecar`
+   template, under the next free id and the name `<hostname>-sc`.
 3. **Configure.** The network card on the profile's bridge, cores, memory, the
    cloud-init user, `ip=dhcp`, the sandbox public key (URL-encoded inside the
    form body, which the API expects), and the tags `sbx`, the profile, the
-   template, the expiry and the project.
-4. **Start**, and remove the old host key of that name from the CLI's own
-   `known_hosts`.
-5. **Connect.** Poll dnsmasq for the name. When the guest agent reports an
-   address first, connect by address, wait for cloud-init, start the
-   DHCP-hostname unit, and move to the name as soon as dnsmasq has it.
+   template, the expiry and the project. For `agent`: the card carries the
+   sandbox's VLAN tag, the address is the static wire address with the sidecar as
+   router, and the resolver is the gateway. The sidecar gets its two cards,
+   the wire address, DHCP on the second, and the tags `sbx-sidecar` and
+   `sbx-of-<hostname>`.
+4. **Start** the sidecar, then the sandbox, and remove the old host keys of
+   that name from the CLI's own `known_hosts`.
+5. **Connect.** For `agent`: reach the sidecar first, by the address the guest
+   agent reports on the sidecar network, on port 2222; write its policy, the
+   per-sandbox secret and the real tokens over SSH stdin; run
+   `sbx-sidecar-apply`, which registers the sandbox's name. Then poll dnsmasq
+   for the name and connect to the sandbox by name alone (port 22 of the
+   sidecar's address is the VM's). For `personal`: poll dnsmasq for the name;
+   when the guest agent reports an address first, connect by address, wait
+   for cloud-init, start the DHCP-hostname unit, and move to the name as soon
+   as dnsmasq has it.
 6. **Refresh.** `~/.zshenv`, `~/.zshrc` and `sbx_mirror.py` come from the
    checkout, over the template's copies, so a fix to them reaches the next
    sandbox without a template build. The mirror restarts only when its file
    changed.
 7. **Certificate.** mkcert on the Mac, two files into the sandbox over SSH,
    then `caddy` and `sbx-mirror` restart.
-8. **Claude Code.** The Claude token goes into `~/.config/sbx/claude.env`.
+8. **Claude Code.** The Claude token goes into `~/.config/sbx/claude.env`;
+   with `sidecar_claude = proxy`, the sidecar's base URL and the placeholder
+   go there instead, and the token stays in the sidecar.
 9. **Git access.** For `personal`, the SSH agent is forwarded for the clones.
-   For `agent`, the project's token goes into `~/.git-credentials`, and git
-   uses HTTPS for the host even for a URL in the SSH form.
+   For `agent`, the placeholder goes into `~/.git-credentials` for the
+   sidecar's proxy, and every URL of the git host is rewritten to
+   `http://<sidecar>:8080/github/`; the sidecar adds the token. Without a
+   sidecar, the token itself goes into `~/.git-credentials`, and git uses
+   HTTPS for the host even for a URL in the SSH form.
 10. **Clone the project** into `~/code/<project>`, with each `repo` input.
 11. **Send the inputs** over the SSH channel, and add each path to
     `.git/info/exclude`.
@@ -540,6 +611,7 @@ Each of these cost real time. Keep them in mind when you change the code.
 | a forwarded SSH agent and a key named in ssh config | the sandbox sees the agent only | `ssh-add --apple-use-keychain ~/.ssh/<key>`; the CLI checks before a VM exists |
 | a Python f-string with `\"` inside `{}` | a syntax error before Python 3.12 | different quotes, or a heredoc |
 | `set \| grep '^SBX_'` to save variables | a multi-line variable of another name has lines that start with `SBX_`; they pass the filter and overwrite the real values when the file is sourced | `declare -p` for each name from `compgen -v SBX_` |
+| the VM id as a VLAN tag | `bridge vlan add ... vid 9150` says "Invalid VLAN ID": a VLAN id stops at 4094 | `Config.vlan_for`: the sandbox's place in the id range, from 2 |
 | `a && b && c` as the last command of a loop, under `set -e` and pipefail | when the last item does not match, the failed chain becomes the loop's status, and the script stops | an `if` statement; `\|\| true` after a `grep` that may find nothing |
 
 ## What is tested, and how
@@ -575,7 +647,10 @@ dependencies):
   tools (`tests/test_rails_example.py`);
 - the settings: the Python defaults equal `defaults.conf`, and
   `docs/reference.md` names every command and every key
-  (`tests/test_docs.py`).
+  (`tests/test_docs.py`);
+- the sidecar prototype's handlers (`tests/test_sidecar.py`), with in-memory
+  sockets and a fake upstream: the credential swap, the refusal of a wrong
+  placeholder, and that only the trusted side opens a port.
 
 **Behaviour tests** (Docker):
 
@@ -587,6 +662,9 @@ dependencies):
 - `tests/run-mirror-test.sh`: the port mirror with a real Caddy.
 - `tests/run-finish-test.sh`: `30-template-build.sh --finish` with a fake `qm`
   and the real seal script.
+- `tests/run-sidecar-test.sh`: the sidecar prototype (`sidecar/`) and the
+  VLAN-per-sandbox wiring, against the real gateway rules, with a control for
+  every refusal. Run it after each change under `sidecar/`.
 
 **On the reference host,** by hand: the gateway, the template build, the
 token, `sbx new` in 24 seconds, the first-boot naming from the boot journal,
@@ -649,6 +727,11 @@ template/
   files/                    sbx_mirror.py and its unit, the DHCP-hostname unit,
                             sbx-recipe-run, zshenv, zshrc, Caddyfile
 tailscale/policy.example.hujson
+sidecar/
+  nftables.conf.tmpl        the sidecar's boundary; sbx-sidecar-apply renders it
+  sidecar.py                the credential proxy and the expose API
+  sbx-sidecar-apply         renders the firewall, registers the sandbox's name
+  sbx-sidecar.service, sbx-sidecar-apply.service
 examples/rails/.sandbox/    a Rails recipe, manifest and pane layout
 tests/                      unit tests and four Docker behaviour tests
 docs/                       the documentation

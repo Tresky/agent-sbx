@@ -297,6 +297,8 @@ stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/root"
 cp -a "$SBX_ROOT_DIR/template" "$stage/root/template"
+# The sidecar component installs the files of sidecar/.
+[[ -d "$SBX_ROOT_DIR/sidecar" ]] && cp -a "$SBX_ROOT_DIR/sidecar" "$stage/root/sidecar"
 # Every SBX_ variable, quoted: this host's settings and the definition's.
 write_build_conf "$stage/root/build.conf"
 tar -C "$stage/root" -czf "$stage/payload.tgz" .

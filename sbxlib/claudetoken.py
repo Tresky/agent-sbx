@@ -85,6 +85,14 @@ def env_file(token: str) -> bytes:
     return f"export CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(token)}\n".encode()
 
 
+def proxy_env_file(placeholder: str, base_url: str) -> bytes:
+    """The sandbox's side of the credential proxy: a base URL at its sidecar
+    and a placeholder that only that sidecar accepts. The real token never
+    enters the sandbox (docs: llm-gateway-connect, "ANTHROPIC_AUTH_TOKEN")."""
+    return (f"export ANTHROPIC_BASE_URL={shlex.quote(base_url)}\n"
+            f"export ANTHROPIC_AUTH_TOKEN={shlex.quote(placeholder)}\n").encode()
+
+
 # Without this flag, the first start of `claude` shows the setup screens even
 # with a token. jq is in the template; the file may not exist yet.
 SKIP_ONBOARDING = ('f=~/.claude.json; [ -s "$f" ] || echo "{}" > "$f"; '

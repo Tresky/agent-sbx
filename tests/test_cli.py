@@ -33,16 +33,24 @@ dest = "../ui"
 UPID = "UPID:pve:0001:0002:0003:task:9101:sbx@pve!cli:"
 
 
+SIDECAR_TPL = {"type": "qemu", "vmid": 9005, "name": "sbx-tpl-sidecar-20260925-1200", "node": "pve", "template": 1,
+               "tags": "sbx-template;sbx-tpl-sidecar;sbx-h-sc1"}
+
+
 class FakeApi:
     """Stands in for HttpApi. 9100 is held by a guest OUTSIDE the token's pool:
-    it is absent from resources, and only /cluster/nextid knows it is taken."""
+    it is absent from resources, and only /cluster/nextid knows it is taken.
+    With sidecars=True, each existing sandbox has its sidecar at vmid + 50."""
 
-    def __init__(self, events, existing=()):
+    def __init__(self, events, existing=(), sidecars=False):
         self.events = events
         self.resources = [{"type": "qemu", "vmid": 9000, "name": "sbx-base", "node": "pve", "template": 1,
-                           "tags": "sbx-template"}]
+                           "tags": "sbx-template"}, dict(SIDECAR_TPL)]
         self.resources += [{"type": "qemu", "vmid": 9101 + i, "name": n, "node": "pve", "status": "running",
                             "tags": "sbx;sbx-agent"} for i, n in enumerate(existing)]
+        if sidecars:
+            self.resources += [{"type": "qemu", "vmid": 9151 + i, "name": f"{n}-sc", "node": "pve", "status": "running",
+                                "tags": f"sbx-sidecar;sbx-of-{n};sbx-tpl-sidecar"} for i, n in enumerate(existing)]
 
     def __call__(self, method, path, params=None):
         params = dict(params or {})
@@ -151,8 +159,9 @@ class NewTest(unittest.TestCase):
         self.more_resources = [self.RUST_OLD, self.RUST]
         code, events, _ = self.run_new("lab", "--template", "rust")
         self.assertEqual(code, 0)
-        self.assertEqual(self.clones(events), ["/nodes/pve/qemu/9002/clone"])
-        config = next(e[3] for e in events if e[0] == "api" and e[1] == "PUT" and e[2].endswith("/config"))
+        # The sidecar first, from its own template; then the sandbox.
+        self.assertEqual(self.clones(events), ["/nodes/pve/qemu/9005/clone", "/nodes/pve/qemu/9002/clone"])
+        config = next(e[3] for e in events if e[0] == "api" and e[1] == "PUT" and e[2] == "/nodes/pve/qemu/9101/config")
         self.assertIn("sbx-tpl-rust", config["tags"])
 
     def test_a_template_that_is_not_built_makes_no_vm(self):
@@ -165,7 +174,7 @@ class NewTest(unittest.TestCase):
         (self.app / ".sandbox/sandbox.toml").write_text('[recipe]\ntemplate = "rust"\n' + MANIFEST)
         code, events, _ = self.run_new("lab", "--project", str(self.app), "--with", "key")
         self.assertEqual(code, 0)
-        self.assertEqual(self.clones(events), ["/nodes/pve/qemu/9002/clone"])
+        self.assertEqual(self.clones(events), ["/nodes/pve/qemu/9005/clone", "/nodes/pve/qemu/9002/clone"])
 
     def test_agent_without_a_decision_makes_no_vm(self):
         code, events, _ = self.run_new("myapp", "--project", str(self.app))
@@ -177,20 +186,39 @@ class NewTest(unittest.TestCase):
         self.assertEqual(code, 0)
         pos = lambda *a: self.pos(events, *a)  # noqa: E731
 
-        # 9100 is invisible to the token but taken, so the first free id is 9101.
+        # 9100 is invisible to the token but taken, so the first free id is
+        # 9101 for the sandbox; its sidecar takes the next one, 9102.
+        sc_clone = pos("api", "POST", "/nodes/pve/qemu/9005/clone")
+        sc_config = pos("api", "PUT", "/nodes/pve/qemu/9102/config")
+        sc_start = pos("api", "POST", "/nodes/pve/qemu/9102/status/start")
         clone = pos("api", "POST", "/nodes/pve/qemu/9000/clone")
         config = pos("api", "PUT", "/nodes/pve/qemu/9101/config")
         start = pos("api", "POST", "/nodes/pve/qemu/9101/status/start")
+        apply_ = pos("cmd", "-p 2222", "dev@10.77.0.57", "sudo sbx-sidecar-apply")
         recipe = pos("cmd", "sbx-recipe-run code/app .sandbox/setup.sh")
         runner_install = pos("cmd", "sudo install -D -m 0755 -o root -g root /dev/stdin /usr/local/bin/sbx-recipe-run")
         self.assertLess(runner_install, recipe, "the current runner goes in before the recipe runs")
         snapshot = pos("api", "POST", "/nodes/pve/qemu/9101/snapshot")
-        self.assertEqual(sorted([clone, config, start, recipe, snapshot]), [clone, config, start, recipe, snapshot],
-                         "clone < config < start < recipe < snapshot: the clean snapshot must hold the finished recipe")
+        order = [sc_clone, sc_config, clone, config, sc_start, start, apply_, recipe, snapshot]
+        self.assertEqual(sorted(order), order,
+                         "sidecar clone < sandbox clone < starts < sidecar applied < recipe < snapshot")
 
+        self.assertEqual(events[sc_clone][3], {"newid": 9102, "name": "sbx-myapp-sc", "pool": "sbx"})
         self.assertEqual(events[clone][3], {"newid": 9101, "name": "sbx-myapp", "pool": "sbx"})
+        sc_params = events[sc_config][3]
+        # The sidecar: one leg on the sandbox's VLAN with the wire address, one
+        # untagged on the agent bridge with DHCP from the gateway.
+        # VLAN 3: the second id of the range (9100 is taken), since a VLAN id
+        # stops at 4094 and the VM id cannot be the tag.
+        self.assertEqual((sc_params["net0"], sc_params["net1"]), ("virtio,bridge=vmbr77,tag=3", "virtio,bridge=vmbr77"))
+        self.assertEqual((sc_params["ipconfig0"], sc_params["ipconfig1"]), ("ip=10.79.0.1/30", "ip=dhcp"))
+        self.assertEqual(sc_params["tags"], "sbx-sidecar;sbx-of-sbx-myapp;sbx-tpl-sidecar")
         params = events[config][3]
-        self.assertEqual(params["net0"], "virtio,bridge=vmbr77")
+        # The sandbox: its only NIC on its own VLAN, a static wire address, the
+        # sidecar as its router, the gateway as its resolver.
+        self.assertEqual(params["net0"], "virtio,bridge=vmbr77,tag=3")
+        self.assertEqual(params["ipconfig0"], "ip=10.79.0.2/30,gw=10.79.0.1")
+        self.assertEqual((params["nameserver"], params["searchdomain"]), ("10.77.0.1", "sbx.internal"))
         self.assertRegex(params["tags"], r"^sbx;sbx-agent;sbx-tpl-default;sbx-exp-\d{8};sbx-proj-app$")
         self.assertEqual(events[snapshot][3], {"snapname": "clean"})
         pos("cmd", "git clone -q -- git@github.com:me/ui.git code/ui")
@@ -205,6 +233,97 @@ class NewTest(unittest.TestCase):
         # An agent sandbox never gets the forwarded SSH agent.
         self.assertFalse([e for e in events if "ForwardAgent=yes" in str(e)])
 
+        # The per-sandbox placeholder: in the sidecar's secret file and in the
+        # sandbox's git credentials for the proxy, on stdin only. The sandbox
+        # is reached by name alone, never by an address.
+        env = next(p for p in payloads if p and p.startswith(b"SBX_SIDECAR_LINK="))
+        self.assertIn(b"SBX_SANDBOX_HOSTNAME=sbx-myapp\nSBX_SIDECAR_PORTS=open\n", env)
+        creds = next(p for p in payloads if p and p.startswith(b"http://sbx:"))
+        placeholder = creds.decode().split(":")[2].split("@")[0]
+        self.assertEqual(creds, f"http://sbx:{placeholder}@10.79.0.1:8080\n".encode())
+        self.assertIn(f"{placeholder}\n".encode(), payloads)
+        self.assertFalse([e for e in events if placeholder in " ".join(map(str, e))])
+        pos("cmd", "dev@sbx-myapp.sbx.internal", "url.http://10.79.0.1:8080/github/.insteadOf https://github.com/")
+        self.assertFalse([e for e in events if e[0] == "cmd" and "dev@10.79.0.2" in e[1]])
+        self.assertTrue(all("dev@10.77.0.57" not in e[1] or "-p 2222" in e[1] for e in events if e[0] == "cmd"),
+                        "the address on the sidecar network is the sidecar's, on its own port")
+
+    def test_no_sidecar_is_the_old_flow(self):
+        Path(os.environ["SBX_CONFIG_DIR"], "config.toml").write_text("agent_sidecar = false\n")
+        code, events, _ = self.run_new("plain")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.clones(events), ["/nodes/pve/qemu/9000/clone"])
+        params = events[self.pos(events, "api", "PUT", "/nodes/pve/qemu/9101/config")][3]
+        self.assertEqual((params["net0"], params["ipconfig0"]), ("virtio,bridge=vmbr77", "ip=dhcp"))
+        self.assertNotIn("nameserver", params)
+
+    def test_a_missing_sidecar_template_makes_no_vm(self):
+        events = []
+        api = FakeApi(events)
+        api.resources = [r for r in api.resources if "sbx-tpl-sidecar" not in r["tags"]]
+        code = cli.main(["new", "lab"], runner=Runner(responder=lambda a, d: ""), api=api)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.clones(events), [])
+
+    def test_proxy_mode_keeps_the_claude_token_in_the_sidecar(self):
+        Path(os.environ["SBX_CONFIG_DIR"], "config.toml").write_text('sidecar_claude = "proxy"\n')
+        events, writes = [], []
+
+        def responder(args, data):
+            events.append(("cmd", " ".join(args)))
+            if args[:2] == ["security", "find-generic-password"] and "sbx-claude-token" in args:
+                return Result(0, "sk-ant-oat01-real")
+            if args[0] == "ssh" and data:
+                writes.append((next(a for a in args if a.startswith("dev@")), data))  # (user@host, stdin)
+            if args[0] == "mkcert" and "-CAROOT" in args:
+                return str(self.tmp / "caroot")
+            if args[0] == "mkcert":
+                Path(args[args.index("-cert-file") + 1]).write_text("CERT")
+                Path(args[args.index("-key-file") + 1]).write_text("KEY")
+            return ""
+        code = cli.main(["new", "px"], runner=Runner(responder=responder), api=FakeApi(events))
+        self.assertEqual(code, 0)
+        to_sidecar = [d for h, d in writes if h == "dev@10.77.0.57"]
+        to_vm = [d for h, d in writes if h == "dev@sbx-px.sbx.internal"]
+        self.assertIn(b"claude=sk-ant-oat01-real\ngithub=\n", to_sidecar)
+        self.assertFalse([d for d in to_vm if b"sk-ant-oat01-real" in d], "the real token never enters the sandbox")
+        env = next(d for d in to_vm if b"ANTHROPIC_BASE_URL" in d)
+        self.assertIn(b"export ANTHROPIC_BASE_URL=http://10.79.0.1:8080\nexport ANTHROPIC_AUTH_TOKEN=", env)
+        self.assertFalse([e for e in events if "sk-ant-oat01-real" in " ".join(map(str, e))])
+
+    def test_rm_destroys_the_sidecar_and_gc_removes_an_orphan(self):
+        events = []
+        api = FakeApi(events, existing=["sbx-old"], sidecars=True)
+
+        def responder(args, data):
+            events.append(("cmd", " ".join(args)))
+            return ""
+        self.assertEqual(cli.main(["rm", "old", "-y"], runner=Runner(responder=responder), api=api), 0)
+        deleted = [e[2] for e in events if e[0] == "api" and e[1] == "DELETE"]
+        self.assertEqual(deleted, ["/nodes/pve/qemu/9101", "/nodes/pve/qemu/9151"])
+        cmds = [e[1] for e in events if e[0] == "cmd" and e[1].startswith("ssh-keygen -R")]
+        self.assertTrue(any("sidecar.sbx-old.sbx.internal" in c for c in cmds), "the sidecar's host key goes too")
+
+        events = []
+        api = FakeApi(events, existing=["sbx-gone"], sidecars=True)
+        api.resources = [r for r in api.resources if r["name"] != "sbx-gone"]  # the sandbox is gone, the sidecar stays
+        self.assertEqual(cli.main(["gc", "-y"], runner=Runner(responder=lambda a, d: ""), api=api), 0)
+        deleted = [e[2] for e in events if e[0] == "api" and e[1] == "DELETE"]
+        self.assertEqual(deleted, ["/nodes/pve/qemu/9151"])
+
+    def test_ssh_sidecar_uses_the_sidecar_port_and_alias(self):
+        api = FakeApi([], existing=["sbx-a"], sidecars=True)
+        with mock.patch("sbxlib.cli.os.execvp") as execvp:
+            cli.main(["ssh", "a", "--sidecar", "--", "uptime"], runner=Runner(responder=lambda a, d: ""), api=api)
+        argv = execvp.call_args.args[1]
+        self.assertIn("-p", argv)
+        self.assertEqual(argv[argv.index("-p") + 1], "2222")
+        self.assertIn("HostKeyAlias=sidecar.sbx-a.sbx.internal", argv)
+        self.assertEqual(argv[-3:], ["dev@sbx-a.sbx.internal", "--", "uptime"])
+        api = FakeApi([], existing=["sbx-b"])
+        code = cli.main(["ssh", "b", "--sidecar"], runner=Runner(responder=lambda a, d: ""), api=api)
+        self.assertEqual(code, 1, "a sandbox without a sidecar has nothing to open")
+
     def test_personal_profile(self):
         code, events, _ = self.run_new("lab", "--profile", "personal", "--project", str(self.app))
         self.assertEqual(code, 0)
@@ -216,7 +335,10 @@ class NewTest(unittest.TestCase):
                         "the agent is forwarded for git clones only")
 
     def test_a_late_name_makes_the_cli_ask_for_the_lease_then_use_the_name(self):
-        # dnsmasq has the name only AFTER the sandbox was told to ask for its lease.
+        # dnsmasq has the name only AFTER the sandbox was told to ask for its
+        # lease. A sandbox without a sidecar registers its own name; with one,
+        # the sidecar does, and the sandbox is never reached by address.
+        Path(os.environ["SBX_CONFIG_DIR"], "config.toml").write_text("agent_sidecar = false\n")
         seen = []
 
         def responder_hook(args):
@@ -284,12 +406,14 @@ class NewTest(unittest.TestCase):
             code = cli.main(["new", "tok", "--project", str(self.app), "--with", "key"],
                             runner=Runner(responder=responder), api=FakeApi(events))
             self.assertEqual(code, 0)
-            creds = [p for p in payloads if p and p.startswith(b"https://x-access-token:")]
+            # The token goes to the SIDECAR's tokens file, and to nothing else.
+            self.assertFalse([p for p in payloads if p and p.startswith(b"https://x-access-token:")])
+            creds = [p for p in payloads if p and p.startswith(b"claude=")]
             self.assertEqual(len(creds), 1)
             return creds[0]
 
-        self.assertEqual(run(with_binding=True), b"https://x-access-token:ghp_app-only@github.com\n")
-        self.assertEqual(run(with_binding=False), b"https://x-access-token:ghp_global@github.com\n")
+        self.assertEqual(run(with_binding=True), b"claude=\ngithub=ghp_app-only\n")
+        self.assertEqual(run(with_binding=False), b"claude=\ngithub=ghp_global\n")
 
     def test_personal_with_an_empty_ssh_agent_makes_no_vm(self):
         # Controlled pair with test_personal_profile: the same command, and
@@ -353,8 +477,8 @@ class NewTest(unittest.TestCase):
             payloads.append(data)
             if args[:2] == ["security", "find-generic-password"] and "sbx-claude-token" in args:
                 return Result(0 if token else 44, token)
-            if args[0] == "ssh" and "test -f" in args[-1]:
-                return "yes" if any(f"@{h}." in " ".join(args) for h in has_file) else "no"
+            if args[0] == "ssh" and "ANTHROPIC_BASE_URL" in args[-1]:  # which kind of token file the sandbox has
+                return "direct" if any(f"@{h}." in " ".join(args) for h in has_file) else "none"
             if args[0] == "mkcert" and "-CAROOT" in args:
                 return str(self.tmp / "caroot")
             if args[0] == "mkcert":
@@ -475,6 +599,15 @@ class SmallTests(unittest.TestCase):
         for env_key, field in _ENV_MAP.items():
             with self.subTest(key=env_key):
                 self.assertEqual(str(getattr(plain, field)), shared[env_key])
+
+    def test_vlan_follows_the_id_range_and_stays_in_range(self):
+        cfg = load()
+        self.assertEqual((cfg.vlan_for(9100), cfg.vlan_for(9101), cfg.vlan_for(9199)), (2, 3, 101))
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "local.conf"
+            local.write_text("SBX_VMID_MIN=100\nSBX_VMID_MAX=9999\n")
+            with self.assertRaisesRegex(ConfigError, "wider than the 4093 VLANs"):
+                load(local_path=local)
 
     def test_config_toml_cannot_disagree_with_a_shared_key(self):
         with tempfile.TemporaryDirectory() as tmp:

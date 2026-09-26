@@ -11,8 +11,9 @@ inside?** An AI agent with full permissions, or you.
 
 | | `agent` | `personal` |
 |---|---|---|
-| Network | The internet only. No LAN, no tailnet, no other sandbox. | The internet, the LAN, and the agent sandboxes. No tailnet. |
-| Git access | A token for one project, sent into the VM. Without a token, public repositories only. | Your SSH agent, forwarded for the git clones only. |
+| Network | Its sidecar, and the internet through it. No LAN, no tailnet, no other sandbox, not even the gateway. | The internet, the LAN, and the sidecars. No tailnet. |
+| Sidecar | A small trusted VM on the sandbox's own VLAN: it holds the credentials and the port policy, and it is the sandbox's only neighbour. | None. |
+| Git access | A token for one project, held by the sidecar. The VM presents a placeholder. Without a token, public repositories only. | Your SSH agent, forwarded for the git clones only. |
 | Secrets | Each input of the project needs `--with` or `--without`. Nothing goes in by default. | Each input that sbx finds goes in, and sbx prints the list. |
 | Snapshot | A `clean` snapshot after the recipe. | None by default. |
 | Claude Remote Control | Never. | Yes, so claude.ai/code and the Claude phone app can drive the sandbox. |
@@ -64,6 +65,10 @@ ssh sbx-lab
 
 `ssh sbx-<name>` needs the `Include` line in `~/.ssh/config`, which
 `sbx setup` offers to add.
+
+An agent sandbox's name is its sidecar, which passes port 22 to the VM. The
+sidecar itself answers on port 2222: `sbx ssh <name> --sidecar`. Its log is
+`sudo journalctl -u sbx-sidecar` there.
 
 **Names.** Each sandbox has the name `sbx-<name>.<domain>`, for example
 `sbx-lab.sbx.internal`. The name exists as soon as the sandbox boots. Nothing

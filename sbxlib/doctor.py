@@ -197,6 +197,12 @@ def isolation_checks(cfg: Config, runner: Runner, api=None) -> list[Check]:
         for ip in mac_ts[:1]:
             expect += [("agent cannot reach this Mac on the tailnet", boxes["agent"], f"ping -c1 -W2 {ip}", False),
                        ("personal cannot reach this Mac on the tailnet", boxes["personal"], f"ping -c1 -W2 {ip}", False)]
+        if cfg.agent_sidecar:
+            # The sidecar is the agent's only neighbour; even the gateway is
+            # behind it. The personal probe is the control for the gateway one.
+            expect += [("agent reaches its sidecar", boxes["agent"], f"ping -c1 -W2 {cfg.sidecar_addr}", True),
+                       ("agent cannot reach the gateway", boxes["agent"], f"ping -c1 -W2 {cfg.dns_server}", False),
+                       ("personal reaches the gateway", boxes["personal"], f"ping -c1 -W2 {cfg.personal_net}.1", True)]
         for label, name, command, want in expect:
             got = probe(name, command)
             out.append(Check("ok" if got == want else "FAIL", label, "" if got == want else
