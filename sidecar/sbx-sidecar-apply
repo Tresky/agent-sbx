@@ -10,9 +10,14 @@
 #                                     empty removes it), write it, restart the service
 set -euo pipefail
 
-ENV=/etc/sbx/sidecar.env
-DIR=/etc/sbx/sidecar
-TMPL=/usr/local/lib/sbx/sidecar-nftables.tmpl
+# SBX_SIDECAR_ROOT prefixes every path, so that a test can run this script
+# against a directory of its own with stub commands on the PATH.
+R="${SBX_SIDECAR_ROOT:-}"
+ENV="$R/etc/sbx/sidecar.env"
+DIR="$R/etc/sbx/sidecar"
+TMPL="$R/usr/local/lib/sbx/sidecar-nftables.tmpl"
+NFT_CONF="$R/etc/nftables.conf"
+RUN_DIR="$R/run/sbx"
 [[ -f "$ENV" ]] || { echo "no $ENV yet; nothing to apply"; exit 0; }
 # shellcheck disable=SC1090
 source "$ENV"
@@ -53,10 +58,10 @@ render() {
   done
   printf '%s\n' "$out"
 }
-render "$TMPL" > /etc/nftables.conf.new
-nft -c -f /etc/nftables.conf.new
-mv /etc/nftables.conf.new /etc/nftables.conf
-nft -f /etc/nftables.conf
+render "$TMPL" > "$NFT_CONF.new"
+nft -c -f "$NFT_CONF.new"
+mv "$NFT_CONF.new" "$NFT_CONF"
+nft -f "$NFT_CONF"
 systemctl enable -q nftables
 
 # The sandbox has no path to the gateway's DHCP, so its NAME is registered by
@@ -67,8 +72,8 @@ if [[ -n "${SBX_SANDBOX_HOSTNAME:-}" && "$(hostname)" != "$SBX_SANDBOX_HOSTNAME"
   networkctl reconfigure "$net_if" || true
 fi
 
-install -d -m 0755 /run/sbx
-printf 'SBX_SIDECAR_NET_ADDR=%s\n' "$net_addr" > /run/sbx/sidecar.env
+install -d -m 0755 "$RUN_DIR"
+printf 'SBX_SIDECAR_NET_ADDR=%s\n' "$net_addr" > "$RUN_DIR/sidecar.env"
 touch "$DIR/secret" "$DIR/tokens"
 chmod 0600 "$DIR/secret" "$DIR/tokens"
 systemctl restart sbx-sidecar
