@@ -1,8 +1,8 @@
 """`sbx claude-token`: one Claude Code token for every sandbox, from the
 Claude subscription (Pro or Max), not from an API key.
 
-`claude setup-token` on the Mac makes a long-lived OAuth token. The macOS
-keychain holds the one master copy. A sandbox gets a copy in ENV_FILE, which
+`claude setup-token` on the Mac makes a long-lived OAuth token. The secret
+store (secretstore.py: the macOS keychain) holds the one master copy. A sandbox gets a copy in ENV_FILE, which
 ~/.zshenv reads in every shell, so a new shell always sees the current token
 and nothing in the sandbox caches it. The token does not refresh itself: when
 it expires, `sbx claude-token` makes a new one and writes it into every
@@ -13,7 +13,7 @@ refresh token when it uses it, so copies on several machines sign each other
 out.
 
 As in gittoken.py, the token appears on no command line of this tool except
-the one `security add-generic-password` call that stores it.
+the one `security add-generic-password` call that stores it in the keychain.
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ import tomllib
 
 from .config import state_dir
 from .run import Runner
+from . import secretstore
 
 SERVICE = "sbx-claude-token"
 ACCOUNT = "sbx"
@@ -38,13 +39,12 @@ def _record_path():
 
 
 def get(runner: Runner) -> str:
-    """The stored token, or "" when the keychain has none."""
-    done = runner.run(["security", "find-generic-password", "-s", SERVICE, "-a", ACCOUNT, "-w"], check=False)
-    return done.stdout.strip() if done.code == 0 else ""
+    """The stored token, or "" when the store has none."""
+    return secretstore.get(runner, SERVICE, ACCOUNT)
 
 
 def store(runner: Runner, token: str, today: dt.date | None = None) -> None:
-    runner.run(["security", "add-generic-password", "-U", "-s", SERVICE, "-a", ACCOUNT, "-w", token])
+    secretstore.store(runner, SERVICE, token, ACCOUNT)
     path = _record_path()
     path.write_text(f'# Written by `sbx claude-token`. The date the token was made.\n'
                     f'created = "{(today or dt.date.today()).isoformat()}"\n')
@@ -53,8 +53,7 @@ def store(runner: Runner, token: str, today: dt.date | None = None) -> None:
 
 def forget(runner: Runner) -> bool:
     _record_path().unlink(missing_ok=True)
-    done = runner.run(["security", "delete-generic-password", "-s", SERVICE, "-a", ACCOUNT], check=False)
-    return done.code == 0
+    return secretstore.forget(runner, SERVICE, ACCOUNT)
 
 
 def expires() -> dt.date | None:

@@ -8,7 +8,8 @@ connects to a different person's host or tailnet.
 - A Proxmox VE 8 or 9 host, with its root password. The host needs a Linux
   bridge on your LAN and a storage that can make linked clones (LVM-thin, ZFS,
   or a directory storage with qcow2).
-- A Mac with Python 3.11 or later, and the Tailscale app, signed in.
+- A Mac with Python 3.11 or later, and the Tailscale app, signed in. A Linux
+  machine works too: see [A Linux machine instead of a Mac](#a-linux-machine-instead-of-a-mac).
 - A Tailscale tailnet where you are an admin. You change its policy and its DNS.
 - Optional: `mkcert` (`brew install mkcert`) for https in each sandbox, and
   `herdr` for the sidebar.
@@ -53,6 +54,31 @@ For a Mac that uses a host that is set up already, run `sbx setup --mac-only`.
 It copies `host/local.conf` from the host, makes a separate API token for this
 Mac, and sets up the Mac. It does not change the host. Each Mac has its own
 token, so a new token on one Mac does not stop the others.
+
+### A Linux machine instead of a Mac
+
+sbx runs on Linux too, with the same steps. Four things differ:
+
+- **Tailscale** is the Linux package (`tailscale up`), not the app. Linux
+  ignores the routes of a subnet router until you accept them, so run this
+  once, before the setup reaches its DNS check:
+
+  ```
+  sudo tailscale set --accept-routes
+  ```
+
+  Without it, `sbx-gw.sbx.internal` does not resolve, and the setup waits at
+  "does not resolve ... on this Mac yet". MagicDNS reaches the system
+  resolver through systemd-resolved; `resolvectl query sbx-gw.sbx.internal`
+  shows the answer and the link it came from (`tailscale0`).
+- **The secrets** are files in `~/.config/sbx/secrets/`, readable by you only,
+  because there is no keychain. See
+  [the secret store](reference.md#the-secret-store).
+- **The routes** of the machine, which the proposed subnets must miss, come
+  from `ip -4 route` instead of `netstat`. A Docker network such as
+  `172.17.0.0/16` counts.
+- **Your git key** for a personal sandbox goes into the agent with a plain
+  `ssh-add ~/.ssh/<key>`; `--apple-use-keychain` is macOS only.
 
 ## The values of your setup
 
@@ -250,7 +276,8 @@ sbx setup --mac-only
 
 - It copies `host/local.conf` from the host, so this Mac and the host agree.
 - It makes this Mac's own API token (`cli-<Mac name>`) and puts it in the
-  macOS keychain. It writes `pve_api`, the token command, and the certificate
+  macOS keychain, or off macOS in a file that only you can read
+  ([the secret store](reference.md#the-secret-store)). It writes `pve_api`, the token command, and the certificate
   check into `~/.config/sbx/config.toml`.
 - It makes a key pair for the sandboxes only. None of your own keys is put in
   a sandbox.

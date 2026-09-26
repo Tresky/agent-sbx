@@ -81,6 +81,8 @@ terminal. The agent prepares, explains, and checks.
    - `ssh` and `scp` exist.
    - The Tailscale app is installed and signed in (`tailscale status`, or
      `/Applications/Tailscale.app/Contents/MacOS/Tailscale status`).
+   - On Linux instead of a Mac: `docs/setup.md`, "A Linux machine instead of
+     a Mac" (accept the subnet routes; the secrets are files).
    - Optional: `mkcert` (https in each sandbox) and `herdr` (the sidebar).
 2. **Ask the user** for these facts:
    - Is this a new host, or a host that another Mac set up already?

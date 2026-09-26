@@ -44,6 +44,13 @@ DISC = {
 
 
 class ProposeTest(unittest.TestCase):
+    def test_mac_networks_reads_ip_route_too(self):
+        # Off macOS, LOCAL_ROUTES is `ip -4 route`: full addresses, and "default".
+        nets = hostsetup.mac_networks("default via 192.168.1.1 dev eth0 proto dhcp\n"
+                                      "172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1\n"
+                                      "192.168.1.0/24 dev eth0 proto kernel scope link src 192.168.1.20\n")
+        self.assertEqual([str(n) for n in nets], ["172.17.0.0/16", "192.168.1.0/24"])
+
     def test_mac_networks_expands_the_short_forms(self):
         nets = hostsetup.mac_networks(NETSTAT)
         self.assertIn(ipaddress.ip_network("10.0.0.0/24"), nets)
@@ -132,7 +139,7 @@ class _WizardBase(unittest.TestCase):
     def respond(self, argv, data):
         self.cmds.append(argv)
         cmd = argv[-1]
-        if argv[0] == "netstat":
+        if argv == hostsetup.LOCAL_ROUTES:
             return NETSTAT
         if argv[0] == "ssh" and cmd == "bash -s":
             return json.dumps(DISC)
@@ -174,7 +181,7 @@ class WizardTest(_WizardBase):
         self.assertEqual(store[-1], "sbx@pve!cli=00000000-0000-0000-0000-000000000000")
         cfg = load()
         self.assertEqual(cfg.pve_api, "https://192.168.1.5:8006")
-        self.assertEqual(cfg.pve_token_command, hostsetup.PVE_TOKEN_COMMAND)
+        self.assertEqual(cfg.pve_token_command, ["security", "find-generic-password", "-s", "sbx-pve-token", "-w"])
         # The address is in the certificate, so the CA is used, not the fingerprint.
         self.assertTrue(cfg.pve_ca_file.endswith("pve-root-ca.crt"))
         self.assertEqual(cfg.pve_fingerprint, "")

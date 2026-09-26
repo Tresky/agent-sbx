@@ -1,5 +1,5 @@
-"""`sbx git-token`: one git token per project, stored in the macOS keychain
-and named from the project's bindings file.
+"""`sbx git-token`: one git token per project, stored in the secret store
+(secretstore.py: the macOS keychain) and named from the project's bindings file.
 
 The token never appears on a command line of this tool, except in the one
 `security add-generic-password` call that stores it: that program takes the
@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .inputs import Bindings, InputError, load_bindings
 from .run import CommandError, Runner
+from . import secretstore
 
 _REPO_RES = (
     # scp form: user@host:path
@@ -71,13 +72,12 @@ def check_token(runner: Runner, token: str, host: str, repos: list[str]) -> list
 
 def store(runner: Runner, project: str, token: str) -> str:
     service = keychain_service(project)
-    runner.run(["security", "add-generic-password", "-U", "-s", service, "-a", "sbx", "-w", token])
+    secretstore.store(runner, service, token)
     return service
 
 
 def forget(runner: Runner, project: str) -> bool:
-    done = runner.run(["security", "delete-generic-password", "-s", keychain_service(project), "-a", "sbx"], check=False)
-    return done.code == 0
+    return secretstore.forget(runner, keychain_service(project))
 
 
 _GIT_BLOCK = re.compile(r"(?ms)^\[git\]\n.*?(?=^\[|\Z)")
@@ -89,7 +89,7 @@ def write_binding(path: Path, project: str, host: str, username: str) -> None:
     text = path.read_text() if path.exists() else ""
     text = _GIT_BLOCK.sub("", text).rstrip()
     block = ("[git]\n"
-             f"token_command = {json.dumps(['security', 'find-generic-password', '-s', keychain_service(project), '-w'])}\n")
+             f"token_command = {json.dumps(secretstore.command(keychain_service(project)))}\n")
     if host != "github.com":
         block += f"host = {json.dumps(host)}\n"
     if username != "x-access-token":

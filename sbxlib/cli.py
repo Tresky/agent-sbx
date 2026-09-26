@@ -26,6 +26,7 @@ from . import manifest as manifest_mod
 from . import names
 from . import projects as projects_mod
 from . import remotecontrol
+from . import secretstore
 from . import templates as templates_mod
 from . import versions as versions_mod
 from .config import Config, ConfigError, load as load_config, local_conf_path, state_dir
@@ -682,7 +683,7 @@ def cmd_projects(args, cfg: Config, runner: Runner, api=None) -> int:
         return cmd_projects(argparse.Namespace(action="list"), cfg, runner, api)
     if action == "rm":
         if projects_mod.forget(args.project):
-            info(f"forgot {args.project}; its bindings file and keychain token are untouched")
+            info(f"forgot {args.project}; its bindings file and stored token are untouched")
             return 0
         raise projects_mod.ProjectError(f"no project named {args.project!r}")
 
@@ -700,8 +701,7 @@ def cmd_projects(args, cfg: Config, runner: Runner, api=None) -> int:
     rows = [("PROJECT", "TOKEN", "CHECKOUT", "SANDBOXES")]
     for name in sorted(entries):
         e = entries[name]
-        token = runner.run(["security", "find-generic-password", "-s", gittoken.keychain_service(name), "-a", "sbx"],
-                           check=False).code == 0
+        token = secretstore.exists(runner, gittoken.keychain_service(name), "sbx")
         checkout = e.checkout.replace(str(Path.home()), "~") if e.checkout else "-"
         if e.checkout and not Path(e.checkout).is_dir():
             checkout += " (gone)"
@@ -725,7 +725,7 @@ def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
     if args.remove:
         gone = gittoken.forget(runner, project.name)
         dropped = gittoken.remove_binding(binding)
-        info(f"{project.name}: keychain item {'removed' if gone else 'was absent'}, "
+        info(f"{project.name}: token in {secretstore.where()} {'removed' if gone else 'was absent'}, "
              f"[git] section {'removed' if dropped else 'was absent'}")
         return 0
 
@@ -759,7 +759,7 @@ def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
 
     service = gittoken.store(runner, project.name, token)
     gittoken.write_binding(binding, project.name, args.host, args.username)
-    info(f"stored in the keychain as {service}")
+    info(f"stored in {secretstore.where()} as {service}")
     info(f"wrote [git] in {binding}")
     print(f"an agent sandbox of {project.name} now clones with this token: sbx new <name> --project {args.project}")
     return 0
@@ -769,7 +769,7 @@ def cmd_claude_token(args, cfg: Config, runner: Runner, api=None) -> int:
     if args.status:
         stored = bool(claudetoken.get(runner))
         end = claudetoken.expires()
-        print(f"Claude token: {'stored in the keychain' if stored else 'NONE'}"
+        print(f"Claude token: {'stored in ' + secretstore.where() if stored else 'NONE'}"
               + (f", expires {end}" if stored and end else ""))
         if stored and (note := claudetoken.expiry_warning()):
             warn(note)
@@ -779,18 +779,18 @@ def cmd_claude_token(args, cfg: Config, runner: Runner, api=None) -> int:
         if args.sandboxes:
             raise InputError("--remove takes no sandbox names; it acts on every running sandbox")
         gone = claudetoken.forget(runner)
-        info(f"keychain item {'removed' if gone else 'was absent'}")
+        info(f"token in {secretstore.where()} {'removed' if gone else 'was absent'}")
         _each_claude_sandbox(cfg, runner, api, [], f"rm -f {shlex.quote(claudetoken.ENV_FILE)}", "token removed")
         return 0
 
     if args.push:
         token = claudetoken.get(runner)
         if not token:
-            raise InputError("no Claude token in the keychain; run: sbx claude-token")
+            raise InputError(f"no Claude token in {secretstore.where()}; run: sbx claude-token")
     else:
         token = _new_claude_token(args, runner)
         claudetoken.store(runner, token)
-        info(f"stored in the keychain as {claudetoken.SERVICE}; it expires {claudetoken.expires()}")
+        info(f"stored in {secretstore.where()} as {claudetoken.SERVICE}; it expires {claudetoken.expires()}")
     return _each_claude_sandbox(cfg, runner, api, args.sandboxes, None, "token updated", token)
 
 
@@ -1657,7 +1657,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_rm.add_argument("project", help="the project name")
     s.set_defaults(fn=cmd_projects)
 
-    s = sub.add_parser("git-token", help="store a project's git token in the keychain and bind it")
+    s = sub.add_parser("git-token", help="store a project's git token (keychain, or a private file) and bind it")
     project_opts(s, required=True)
     s.add_argument("--host", default="github.com", help="the git host the token is for")
     s.add_argument("--username", default="x-access-token", help="the user name sent with the token")
