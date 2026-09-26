@@ -175,8 +175,11 @@ secret by accident.
 - Both profiles get your long-lived Claude Code token. An agent can read it.
   It gives access to your subscription until it expires or you revoke it.
 - Remote Control needs a full claude.ai sign-in, which can make API keys on
-  your organization. So only a personal sandbox can get it. No option changes
-  that.
+  your organization. A personal sandbox gets it; an agent sandbox only through
+  `sbx remote-control <name> --allow-agent`, per sandbox, from your own
+  command, never from a setting or a project. The sign-in then lives in the
+  VM, not in the sidecar, and the agent can read it. Revoke it at claude.ai
+  (Settings, then the sessions) or remove the sandbox.
 
 **Certificates.** The mkcert CA key stays on your Mac. A sandbox gets a leaf
 certificate for its own names only, so it cannot make a certificate that your

@@ -16,7 +16,7 @@ inside?** An AI agent with full permissions, or you.
 | Git access | A token for one project, held by the sidecar. The VM presents a placeholder. Without a token, public repositories only. | Your SSH agent, forwarded for the git clones only. |
 | Secrets | Each input of the project needs `--with` or `--without`. Nothing goes in by default. | Each input that sbx finds goes in, and sbx prints the list. |
 | Snapshot | A `clean` snapshot after the recipe. | None by default. |
-| Claude Remote Control | Never. | Yes, so claude.ai/code and the Claude phone app can drive the sandbox. |
+| Claude Remote Control | Only with `sbx remote-control <name> --allow-agent`. | Yes, so claude.ai/code and the Claude phone app can drive the sandbox. |
 | Expiry | Three days by default. | None. |
 
 The two profiles share everything else: the templates, the tools, the names,
@@ -186,7 +186,7 @@ sbx claude-token --remove        forget the token, and delete it from each sandb
 **Warning:** an agent in an agent sandbox can read the Claude token. Use a
 token that you can revoke in your claude.ai account settings.
 
-### Remote Control (personal sandboxes only)
+### Remote Control
 
 `claude remote-control` lets claude.ai/code and the Claude phone app drive a
 personal sandbox. It needs a full claude.ai sign-in, one time per sandbox.
@@ -202,8 +202,12 @@ sbx remote-control <name> --status   the server's state
 sbx remote-control <name> --off      stop the server
 ```
 
-An agent sandbox never gets Remote Control: a full sign-in can make API keys
-on your organization. No option changes this.
+An agent sandbox gets Remote Control only when you ask for it, one sandbox at
+a time: `sbx remote-control <name> --allow-agent`. The full sign-in can make
+API keys on your organization, and the agent in that sandbox can read it; the
+command warns each time. `sbx new` never does it for an agent sandbox. The
+sessions of Remote Control talk to Anthropic with that sign-in; a `claude` in
+a terminal of the sandbox keeps the sidecar's proxy.
 
 ## Snapshots
 

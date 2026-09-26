@@ -69,7 +69,7 @@ Options of `sbx new`:
 | `sbx claude-token --push [name ...]` | writes the stored token into running sandboxes, and into the named ones |
 | `sbx claude-token --status` | shows whether a token is stored, and when it expires |
 | `sbx claude-token --remove` | forgets the token, and deletes it from each sandbox |
-| `sbx remote-control <name> [--mode M] [--status] [--off]` | signs a personal sandbox in to claude.ai and runs its Remote Control server |
+| `sbx remote-control <name> [--mode M] [--status] [--off] [--allow-agent]` | signs a personal sandbox in to claude.ai and runs its Remote Control server. `--allow-agent` does it in an agent sandbox too; see [security.md](security.md). |
 | `sbx cloudflare-token [--stdin] [--remove]` | stores the Cloudflare API token that `sbx publish` uses, and sets `cloudflare_token_command` |
 | `sbx publish <name> <port> [--policy P] [--host LABEL] [--plain]` | publishes a port of an agent sandbox at `https://<label>.<preview_zone>`, behind Cloudflare Access. The default label is `<name>-<port>`; the default policy is `me`. `--plain`: the server speaks plain http on `0.0.0.0`, though the sandbox has a certificate. See [Previews](usage.md#previews). |
 | `sbx publish <name>` | lists what a sandbox publishes, and the policy of each |

@@ -146,10 +146,11 @@ class ProfileTest(unittest.TestCase):
         self.assertFalse([e for e in events if e[0] == "api"], "no API call may happen")
         enable.assert_not_called()
 
-    def test_the_module_itself_refuses_an_agent_profile(self):
+    def test_the_module_itself_refuses_an_agent_profile_without_the_switch(self):
         with self.assertRaises(Exception) as ctx:
             remotecontrol.check_profile("agent", "sbx-a")
-        self.assertIn("not available", str(ctx.exception))
+        self.assertIn("--allow-agent", str(ctx.exception))
+        remotecontrol.check_profile("agent", "sbx-a", allow_agent=True)
         remotecontrol.check_profile("personal", "sbx-p")
 
     def test_remote_control_command_refuses_an_agent_sandbox(self):
@@ -159,6 +160,37 @@ class ProfileTest(unittest.TestCase):
         code = cli.main(["remote-control", "a"], runner=Runner(responder=lambda a, d: ""), api=api)
         self.assertEqual(code, 1)
         cli.remotecontrol.enable.assert_not_called()
+
+    def test_the_switch_signs_an_agent_sandbox_in_with_a_warning(self):
+        # Controlled pair with the test above: the same sandbox, with the switch.
+        from tests.test_cli import FakeApi
+        events = []
+        api = FakeApi(events, existing=["sbx-a"])
+        with mock.patch("sbxlib.cli.warn") as warn:
+            code = cli.main(["remote-control", "a", "--allow-agent"], runner=Runner(responder=lambda a, d: ""), api=api)
+        self.assertEqual(code, 0)
+        cli.remotecontrol.enable.assert_called_once()
+        self.assertIn("API keys", warn.call_args.args[0])
+
+    def test_status_and_off_need_no_switch(self):
+        from tests.test_cli import FakeApi
+        api = FakeApi([], existing=["sbx-a"])
+        with mock.patch("sbxlib.cli.remotecontrol.disable") as disable:
+            self.assertEqual(cli.main(["remote-control", "a", "--off"], runner=Runner(responder=lambda a, d: ""),
+                                      api=api), 0)
+        disable.assert_called_once()
+
+
+class ProxyVariablesTest(unittest.TestCase):
+    def test_the_login_and_the_server_run_without_the_proxy_variables(self):
+        # In an agent sandbox these point Claude Code at the sidecar and would
+        # take precedence over the full login.
+        for var in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
+            self.assertIn(var, remotecontrol.WRAPPER.split("unset", 1)[1].splitlines()[0])
+        vm = mock.Mock()
+        vm.run.return_value = mock.Mock(code=0, stdout='"loggedIn": true "claude.ai"')
+        remotecontrol.logged_in(vm)
+        self.assertIn("-u ANTHROPIC_AUTH_TOKEN", vm.run.call_args.args[0])
 
 
 if __name__ == "__main__":

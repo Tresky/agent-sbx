@@ -1005,10 +1005,13 @@ def _rc_directory(project: Project | None) -> str:
 
 
 def _remote_control_setup(cfg: Config, runner: Runner, vm: Vm, hostname: str, profile: str,
-                          project: Project | None, mode: str) -> bool:
+                          project: Project | None, mode: str, allow_agent: bool = False) -> bool:
     """Sign the sandbox in (one click and one paste, on the Mac) and start the
     server. Returns whether the server runs."""
-    remotecontrol.check_profile(profile, hostname)
+    remotecontrol.check_profile(profile, hostname, allow_agent)
+    if profile != remotecontrol.ALLOWED_PROFILE:
+        warn(f"{hostname} is an {profile} sandbox. Its claude.ai login can make API keys on your "
+             "organization, and the agent in it can read that login. `sbx rm` is the way to take it back")
     directory = _rc_directory(project)
     if not remotecontrol.logged_in(vm):
         if not sys.stdin.isatty():
@@ -1036,7 +1039,6 @@ def _remote_control_setup(cfg: Config, runner: Runner, vm: Vm, hostname: str, pr
 def cmd_remote_control(args, cfg: Config, runner: Runner, api=None) -> int:
     hostname = names.hostname(args.name)
     box = _pve(cfg, runner, api).require(hostname)
-    remotecontrol.check_profile(box.profile, hostname)
     vm = Vm(cfg, runner, hostname)
     if args.off:
         remotecontrol.disable(vm)
@@ -1045,12 +1047,14 @@ def cmd_remote_control(args, cfg: Config, runner: Runner, api=None) -> int:
     if args.status:
         print(f"{hostname}: {remotecontrol.status(vm)}")
         return 0
+    # Stopping and asking need no switch; a sign-in does.
+    remotecontrol.check_profile(box.profile, hostname, args.allow_agent)
     mode = args.mode or _rc_mode(cfg, box.profile) or "acceptEdits"
     project = None
     if box.project:
         known = projects_mod.load().get(box.project)
         project = Project(box.project, known.url if known else "", None, None, None)
-    return 0 if _remote_control_setup(cfg, runner, vm, hostname, box.profile, project, mode) else 1
+    return 0 if _remote_control_setup(cfg, runner, vm, hostname, box.profile, project, mode, args.allow_agent) else 1
 
 
 def _mkcert_root(runner: Runner) -> Path | None:
@@ -1861,6 +1865,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--mode", metavar="MODE", help="permission mode of the sessions (acceptEdits, bypassPermissions, ...)")
     s.add_argument("--off", action="store_true", help="stop and disable the server")
     s.add_argument("--status", action="store_true", help="the server's state")
+    s.add_argument("--allow-agent", action="store_true",
+                   help="sign an AGENT sandbox in too: its login can make API keys on your organization")
     s.set_defaults(fn=cmd_remote_control)
 
     s = sub.add_parser("list", help="every sandbox")
