@@ -41,11 +41,11 @@ The sidecar's own sshd is on port 2222 (`sbx ssh <name> --sidecar`).
 
 ## Limits
 
-- **The Claude lane with a subscription token is unverified.** Claude Code
-  documents the base-URL path for a Console API key. The proxy sends a
-  subscription token as a bearer with the OAuth beta header, which is what
-  Claude Code itself sends, but that has not been tried against the real API.
-  `sidecar_claude` is `direct` until it is.
+- **The Claude lane buffers too.** Claude Code documents the base-URL path
+  for a Console API key. The proxy sends a subscription token as a bearer
+  with the OAuth beta header, which is what Claude Code itself sends; the
+  real API accepted it on 2026-09-26, so `proxy` is the default. A streamed
+  answer arrives whole, when it is complete.
 - **Uploads are buffered.** The proxy reads a request and a response whole
   before it forwards them. A `git push` with a chunked body does not work
   through it; a clone does.

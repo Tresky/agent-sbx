@@ -488,6 +488,9 @@ class NewTest(unittest.TestCase):
         return responder
 
     def test_new_signs_claude_in_unless_told_not_to(self):
+        # The direct lane: the token goes into the sandbox. (The default,
+        # proxy, has test_proxy_mode_keeps_the_claude_token_in_the_sidecar.)
+        Path(os.environ["SBX_CONFIG_DIR"], "config.toml").write_text('sidecar_claude = "direct"\n')
         # Controlled pair: the same run with and without --no-claude.
         for flag, want in (((), True), (("--no-claude",), False)):
             events, payloads = [], []

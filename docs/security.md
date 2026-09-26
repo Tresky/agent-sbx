@@ -55,8 +55,8 @@ the sandbox cannot change the tag, so the sidecar cannot be routed around.
 
 The sidecar holds what the sandbox must not:
 
-- **The real credentials.** The project's git token, and with
-  `sidecar_claude = "proxy"` the Claude token. The sandbox gets one
+- **The real credentials.** The project's git token, and the Claude token
+  (unless `sidecar_claude = "direct"`). The sandbox gets one
   placeholder, made for it alone, which works only against its own sidecar,
   and which a leak makes useless anywhere else. The sidecar swaps it for the
   real token on each call, and logs the call.
@@ -121,7 +121,9 @@ sandbox.
   an agent sandbox on your LAN bridge: Proxmox refuses it.
 - Each Mac has its own token, so you can revoke one Mac without the others.
 - The token is in the macOS keychain. `config.toml` holds only a command that
-  prints it.
+  prints it. Off macOS there is no keychain, and the token is a file that only
+  your user can read ([the secret store](reference.md#the-secret-store)): any
+  process of that user can read it too.
 - The host's certificate is verified on each request, with the host CA or a
   fingerprint pin. With a pin, sbx checks the certificate before it sends the
   token.

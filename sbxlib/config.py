@@ -83,9 +83,9 @@ class Config:
     # How Claude Code in an agent sandbox reaches Claude. "direct": the
     # subscription token goes into the sandbox, as before. "proxy": the token
     # stays in the sidecar, and the sandbox gets a placeholder and a base URL.
-    # Claude Code documents the proxy path for a Console API key only; with the
-    # subscription token it is not verified.
-    sidecar_claude: str = "direct"
+    # Claude Code documents the proxy path for a Console API key; the rollout
+    # proved it with the subscription token too (docs/sidecar-rollout.md).
+    sidecar_claude: str = "proxy"
     # The template that `sbx new` clones when neither --template nor the
     # project's manifest names one. Empty: the only template, if there is one.
     default_template: str = ""

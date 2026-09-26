@@ -63,7 +63,7 @@ Options of `sbx new`:
 | `sbx project add <project>` | records a checkout, so `--project <name>` works by name |
 | `sbx project rm <name>` | forgets a project. Its token and its bindings stay. |
 | `sbx inputs <project> [--branch B] [--from PATH]` | shows what the recipe asks for, and where each value comes from. It makes nothing. |
-| `sbx git-token <project> [--host H] [--username U] [--stdin] [--no-check] [--remove]` | stores the project's git token in the keychain, after a check that it covers each repository. `--no-check` skips the check. `--remove` forgets it. |
+| `sbx git-token <project> [--host H] [--username U] [--stdin] [--no-check] [--remove]` | stores the project's git token in [the secret store](#the-secret-store), after a check that it covers each repository. `--no-check` skips the check. `--remove` forgets it. |
 | `sbx claude-token` | runs `claude setup-token` and stores the Claude token |
 | `sbx claude-token --stdin` | reads a new Claude token from stdin |
 | `sbx claude-token --push [name ...]` | writes the stored token into running sandboxes, and into the named ones |
@@ -102,6 +102,8 @@ sbx reads three layers. A later layer wins.
    it. `SBX_LOCAL_CONF` names a different file.
 3. `~/.config/sbx/config.toml`: this Mac's own settings. `SBX_CONFIG_DIR`
    names a different directory.
+
+The secrets are not in any layer: see [the secret store](#the-secret-store).
 
 The host scripts read layers 1 and 2 only. A shared key (the column "Mac key"
 below) can therefore not be set in `config.toml` to a value that differs from
@@ -146,7 +148,7 @@ layer 2: sbx stops with an error.
 | Key | Default | Meaning |
 |---|---|---|
 | `pve_api` | | `https://<host>:8006`. `sbx setup` writes it. |
-| `pve_token_command` | | a command (a list of strings) that prints the API token. `sbx setup` writes a keychain command. |
+| `pve_token_command` | | a command (a list of strings) that prints the API token. `sbx setup` writes a command for [the secret store](#the-secret-store). |
 | `pve_ca_file` | | the host's CA file. Exactly one of this and `pve_fingerprint` is set. |
 | `pve_fingerprint` | | the SHA-256 fingerprint of the host's certificate |
 | `pve_ssh` | `root@<pve_api host>` | the root shell for `sbx setup` and `sbx template rebuild` |
@@ -162,7 +164,7 @@ layer 2: sbx stops with an error.
 | `ssh_key` | `~/.config/sbx/id_ed25519` | the private key for the sandboxes |
 | `agent_sidecar` | `true` | every agent sandbox gets a sidecar: a small trusted VM on the sandbox's own VLAN that holds its credentials and its port policy. `false`: an agent sandbox sits on the agent bridge alone, as before sidecars. |
 | `sidecar_ports` | `open` | what a sidecar forwards to its sandbox. `open`: port 22 and every port from 1024 to 32767. `ask`: port 22, and a port only after the sandbox asked and you approved. |
-| `sidecar_claude` | `direct` | how Claude Code in an agent sandbox reaches Claude. `direct`: the subscription token goes into the sandbox. `proxy`: the token stays in the sidecar; the sandbox gets a placeholder and a base URL. Claude Code documents the proxy path for a Console API key; with the subscription token it is not verified. |
+| `sidecar_claude` | `proxy` | how Claude Code in an agent sandbox reaches Claude. `proxy`: the token stays in the sidecar; the sandbox gets a placeholder and a base URL. `direct`: the subscription token goes into the sandbox. The proxy buffers each answer, so a long one arrives whole. |
 
 The shared keys of the table above (`domain`, `agent_bridge`, and so on) are
 also accepted, but only with the same value as in `host/local.conf`.
@@ -223,7 +225,8 @@ the pane layout (`.sandbox/herdr.toml`).
 | `certs/sbx-<name>/` | the certificate of each sandbox |
 | `bindings/` | the project bindings |
 | `projects.toml` | the project registry |
-| `claude-token.toml` | the date of the Claude token. The token itself is in the keychain. |
+| `claude-token.toml` | the date of the Claude token. The token itself is in the secret store. |
+| `secrets/` | the secret store off macOS: one file per secret, this user only (0700, the files 0600) |
 
 ### In the repository, not in git
 
@@ -234,7 +237,13 @@ the pane layout (`.sandbox/herdr.toml`).
 | `templates/local/versions.toml` | what `sbx versions --write` found, per template |
 | `template/components/local/*.sh` | your own components |
 
-### In the macOS keychain
+### The secret store
+
+On macOS, the secrets are items in the keychain. On another system, which has
+no keychain, each is a file in `~/.config/sbx/secrets/` with the same name,
+readable by this user only. `SBX_SECRET_STORE` (`keychain` or `file`) names
+the store instead of the platform. The settings name a command that prints a
+secret, never the value.
 
 | Item | What it is |
 |---|---|

@@ -24,54 +24,93 @@ Proved:
   host-side scripts with stub commands, the sidecar's handlers, the setup
   wizard's order of steps.
 
-Not proved, because each needs a real host:
+## On a real host, 2026-09-26
 
-1. The bare template build (`sbx template rebuild sidecar`): the provision
-   script's bare mode and the `sidecar` component on a real Ubuntu image.
-2. The sidecar registering the sandbox's name: `hostnamectl` and
-   `networkctl reconfigure` after cloud-init, and dnsmasq moving the name.
-3. The sandbox's static wire address and resolver from cloud-init
-   (`ipconfig0`, `nameserver`, `searchdomain`), and its route through the
-   sidecar to the internet.
-4. The VLAN-aware bridge stanza from `10-bridges.sh` on a real
-   `/etc/network/interfaces`, and that `ifreload -a` keeps the LAN up.
-5. Claude Code through the proxy (`sidecar_claude = "proxy"`) against the
-   real API with a subscription token. Claude Code documents that path for a
-   Console API key only. The default stays `direct` until this is tried.
+A fresh Proxmox VE 9.2 host, set up from this branch by `sbx setup` on a
+Debian machine (not a Mac: see [setup.md](setup.md#a-linux-machine-instead-of-a-mac)).
+Each item below was open before; each is now proved.
 
-## The order on the new host
+1. **The bare template build.** `sbx template rebuild sidecar` builds the
+   provision script's bare mode and the `sidecar` component on the Ubuntu
+   image.
+2. **The sidecar registers the sandbox's name.** The sandbox is reached by
+   name, at its sidecar's address, from the tailnet.
+3. **The sandbox's static wire address, resolver and route.** It reaches the
+   internet through its sidecar and the gateway, and nothing else.
+   `sbx doctor --isolation`: 19 ok, 0 failed, with the new rows "agent
+   reaches its sidecar" and "agent cannot reach the gateway".
+4. **The VLAN-aware bridge.** `10-bridges.sh` appended the stanza and ran
+   `ifreload -a`; the LAN stayed up, `vmbr77` has no IPv6 address, and
+   `vlan_filtering` is 1.
+5. **Claude Code through the proxy with a subscription token.** One prompt
+   in an agent sandbox answered; the sidecar logged
+   `POST /v1/messages?beta=true -> 200`, and the sandbox held only the
+   placeholder. `sidecar_claude` is `proxy` by default from here on.
 
-A fresh Proxmox host at `172.16.3.231`, from a checkout of this branch. No
-`host/local.conf` and no `~/.config/sbx` exist yet, so the wizard proposes
-fresh values.
+Also proved there: a web server in an agent sandbox (port 4400), reached from
+a tailnet device at the sandbox's name, through the gateway, the sidecar and
+the VLAN.
 
-1. `bin/sbx setup --host 172.16.3.231`. Watch the proposed LAN bridge. Say
-   yes to the bridge stanza (item 4), to the templates, and to the sidecar
-   template (item 1). Do the Tailscale steps when it pauses.
+What the host found, each fixed with a test:
+
+- **"open" mode took the sidecar's own ports.** Its DNAT of 1024 to 32767
+  sent 2222 (the sidecar's sshd) and 8081 (the expose API) to the VM, so
+  `sbx ssh --sidecar` failed, and the sandbox could have answered in place
+  of the approval API. The prerouting chain now returns those two ports
+  first, the expose API refuses them, and the Docker test has an "open mode"
+  section; without the fix, two of its checks fail.
+- **`sidecar.py` did not listen until DNS gave up.** `HTTPServer` asks DNS
+  for its own name before it listens; with no resolver in reach, the ports
+  refused connections meanwhile. It showed in the Docker test on a Linux
+  host (five wrong results) and would show on a sidecar that boots before
+  the gateway answers. The server skips the lookup now.
+- **Setup assumed a Mac.** Off macOS, the secrets are files in
+  `~/.config/sbx/secrets/` ([the secret store](reference.md#the-secret-store)),
+  and the local routes come from `ip -4 route`.
+
+## What remains
+
+- **A private repository through the sidecar** (step 5 below): a project
+  with a git token, `sbx new app --project ...`; the clone goes through the
+  proxy and the token never enters the VM. It needs a repository and a token.
+- **A long Claude session through the proxy.** The proxy buffers each answer,
+  so an interactive session shows each reply only when it is complete. Try a
+  real session; streaming is the fix if it is too slow.
+
+## The order on a new host
+
+From a checkout of this branch, with no `host/local.conf` and no
+`~/.config/sbx`, so that the wizard proposes fresh values.
+
+1. `bin/sbx setup --host <address>`. Watch the proposed LAN bridge. Say
+   yes to the bridge stanza, to the templates, and to the sidecar template.
+   Do the Tailscale steps when it pauses.
 2. On the host, after the bridges: `ip -6 addr show vmbr77` shows no address,
    and `cat /sys/class/net/vmbr77/bridge/vlan_filtering` shows `1`.
-3. `bin/sbx doctor --isolation`. Items 2 and 3 are proved by the agent probe
-   sandbox coming up at all: it is reached by name through its sidecar. The
-   new rows are "agent reaches its sidecar" and "agent cannot reach the
-   gateway".
+3. `bin/sbx doctor --isolation`.
 4. `bin/sbx new lab`, then `sbx ssh lab -- curl -sS https://example.com -o /dev/null && echo ok`,
-   `sbx ssh lab -- cat ~/.git-credentials` (the placeholder at the proxy, no
-   token), and `sbx ssh lab --sidecar -- sudo journalctl -u sbx-sidecar -n 20`.
+   and `sbx ssh lab --sidecar -- sudo journalctl -u sbx-sidecar -n 20`.
 5. A project with a private repository and a git token: `sbx new app --project ...`.
-   The clone goes through the sidecar; the token never enters the VM.
-6. Item 5: `sidecar_claude = "proxy"` in `config.toml`, a new sandbox, and one
-   Claude Code prompt inside it. If it fails with an authentication error,
-   the proxy needs a Console API key for agent sandboxes, or the forward
-   proxy design instead. Set the default from what happens.
+   `sbx ssh app -- cat ~/.git-credentials` shows the placeholder at the
+   proxy, no token.
+6. One Claude Code prompt in an agent sandbox (`claude -p`), and the
+   sidecar's log line for it.
 
 If a step fails on the host, the sandbox stays up for its log, and
 `agent_sidecar = false` makes the next sandbox the old way while the cause is
-found. Change the host's root password after the setup: it went through a
+found. Change the host's root password after the setup if it went through a
 chat.
 
 ## After that
 
 In the order they were discussed, none started:
+
+- **`sbx ports <name>`**: list a sandbox's pending port requests, approve and
+  deny them. Today "ask" mode needs a `curl` to the expose API.
+- **The Tailscale steps through the API.** With an API access token, setup
+  could merge the policy (validated, with the ETag), join the gateway with a
+  one-time tagged auth key instead of a login URL, and add the split-DNS
+  nameserver. The rollout did those three by hand, with the API.
 
 - **A lab VLAN at home** for the Proxmox host and the gateway's LAN leg, so
   a gateway compromise lands away from the house devices.
