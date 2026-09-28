@@ -25,7 +25,11 @@ sbx setup                  # reads your host, writes host/local.conf, runs each 
 sbx doctor --isolation     # proves the setup, with one probe sandbox per profile
 ```
 
-[docs/setup.md](docs/setup.md) has the details and the manual path.
+[docs/getting-started.md](docs/getting-started.md) goes on from there, step by
+step with a check each: an agent sandbox of your project with Claude Code
+Remote Control, a preview of its app behind Cloudflare Access, and a sandbox
+that lasts and comes back after a reboot. [docs/setup.md](docs/setup.md) has
+the details of the setup and the manual path.
 
 ## How it fits together
 
@@ -132,6 +136,7 @@ mechanism, with more diagrams.
 
 | Read | When you want to |
 |---|---|
+| [docs/getting-started.md](docs/getting-started.md) | go from nothing to an agent sandbox with Remote Control, a preview, and no expiry, step by step |
 | [docs/setup.md](docs/setup.md) | set up sbx on your own host and Mac |
 | [docs/usage.md](docs/usage.md) | make, reach and remove sandboxes each day |
 | [docs/projects.md](docs/projects.md) | give a project its recipe, inputs and pane layout |

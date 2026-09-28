@@ -2,6 +2,8 @@
 
 This document sets up sbx on your own Proxmox host and your own Mac (or Linux
 machine). Nothing connects to a different person's host or tailnet.
+[getting-started.md](getting-started.md) is the short path through it and on
+to a first agent sandbox.
 
 ## What you need
 

@@ -14,6 +14,7 @@ in `README.md` and `docs/architecture.md` show how the parts connect.
 | Question | Read |
 |---|---|
 | What sbx is, and a map of the docs | `README.md` |
+| The whole path, from setup to an agent sandbox with Remote Control, a preview and no expiry | `docs/getting-started.md` |
 | The setup, step by step, with a check for each step | `docs/setup.md` |
 | Daily use: profiles, sandboxes, ports, Claude, snapshots | `docs/usage.md` |
 | A project's recipe, manifest and pane layout (`.sandbox/`) | `docs/projects.md` |
