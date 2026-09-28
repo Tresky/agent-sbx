@@ -142,35 +142,30 @@ app, signed in as the same account that you authorized.
 
 ## 8. Cloudflare, once
 
-In the Cloudflare dashboard:
+In the Cloudflare dashboard, the two things that no API token can do:
 
-1. Add the domain `previews.example.com` to the account (or buy one there).
-   Use a domain of its own: an agent serves what it wants on it.
-2. Zero Trust: turn it on, and add the **One-time PIN** login method.
-3. An API token with Account **Cloudflare Tunnel: Edit** and **Access: Apps
-   and Policies: Edit**, and Zone **DNS: Edit** for that domain.
+1. Add the domain `previews.example.com` to the account (or buy one there),
+   and wait until it is **active**. Use a domain of its own: an agent serves
+   what it wants on it.
+2. Turn on **Cloudflare One (Zero Trust)**: a team name, and the Free plan.
 
-Then on your machine:
+Then make the API token. This prints which permissions it needs:
 
 ```
-sbx cloudflare-token
+sbx cloudflare-setup --token-guide
 ```
 
-In `~/.config/sbx/config.toml`:
+Put the token in `CLOUDFLARE_API_TOKEN` (not on a command line), and run:
 
-```toml
-preview_zone = "previews.example.com"
-cloudflare_account_id = "<the account ID from the dashboard>"
+```
+sbx cloudflare-setup --account-id <the account ID> --zone previews.example.com \
+  --email you@example.com
 ```
 
-And `~/.config/sbx/previews.toml`, with the address you sign in with:
-
-```toml
-[policy.me]
-emails = ["you@example.com"]
-```
-
-[usage.md](usage.md#previews) explains policies for other people.
+It checks the token, the domain and Zero Trust, adds the One-time PIN login
+method, makes the Access policy and the wildcard Access application, and
+configures sbx on your machine. [usage.md](usage.md#previews) explains
+policies for other people.
 
 Check: `sbx publish myapp` prints `sbx-myapp publishes nothing` (and no
 error).

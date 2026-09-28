@@ -964,6 +964,7 @@ sbxlib/
   claudetoken.py            sbx claude-token
   secretstore.py            the keychain, or files off macOS
   previews.py               sbx publish: Cloudflare tunnel, Access, DNS
+  cfsetup.py                sbx cloudflare-setup: a fresh Cloudflare account for previews
   sessions.py               sbx autostart: track and resume Claude sessions
   remotecontrol.py          Remote Control (personal; agent with --allow-agent)
   projects.py               the project registry; the project tag

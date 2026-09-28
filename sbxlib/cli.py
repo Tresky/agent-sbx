@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import cfsetup
 from . import claudetoken
 from . import doctor
 from . import gittoken
@@ -851,6 +852,55 @@ def cmd_cloudflare_token(args, cfg: Config, runner: Runner, api=None) -> int:
     secretstore.store(runner, CLOUDFLARE_TOKEN_SERVICE, token)
     hostsetup.set_toml_keys(conf, {"cloudflare_token_command": secretstore.command(CLOUDFLARE_TOKEN_SERVICE)})
     info(f"stored in {secretstore.where()} as {CLOUDFLARE_TOKEN_SERVICE}")
+    return 0
+
+
+def cmd_cloudflare_setup(args, cfg: Config, runner: Runner, api=None, cf=None) -> int:
+    """A fresh Cloudflare account, ready for `sbx publish` (sbxlib/cfsetup.py)."""
+    if args.token_guide:
+        print(cfsetup.TOKEN_GUIDE, end="")
+        return 0
+    missing = [o for o, v in (("--account-id", args.account_id), ("--zone", args.zone)) if not v]
+    if missing:
+        raise InputError(f"give {' and '.join(missing)} (or --token-guide first)")
+    session = args.session or cfg.preview_session
+    cfsetup.check_args(args.account_id, args.zone, args.email, session)
+    # The token: never an argument. --stdin, else the environment, else a prompt.
+    if args.stdin:
+        token = sys.stdin.readline().strip()
+    elif os.environ.get(args.token_env):
+        token = os.environ[args.token_env].strip()
+    elif sys.stdin.isatty():
+        token = getpass.getpass("Cloudflare API token (hidden): ").strip()
+    else:
+        raise InputError(f"no token: set {args.token_env}, pass --stdin, or run in a terminal")
+    if not token or any(c.isspace() for c in token):
+        raise InputError("the token is empty or has whitespace in it")
+
+    rep = cfsetup.run(cf or previews_mod.HttpApi(cfg, runner, token=token), args.account_id, args.zone,
+                      args.email, session, dry_run=args.dry_run, access_only=args.access_only)
+    if not args.dry_run:
+        conf = state_dir() / "config.toml"
+        keys: dict = {"preview_zone": args.zone, "cloudflare_account_id": args.account_id}
+        if args.session:
+            keys["preview_session"] = args.session
+        if not args.access_only:
+            secretstore.store(runner, CLOUDFLARE_TOKEN_SERVICE, token)
+            keys["cloudflare_token_command"] = secretstore.command(CLOUDFLARE_TOKEN_SERVICE)
+            rep.add("made", f"the token in {secretstore.where()} as {CLOUDFLARE_TOKEN_SERVICE}")
+        hostsetup.set_toml_keys(conf, keys)
+        path = previews_mod.policies_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(cfsetup.previews_toml(path.read_text() if path.exists() else "", args.email))
+        rep.add("made", f"preview_zone and cloudflare_account_id in {conf}; [policy.me] in {path}")
+    for status, text in rep.lines:
+        print(f"  {status:<5} {text}")
+    if rep.todo:
+        warn("one step is left for the dashboard (todo above)")
+        return 1
+    if not args.dry_run:
+        info("ready: sbx publish <name> <port>" + ("" if not args.access_only else
+             " needs the full token: sbx cloudflare-token"))
     return 0
 
 
@@ -1896,6 +1946,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--remove", action="store_true", help="forget the token")
     s.set_defaults(fn=cmd_cloudflare_token)
 
+    s = sub.add_parser("cloudflare-setup", help="make a fresh Cloudflare account ready for sbx publish")
+    s.add_argument("--account-id", metavar="ID", help="the Cloudflare account ID (32 hex characters)")
+    s.add_argument("--zone", metavar="DOMAIN", help="the preview domain, on that account and active")
+    s.add_argument("--email", action="append", default=[], metavar="ADDRESS",
+                   help="who may open a preview: the policy 'me' (repeatable)")
+    s.add_argument("--session", metavar="HOURS", help="how long a sign-in lasts, e.g. 336h (default: preview_session)")
+    s.add_argument("--token-env", default="CLOUDFLARE_API_TOKEN", metavar="VAR",
+                   help="the environment variable that holds the token (default: CLOUDFLARE_API_TOKEN)")
+    s.add_argument("--stdin", action="store_true", help="read the token from stdin")
+    s.add_argument("--access-only", action="store_true",
+                   help="the token may manage Access only: update the policy, store no token")
+    s.add_argument("--dry-run", action="store_true", help="check, and show what would be made")
+    s.add_argument("--token-guide", action="store_true", help="how to make the API token, and print nothing else")
+    s.set_defaults(fn=cmd_cloudflare_setup)
+
     s = sub.add_parser("publish", help="a sandbox's port at a public hostname, behind Cloudflare Access")
     s.add_argument("name")
     s.add_argument("port", nargs="?", type=int, help="the port in the sandbox (none: list what is published)")
@@ -2010,7 +2075,7 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, api=None) 
         cfg = load_config()
         return args.fn(args, cfg, runner or Runner(verbose=args.verbose), api) or 0
     except (ConfigError, ManifestError, InputError, names.NameError_, PveError, VmError, CommandError,
-            projects_mod.ProjectError, templates_mod.TemplateError, previews_mod.PreviewError) as exc:
+            projects_mod.ProjectError, templates_mod.TemplateError, previews_mod.PreviewError, cfsetup.SetupError) as exc:
         print(f"sbx: error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

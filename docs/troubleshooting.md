@@ -85,7 +85,10 @@ The tables below list the problems that `sbx doctor` does not explain.
 | a Cloudflare error page (502, Bad gateway) | nothing listens on that port in the sandbox; or a server on `0.0.0.0` with no TLS was published without `--plain`; or a new tunnel is still coming up | start the app; publish again with `--plain`; wait a minute |
 | `sbx publish` says `the sidecar of ... has no cloudflared` | the sidecar's template is older than previews | `sbx template rebuild sidecar`, then make the sandbox again |
 | `sbx publish` says `has no sidecar` | a personal sandbox, or `agent_sidecar = false` | only an agent sandbox with a sidecar can publish |
-| `preview_zone ... is not set`, `no ... previews.toml`, `[policy.me] is missing`, or `cloudflare_token_command is not set` | the one-time setup is incomplete | the steps in [usage.md](usage.md#previews) |
+| `preview_zone ... is not set`, `no ... previews.toml`, `[policy.me] is missing`, or `cloudflare_token_command is not set` | the one-time setup is incomplete | `sbx cloudflare-setup` ([usage.md](usage.md#previews)) |
+| `sbx cloudflare-setup`: `is pending, not active` | the domain's nameservers do not point to Cloudflare yet | set them at your registrar, wait, run it again |
+| `sbx cloudflare-setup`: `Cloudflare One (Zero Trust) is not turned on` | the account has no Zero Trust organization | dashboard: Zero Trust, a team name and a plan |
+| `sbx cloudflare-setup` ends with a `todo` for the login method | the token may not manage login methods | add One-time PIN by hand (Zero Trust, Settings, Authentication), or give the token that permission (`--token-guide`) |
 
 ## Claude Code
 

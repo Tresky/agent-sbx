@@ -169,23 +169,36 @@ Start the server with it allowed, for example
 
 Set it up once:
 
-1. A Cloudflare account with a domain of its own for the previews (not your
-   main domain: an agent serves what it wants there), and Zero Trust turned
-   on, with the One-time PIN login method.
-2. An API token with Account "Cloudflare Tunnel: Edit" and "Access: Apps and
-   Policies: Edit", and Zone "DNS: Edit" for that domain. Store it:
-   `sbx cloudflare-token`.
-3. In `config.toml`: `preview_zone` and `cloudflare_account_id`.
-4. `~/.config/sbx/previews.toml`, with at least your own address:
+1. In the Cloudflare dashboard, two things that no API token can do:
+   - **a domain of its own** for the previews, on the account and active (not
+     your main domain: an agent serves what it wants there);
+   - **Cloudflare One (Zero Trust)** turned on: a team name, and a plan (Free
+     will do).
+2. An API token. `sbx cloudflare-setup --token-guide` shows the permissions:
+   one token for sbx, or one that may change who signs in and nothing else.
+3. With the token in `CLOUDFLARE_API_TOKEN` (or `--stdin`; never an argument):
 
    ```
-   [policy.me]
-   emails = ["you@example.com"]
-
-   [policy.team]
-   emails = ["a@example.com"]
-   email_domains = ["example.org"]
+   sbx cloudflare-setup --account-id <id> --zone previews.example.com --email you@example.com
    ```
+
+   It checks the token, the domain and Zero Trust; adds the One-time PIN
+   login method if it is missing; makes the policy `sbx: me` and the wildcard
+   Access application; stores the token; and writes `preview_zone`,
+   `cloudflare_account_id` and `[policy.me]`. A second run changes only the
+   emails. `--dry-run` shows what it would do. With `--access-only`, it
+   updates who may sign in and stores no token.
+
+More policies go into `~/.config/sbx/previews.toml` by hand:
+
+```
+[policy.me]
+emails = ["you@example.com"]
+
+[policy.team]
+emails = ["a@example.com"]
+email_domains = ["example.org"]
+```
 
 The first `sbx publish` makes one Access application for every hostname of
 the domain, with the policy `me`, before it makes any name. A hostname with

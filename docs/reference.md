@@ -75,6 +75,8 @@ Options of `sbx new`:
 | `sbx claude-token --status` | shows whether a token is stored, and when it expires |
 | `sbx claude-token --remove` | forgets the token, and deletes it from each sandbox and sidecar |
 | `sbx remote-control <name> [--mode M] [--status] [--off] [--allow-agent]` | signs a personal sandbox in to claude.ai and runs its Remote Control server. `--allow-agent` does it in an agent sandbox too; see [security.md](security.md). |
+| `sbx cloudflare-setup --account-id ID --zone DOMAIN --email ADDRESS [--email ...] [--session HOURS] [--token-env VAR] [--stdin] [--access-only] [--dry-run]` | makes a Cloudflare account ready for `sbx publish`: checks the token, the domain and Zero Trust, adds the One-time PIN login, makes the policy `sbx: me` and the wildcard Access application, stores the token and writes the settings. Idempotent. The token comes from `$CLOUDFLARE_API_TOKEN` (or `--token-env`), `--stdin`, or a prompt. `--access-only`: the policy only, no token stored. |
+| `sbx cloudflare-setup --token-guide` | how to make the API token: the one for sbx, and one for access control only |
 | `sbx cloudflare-token [--stdin] [--remove]` | stores the Cloudflare API token that `sbx publish` uses, and sets `cloudflare_token_command` |
 | `sbx publish <name> <port> [--policy P] [--host LABEL] [--plain]` | publishes a port of an agent sandbox at `https://<label>.<preview_zone>`, behind Cloudflare Access. The default label is `<name>-<port>`; the default policy is `me`. `--plain`: the server speaks plain http on `0.0.0.0`, though the sandbox has a certificate. See [Previews](usage.md#previews). |
 | `sbx publish <name>` | lists what a sandbox publishes, and the policy of each |

@@ -102,10 +102,12 @@ def label_for(hostname: str, port: int, host: str | None) -> str:
 class HttpApi:
     """Callable transport: api(method, path, body=None) -> the `result` of the reply."""
 
-    def __init__(self, cfg: Config, runner: Runner):
-        if not cfg.cloudflare_token_command:
+    def __init__(self, cfg: Config, runner: Runner, token: str | None = None):
+        """token: use this one (sbx cloudflare-setup, before anything is stored);
+        else the output of cloudflare_token_command."""
+        if token is None and not cfg.cloudflare_token_command:
             raise ConfigError("cloudflare_token_command is not set in config.toml; run: sbx cloudflare-token")
-        self.cfg, self.runner, self._token = cfg, runner, None
+        self.cfg, self.runner, self._token = cfg, runner, token
 
     def __call__(self, method: str, path: str, body=None):
         if self._token is None:
