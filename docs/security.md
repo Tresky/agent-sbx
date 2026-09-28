@@ -18,22 +18,107 @@ does not protect, and how to prove it on your own setup.
 
 ## What an agent sandbox can reach
 
+```mermaid
+flowchart LR
+    agent["🤖 <b>agent sandbox</b>"]
+    sidecar["🛡️ <b>its sidecar</b>"]
+    gw["sbx-gw"]
+
+    internet(("🌐 internet"))
+    lan["🏠 your LAN"]
+    tailnet{{"🔒 your tailnet devices"}}
+    gwself["the gateway itself<br/><small>(DNS only, relayed)</small>"]
+    others["🤖 other sandboxes<br/>and their sidecars"]
+    you["🧑‍💻 you, over the tailnet"]
+
+    agent == "proxy 8080 · expose API 8081" ==> sidecar
+    sidecar == "internet only" ==> gw ==> internet
+    agent -. "✗ blocked by sidecar AND gateway" .-> lan
+    agent -. "✗ blocked by sidecar, gateway<br/>AND tailnet policy" .-> tailnet
+    agent -. "✗ blocked by the sidecar" .-> gwself
+    agent -. "✗ another VLAN" .-> others
+    you == "port 22 · ports 1024–32767<br/>(open) or approved (ask)" ==> sidecar
+    sidecar == "DNAT" ==> agent
+
+    classDef infra fill:#e2e8f0,stroke:#334155,color:#0f172a
+    classDef guard fill:#dcfce7,stroke:#15803d,color:#0f172a
+    classDef untrusted fill:#fef3c7,stroke:#b45309,color:#0f172a
+    classDef mine fill:#dbeafe,stroke:#1d4ed8,color:#0f172a
+    classDef outside fill:#f8fafc,stroke:#64748b,color:#0f172a,stroke-dasharray:4 3
+    classDef denied fill:#fef2f2,stroke:#b91c1c,color:#7f1d1d,stroke-dasharray:4 3
+    class gw infra
+    class sidecar guard
+    class agent untrusted
+    class you mine
+    class internet outside
+    class lan,tailnet,gwself,others denied
+    linkStyle 0,1,2,7,8 stroke:#15803d,stroke-width:2.5px
+    linkStyle 3,4,5,6 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:6 4
+```
+
 | From an agent sandbox to | Result |
 |---|---|
-| the internet | permitted |
-| the gateway's DNS and DHCP | permitted |
-| any other port on the gateway | refused |
+| its sidecar: the credential proxy, the expose API, a ping | permitted |
+| the internet, through its sidecar | permitted |
+| the gateway's DNS, through its sidecar | permitted |
+| anything else on the gateway | refused |
 | a host on your LAN, including the Proxmox host | refused |
 | a device on your tailnet, including your Mac | refused |
 | a personal sandbox | refused |
-| another agent sandbox | permitted (see the limits) |
+| another agent sandbox, or another sandbox's sidecar | refused |
 
-A personal sandbox reaches the internet, the LAN and the agent sandboxes. It
-does not reach the tailnet. Your Mac reaches every sandbox by name.
+A personal sandbox reaches the internet, the LAN and the sidecars. It does not
+reach the tailnet. Your Mac reaches every sandbox by name; for an agent
+sandbox the name is its sidecar, which passes port 22 and the forwarded ports
+to the VM.
 
 `sbx doctor --isolation` proves the main rows of this table on your setup. It
-makes one sandbox in each profile. It runs the same probes in both, so each
-refusal has a control that passes, and it removes the two sandboxes.
+makes one sandbox in each profile (three VMs, with the agent's sidecar). It
+runs the same probes in both, so each refusal has a control that passes, and
+it removes them.
+`tests/run-sidecar-test.sh` proves the sidecar rows in network namespaces, with
+a second agent sandbox.
+
+With `agent_sidecar = false` in `config.toml`, an agent sandbox is made the
+way it was before sidecars: on the agent bridge alone, with its credentials
+inside, and able to reach the other agent sandboxes on that bridge.
+
+## The sidecar
+
+Every agent sandbox has a sidecar: a small Debian VM cloned from the
+`sidecar` template, which is bare (nftables, one Python service, and
+`cloudflared` for previews; none of the core).
+The sandbox VM has ONE network card, on a VLAN that the hypervisor tags for that
+sandbox alone; the sidecar's first card is on that VLAN too, and its
+second sits untagged on the agent bridge, where the gateway routes. Root in
+the sandbox cannot change the tag, so the sidecar cannot be routed around.
+
+The sidecar holds what the sandbox must not:
+
+- **The real credentials.** The project's git token, and the Claude token
+  (unless `sidecar_claude = "direct"`). The sandbox gets one
+  placeholder, made for it alone, which works only against its own sidecar,
+  and which a leak makes useless anywhere else. The sidecar swaps it for the
+  real token on each call, and logs the call.
+- **The preview tunnel.** `sbx publish` runs `cloudflared` in the sidecar with
+  the connector token of the sandbox's own tunnel. The tunnel's routes live at
+  Cloudflare and only the Mac sets them, with an API token that never leaves
+  the Mac: a compromised sidecar cannot add a hostname or change a target.
+  Every hostname sits behind Cloudflare Access; the wildcard application for
+  the whole domain exists before the first name does.
+- **The port policy.** Port 22 of the sidecar's address is the sandbox's, by
+  DNAT. With `sidecar_ports = "open"` every port from 1024 to 32767 is too, so
+  the mirror's ports are direct as before. With `"ask"` a port opens only
+  after the sandbox asked its sidecar and you approved, from the gateway side.
+- **The firewall of one sandbox.** From the sandbox: the two services, DNS to
+  the gateway, and the internet. Nothing private, not even the gateway. From
+  the shared network: the gateway side only, never another sidecar. The
+  gateway's own rules stay as a second layer.
+
+`sbx new` writes the policy, the secret and the tokens into the sidecar over
+SSH stdin, before the sandbox is reached. The sidecar registers the sandbox's
+name in DHCP with its own request, so the sandbox has no path to the gateway
+at all.
 
 ## How the network is enforced
 
@@ -82,7 +167,9 @@ sandbox.
   an agent sandbox on your LAN bridge: Proxmox refuses it.
 - Each Mac has its own token, so you can revoke one Mac without the others.
 - The token is in the macOS keychain. `config.toml` holds only a command that
-  prints it.
+  prints it. Off macOS there is no keychain, and the token is a file that only
+  your user can read ([the secret store](reference.md#the-secret-store)): any
+  process of that user can read it too.
 - The host's certificate is verified on each request, with the host CA or a
   fingerprint pin. With a pin, sbx checks the certificate before it sends the
   token.
@@ -116,20 +203,27 @@ secret by accident.
 
 **Git access.**
 
-- An agent sandbox clones with a token for ONE project. A fine-grained token
-  that covers only that project's repositories limits what a leaked token can
-  read.
+- An agent sandbox clones with a token for ONE project. The sidecar holds
+  it; the sandbox holds a placeholder that works only against its sidecar.
+  A fine-grained token that covers only that project's repositories limits
+  what a leaked token can read.
 - A personal sandbox uses your forwarded SSH agent for the clones only.
 - sbx never puts one of your own SSH keys in a sandbox. Sandboxes use a key
   pair that `sbx setup` makes for them alone.
 
 **Claude.**
 
-- Both profiles get your long-lived Claude Code token. An agent can read it.
-  It gives access to your subscription until it expires or you revoke it.
+- A personal sandbox gets your long-lived Claude Code token. An agent
+  sandbox gets a placeholder, and its sidecar holds the token
+  (`sidecar_claude = "proxy"`, the default); with `"direct"` the agent can
+  read the token. It gives access to your subscription until it expires or
+  you revoke it.
 - Remote Control needs a full claude.ai sign-in, which can make API keys on
-  your organization. So only a personal sandbox can get it. No option changes
-  that.
+  your organization. A personal sandbox gets it; an agent sandbox only through
+  `sbx remote-control <name> --allow-agent`, per sandbox, from your own
+  command, never from a setting or a project. The sign-in then lives in the
+  VM, not in the sidecar, and the agent can read it. Revoke it at claude.ai
+  (Settings, then the sessions) or remove the sandbox.
 
 **The portal.** `sbx web` listens on your Mac only, and each request needs its
 session token. A web page on another site cannot drive it.
@@ -141,15 +235,27 @@ Mac trusts.
 
 ## The limits
 
-- **Agent sandboxes can reach each other.** Sandboxes on one bridge share a
-  layer-2 segment that the gateway does not see. If that matters, turn on the
-  port isolation option of that bridge in Proxmox.
-- **A sandbox can claim another sandbox's name** with its DHCP request. It
-  cannot show a valid certificate for that name, and SSH reports a changed
-  host key.
-- **A secret that you send in is readable by the agent.** That includes the
-  project's git token and the Claude token. Send only what the task needs, and
-  use tokens that you can revoke.
+- **Without a sidecar, agent sandboxes can reach each other.** With
+  `agent_sidecar = false`, sandboxes on one bridge share a layer-2 segment
+  that the gateway does not see. With sidecars, no two sandboxes share a
+  segment.
+- **A sidecar is trusted code that the sandbox can talk to.** Its API is
+  small and fixed, and it runs no agent code, but it is reachable from a
+  hostile VM. A compromise of a sidecar gives up that sandbox's credentials
+  and its place on the sidecar network; the gateway's rules still hold.
+- **A personal sandbox can claim another sandbox's name** with its DHCP
+  request (so can an agent sandbox with `agent_sidecar = false`). It cannot
+  show a valid certificate for that name, and SSH reports a changed host key.
+  An agent sandbox with a sidecar has no path to the gateway's DHCP.
+- **A secret that you send in is readable by the agent.** An input is. The
+  git and Claude tokens stay in the sidecar; without a sidecar, or with
+  `sidecar_claude = "direct"`, they are in the VM too. Send only what the
+  task needs, and use tokens that you can revoke.
+- **A full claude.ai login in an agent sandbox** (`--allow-agent`) is in the
+  VM, where the agent can read it, and it can make API keys on your
+  organization.
+- **The proxy buffers.** It reads a request and an answer whole, so a
+  `git push` with a chunked body does not pass through it.
 - **`--with <name>` permits an input by its name.** A branch can change the
   destination or the source path of that name within the checkout. Read the
   manifest diff of an agent branch before you run `sbx new` from it. The table

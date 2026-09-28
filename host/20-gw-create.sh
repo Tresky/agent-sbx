@@ -72,6 +72,10 @@ EOF
 else
   log "container $CT exists; refreshing its config"
 fi
+# First at boot: the sidecars and sandboxes that `sbx autostart` marks start
+# after it, unordered, and need its DHCP and DNS. Config only; a running
+# container keeps running.
+pct set "$CT" --onboot 1 --startup order=1
 
 pct status "$CT" | grep -q running || pct start "$CT"
 # Wait for the LAN leg: setup.sh needs the internet for apt and Tailscale.

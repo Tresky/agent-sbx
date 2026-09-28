@@ -23,6 +23,10 @@ fi
 
 [[ -s "$HOME/.rvm/scripts/rvm" ]] && source "$HOME/.rvm/scripts/rvm"
 
+# mise's shims (the mise component), ahead of the rest: a tool that mise
+# manages resolves to the version of the current directory's mise.toml.
+[[ -d "$HOME/.local/share/mise/shims" ]] && PATH="$HOME/.local/share/mise/shims:$PATH"
+
 # rvm runs `exec 6>&2` for its log output, and every child inherits fd 6. In
 # `ssh host command` that is the session's stderr pipe, so a daemon started
 # there (the herdr server that `herdr machine add` starts) holds the session

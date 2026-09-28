@@ -13,6 +13,37 @@ in its own repository:
 Start from `examples/rails/.sandbox/`. It works for a standard Rails 7 or 8
 application with no edit, and it shows each file.
 
+What `sbx new <name> --project <checkout or URL>` does with them:
+
+```mermaid
+flowchart LR
+    repo["📦 project repo<br/><small>.sandbox/setup.sh<br/>.sandbox/sandbox.toml</small>"]
+    bind["🔑 your bindings<br/><small>~/.config/sbx/bindings/app.toml<br/>git token · input values</small>"]
+    subgraph cli["sbx new app --project … --with … --without …"]
+        direction TB
+        read["read the recipe<br/><small>checkout, or a URL<br/>with the project's token</small>"]
+        decide["decide each input<br/><small>agent: --with or --without<br/>personal: what sbx finds</small>"]
+        read --> decide
+    end
+    subgraph box["🤖 the sandbox"]
+        direction TB
+        clone["clone the branch<br/><small>through the sidecar</small>"]
+        recipe["run .sandbox/setup.sh<br/><small>log: ~/.local/state/sbx/recipe.log</small>"]
+        snap["snapshot clean"]
+        clone --> recipe --> snap
+    end
+    repo --> read
+    bind --> decide
+    decide -- "values over SSH stdin<br/>placeholders for the rest" --> clone
+
+    classDef mine fill:#dbeafe,stroke:#1d4ed8,color:#0f172a
+    classDef untrusted fill:#fef3c7,stroke:#b45309,color:#0f172a
+    class repo,bind,read,decide mine
+    class clone,recipe,snap untrusted
+    style cli fill:#eff6ff,stroke:#1d4ed8,color:#0f172a
+    style box fill:#fffbeb,stroke:#b45309,color:#0f172a
+```
+
 ## Template or recipe
 
 - Put a part in the template if it is slow and many projects use it.
@@ -131,13 +162,21 @@ let the recipe install it in `$HOME` with mode 0600.
 
 An agent sandbox clones with a token, never with your SSH agent. The token
 belongs to one project, so a `myapp` sandbox cannot read `otherapp`, and the
-reverse. A personal sandbox does not use it: it uses your forwarded SSH agent.
+reverse. The sidecar holds the token; the sandbox holds a placeholder that
+works only against its sidecar. A personal sandbox does not use it: it uses
+your forwarded SSH agent.
 
 One command does the whole setup:
 
 ```
 sbx git-token ~/code/myapp
+sbx git-token https://github.com/me/myapp     no checkout needed
 ```
+
+With a URL, the command checks the main repository only; `sbx new` checks the
+repositories that the recipe adds. `sbx new --project <URL>` then reads the
+recipe with this token, so a private project needs no checkout on your
+machine.
 
 1. It prints the project name and the repositories that the token must cover:
    the origin, plus each `repo` input of the manifest.
@@ -148,21 +187,26 @@ sbx git-token ~/code/myapp
 3. Paste the token at the hidden prompt.
 4. The command asks GitHub whether the token can read each repository. A token
    that misses one stores nothing.
-5. It stores the token in the keychain as `sbx-git-<project>`, and writes the
-   `[git]` section of the project's bindings file:
+5. It stores the token in the secret store as `sbx-git-<project>` (the
+   keychain, or `~/.config/sbx/secrets/` off macOS), and writes the `[git]`
+   section of the project's bindings file:
 
    ```toml
    # ~/.config/sbx/bindings/myapp.toml
    [git]
    token_command = ["security", "find-generic-password", "-s", "sbx-git-myapp", "-w"]
+   # off macOS: token_command = ["cat", "/home/you/.config/sbx/secrets/sbx-git-myapp"]
    # host = "github.com"          # the default
    # username = "x-access-token"  # the default; GitLab accepts any name with a token
    ```
 
 The project name is the last part of the repository URL without `.git`.
 `--stdin` reads the token from a pipe. `--host` and `--username` serve a host
-other than GitHub, which the command does not check. `--remove` forgets the
-token and the section.
+other than GitHub, which the command does not check. `--no-check` stores it
+without asking the host. `--remove` forgets the token and the section.
+
+A sidecar gets the project's token once, from `sbx new`: a new token reaches
+the next sandbox, and a running one keeps the old one.
 
 Without a `[git]` section, sbx uses `git_token_command` in `config.toml`. Without
 that, an agent sandbox can clone public repositories only.
@@ -178,10 +222,12 @@ running sandbox the token:
 sbx git-token ~/code/myapp --push lab
 ```
 
-With a token in the keychain already, it asks for none and installs that
-one. It writes `~/.git-credentials` in the sandbox, sets git's `store`
+With a token in the secret store already, it asks for none and installs
+that one. It writes `~/.git-credentials` in the sandbox, sets git's `store`
 credential helper, and rewrites `git@github.com:` and `ssh://git@github.com/`
-remotes to HTTPS, so every git command in every shell uses the token.
+remotes to HTTPS, so every git command in every shell uses the token. An
+agent sandbox with a sidecar gets no token: `--push` gives it to the sidecar,
+which adds it to each git request of the sandbox.
 
 ## A second repository
 

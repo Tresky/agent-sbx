@@ -154,6 +154,90 @@ class CommandTest(unittest.TestCase):
         rewrite = next(c for c in ssh if "insteadOf" in " ".join(c))
         self.assertIn("--replace-all", " ".join(rewrite))      # a second push must not add a third value
 
+    def test_push_to_a_sandbox_with_a_sidecar_gives_the_token_to_the_sidecar_only(self):
+        """The sandbox holds the placeholder; the real token goes to its
+        sidecar, on stdin, and the VM gets no credential file."""
+        calls, stdins = [], []
+
+        def responder(args, data):
+            calls.append(list(args))
+            stdins.append(data)
+            if args[0] == "git" and args[1] == "-C":
+                done = subprocess.run(args, capture_output=True)
+                return Result(done.returncode, done.stdout.decode(), done.stderr.decode())
+            if args[0] == "security" and args[1] == "find-generic-password":
+                return Result(0, TOKEN + "\n", "")
+            return ""
+
+        class Api:
+            def __call__(self, method, path, params=None):
+                if path == "/cluster/resources":
+                    return [{"type": "qemu", "vmid": 9101, "name": "sbx-lab", "node": "pve", "status": "running",
+                             "tags": "sbx;sbx-agent"},
+                            {"type": "qemu", "vmid": 9102, "name": "sbx-lab-sc", "node": "pve", "status": "running",
+                             "tags": "sbx-sidecar;sbx-of-sbx-lab;sbx-tpl-sidecar"}]
+                return None
+
+        (self.home / "id_ed25519").write_text("PRIV")
+        code = cli.main(["git-token", str(self.app), "--push", "lab"], runner=Runner(responder=responder), api=Api())
+        self.assertEqual(code, 0)
+        self.assertFalse([c for c in calls if TOKEN in " ".join(c)])
+        ssh = [c for c in calls if c[0] == "ssh"]
+        self.assertTrue(any("sbx-sidecar-apply --git-token" in " ".join(c) for c in ssh))
+        self.assertFalse(any(".git-credentials" in " ".join(c) for c in ssh))
+        self.assertIn(f"{TOKEN}\n".encode(), stdins)
+
+
+
+class UrlProjectTest(unittest.TestCase):
+    """A project named by URL alone: no checkout on this Mac."""
+    URL = "https://github.com/example-org/web-app"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name)
+        (self.home / "config.toml").write_text("")
+        env = mock.patch.dict(os.environ, {"SBX_CONFIG_DIR": str(self.home)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_git_token_stores_a_token_without_cloning(self):
+        calls = []
+        runner = Runner(responder=lambda a, d: calls.append(list(a)) or ("200" if a[0] == "curl" else ""))
+        with mock.patch("sys.stdin") as stdin:
+            stdin.readline.return_value = TOKEN + "\n"
+            code = cli.main(["git-token", self.URL, "--stdin"], runner=runner)
+        self.assertEqual(code, 0)
+        self.assertFalse([c for c in calls if c[0] == "git"], "nothing may be cloned for a token")
+        self.assertEqual(load_bindings(self.home / "bindings" / "web-app.toml").git.token_command[-2], "sbx-git-web-app")
+
+    def test_the_manifest_is_read_with_the_projects_token_and_the_file_is_gone(self):
+        (self.home / "bindings").mkdir()
+        (self.home / "bindings" / "web-app.toml").write_text('[git]\ntoken_command = ["print-token"]\n')
+        seen = {}
+
+        def responder(argv, data):
+            if argv[0] == "print-token":
+                return TOKEN + "\n"
+            if argv[0] == "git" and "clone" in argv:
+                helper = next(a for a in argv if a.startswith("credential.helper=!"))
+                path = Path(helper.split("cat ", 1)[1].split(";", 1)[0].strip("'"))
+                seen.update(argv=argv, path=path, mode=path.stat().st_mode & 0o777, text=path.read_text())
+            return ""
+        cli.resolve_project(self.URL, None, None, Runner(responder=responder))
+        self.assertNotIn(TOKEN, " ".join(seen["argv"]))
+        self.assertIn("credential.helper=", seen["argv"], "a helper of the user's is switched off")
+        self.assertEqual(seen["mode"], 0o600)
+        self.assertEqual(seen["text"], f"username=x-access-token\npassword={TOKEN}\n")
+        self.assertFalse(seen["path"].exists())
+
+    def test_without_a_stored_token_the_clone_is_plain(self):
+        calls = []
+        cli.resolve_project(self.URL, None, None, Runner(responder=lambda a, d: calls.append(list(a)) or ""))
+        clone = next(c for c in calls if "clone" in c)
+        self.assertFalse([a for a in clone if a.startswith("credential.helper")])
+
 
 if __name__ == "__main__":
     unittest.main()

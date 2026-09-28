@@ -25,7 +25,7 @@
 #SBX_VMID_MIN=9100
 #SBX_VMID_MAX=9199
 
-# Storage. Linked clones need LVM-thin, ZFS, or a directory storage with qcow2.
+# Storage for the VM disks: LVM-thin, ZFS, or a directory storage with qcow2.
 #SBX_VM_STORAGE=local-lvm
 #SBX_GW_STORAGE=local-lvm
 #SBX_GW_TEMPLATE_STORAGE=local

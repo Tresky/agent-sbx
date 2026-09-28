@@ -5,7 +5,7 @@ to the gateway. Each line that fails names the next step.
 
 ```
 sbx doctor
-sbx doctor --isolation     also proves the two profiles (makes two VMs)
+sbx doctor --isolation     also proves the two profiles (one sandbox each; three VMs with the sidecar)
 ```
 
 The tables below list the problems that `sbx doctor` does not explain.
@@ -47,10 +47,14 @@ The tables below list the problems that `sbx doctor` does not explain.
 |---|---|---|
 | `403` from the Proxmox API | the token lacks a right, often after a template rebuild | on the host: `bash /root/sbx/host/40-api-token.sh --acl-only` |
 | `no free VM id` | the ID range is full | `sbx gc`, or `sbx rm` a sandbox |
-| a personal sandbox cannot clone a private repository | the sandbox sees only your forwarded SSH agent, and the key is only in a file | `ssh-add --apple-use-keychain ~/.ssh/<key>`; sbx checks this before it makes a VM |
+| a personal sandbox cannot clone a private repository | the sandbox sees only your forwarded SSH agent, and the key is only in a file | `ssh-add --apple-use-keychain ~/.ssh/<key>` (on Linux: `ssh-add ~/.ssh/<key>`); sbx checks this before it makes a VM |
 | an agent sandbox cannot clone a private repository | the project has no git token, or the token misses a repository | `sbx git-token <project>`; it checks each repository |
 | `<input>: pass --with <input> or --without <input>` | an agent sandbox needs a decision for each input | `sbx inputs <project>` lists them; pass one option for each |
 | herdr hangs, or `could not add ... to herdr` | herdr waited for an answer | the sandbox works; run `sbx herdr <name>` again |
+| `Every agent sandbox needs a sidecar` | the `sidecar` template is not built | `sbx template rebuild sidecar` |
+| git `Authentication failed` in an agent sandbox, and an empty `~/.git-credentials` | a sidecar from before the proxy's 401 named Basic auth: git asked empty-handed twice and deleted the placeholder. Or the token misses the repository, or changed after `sbx new` | `sbx template rebuild sidecar`, or `sbx git-token <project>`; then make the sandbox again. The sidecar's log: `sbx ssh <name> --sidecar -- sudo journalctl -u sbx-sidecar` (look for `-> 401`) |
+| `git push` of a large change fails in an agent sandbox | the proxy buffers, and a chunked upload does not pass | push in smaller pieces, or from your machine |
+| `sbx rollback` warns `the sidecar ... stays as it is` | the sidecar has no snapshot of that label (a sandbox from before snapshots covered sidecars) | nothing to fix; take the next snapshot with `sbx snap` |
 
 ## Recipes
 
@@ -71,6 +75,20 @@ The tables below list the problems that `sbx doctor` does not explain.
 | a server in Docker has no `https://` | it binds every interface, so sbx does not add TLS | use `http://`, or bind the server to `127.0.0.1` |
 | a port does not answer | the port is outside 1024 to 32767, or it is 2019, 9222 or 9229 | use another port, or change `/etc/sbx/mirror.toml` in the sandbox |
 | Rails refuses the request with "Blocked hosts" | the project overrides `config.hosts` | add `.<domain>` to `config.hosts` in development |
+| with `sidecar_ports = "ask"`, a port of an agent sandbox does not answer | the port is not approved | `curl -d '{"port": N}' http://sbx-<name>.<domain>:8081/approve` ([usage.md](usage.md)) |
+
+## Previews
+
+| Symptom | Cause | What to do |
+|---|---|---|
+| Rails "Blocked hosts", or Vite "This host is not allowed", on a preview | the preview arrives with its public hostname | allow `.<preview_zone>`: `RAILS_DEVELOPMENT_HOSTS`, `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` ([usage.md](usage.md#previews)) |
+| a Cloudflare error page (502, Bad gateway) | nothing listens on that port in the sandbox; or a server on `0.0.0.0` with no TLS was published without `--plain`; or a new tunnel is still coming up | start the app; publish again with `--plain`; wait a minute |
+| `sbx publish` says `the sidecar of ... has no cloudflared` | the sidecar's template is older than previews | `sbx template rebuild sidecar`, then make the sandbox again |
+| `sbx publish` says `has no sidecar` | a personal sandbox, or `agent_sidecar = false` | only an agent sandbox with a sidecar can publish |
+| `preview_zone ... is not set`, `no ... previews.toml`, `[policy.me] is missing`, or `cloudflare_token_command is not set` | the one-time setup is incomplete | `sbx cloudflare-setup` ([usage.md](usage.md#previews)) |
+| `sbx cloudflare-setup`: `is pending, not active` | the domain's nameservers do not point to Cloudflare yet | set them at your registrar, wait, run it again |
+| `sbx cloudflare-setup`: `Cloudflare One (Zero Trust) is not turned on` | the account has no Zero Trust organization | dashboard: Zero Trust, a team name and a plan |
+| `sbx cloudflare-setup` ends with a `todo` for the login method | the token may not manage login methods | add One-time PIN by hand (Zero Trust, Settings, Authentication), or give the token that permission (`--token-guide`) |
 
 ## Claude Code
 
@@ -79,7 +97,9 @@ The tables below list the problems that `sbx doctor` does not explain.
 | Claude Code in a sandbox is not signed in | the sandbox was made with `--no-claude`, or before a token existed | `sbx claude-token --push <name>` |
 | a running session still uses the old token | a session reads the token when it starts | restart the session |
 | `this is an API key` | `sbx claude-token` takes the subscription token | run `claude setup-token`, and paste its token |
-| `sbx remote-control` refuses a sandbox | Remote Control is for personal sandboxes only | make a personal sandbox for Remote Control |
+| `sbx remote-control` says `is an agent sandbox` | an agent sandbox gets the full claude.ai login only on request | `sbx remote-control <name> --allow-agent`; the agent can then read the login |
+| `Remote Control is only available when using Claude via api.anthropic.com` | `claude remote-control` was started in a shell of an agent sandbox, where the proxy's `ANTHROPIC_BASE_URL` is set | use `sbx remote-control`, which clears it |
+| the Claude sessions did not come back after a host reboot | the sandbox is not marked | `sbx autostart <name>`; `sbx autostart <name> --status` shows what it would resume |
 
 ## The tests
 

@@ -1,0 +1,13 @@
+[Unit]
+Description=Apply the sandbox's policy in this sidecar after cloud-init
+# After cloud-final, because cloud-init sets the hostname and the addresses on
+# each boot, and the apply puts the sandbox's name back. WantedBy the cloud-init
+# target, not multi-user: the same ordering cycle that sbx-dhcp-hostname hit.
+After=cloud-final.service nftables.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sbx-sidecar-apply
+
+[Install]
+WantedBy=cloud-init.target

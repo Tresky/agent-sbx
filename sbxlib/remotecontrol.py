@@ -17,9 +17,15 @@ HTTPS to Anthropic only, which the agent firewall permits.
 
 A full login carries more than inference: its scopes include
 org:create_api_key. An agent sandbox with it could make API keys on the
-user's organization. So Remote Control exists for PERSONAL sandboxes only,
-and nothing in the tool can sign an agent sandbox in: every entry point
-checks the profile first, and there is no flag to override it.
+user's organization. So Remote Control is for PERSONAL sandboxes, and an
+agent sandbox gets it only through `sbx remote-control <name> --allow-agent`:
+one sandbox at a time, by the user's own hand, never from a setting or a
+project's recipe, and never from `sbx new`.
+
+In an agent sandbox with the Claude proxy, ANTHROPIC_BASE_URL and
+ANTHROPIC_AUTH_TOKEN point Claude Code at the sidecar, and they would take
+precedence over the login. The login, its check and the server run without
+them (UNSET_ENV), so Remote Control talks to Anthropic with the login itself.
 """
 from __future__ import annotations
 
@@ -35,11 +41,17 @@ LOG_FILE = ".local/state/sbx/remote-control.log"
 ALLOWED_PROFILE = "personal"
 
 
-def check_profile(profile: str, hostname: str) -> None:
-    if profile != ALLOWED_PROFILE:
-        raise VmError(f"{hostname} is an {profile} sandbox: Remote Control is not available there. "
-                      "A full claude.ai login can make API keys on your organization, and an agent "
-                      "with full permissions must never hold one.")
+# The variables that would take precedence over the full login: the long-lived
+# token (~/.config/sbx/claude.env), and the proxy's base URL and placeholder.
+UNSET_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")
+_ENV_U = " ".join(f"-u {v}" for v in UNSET_ENV)
+
+
+def check_profile(profile: str, hostname: str, allow_agent: bool = False) -> None:
+    if profile != ALLOWED_PROFILE and not allow_agent:
+        raise VmError(f"{hostname} is an {profile} sandbox: Remote Control needs a full claude.ai login, "
+                      "which can make API keys on your organization. To put one in this sandbox "
+                      "anyway: sbx remote-control <name> --allow-agent")
 UNIT = "sbx-remote-control"
 LOGIN_SESSION = "sbx-login"
 SERVER_SESSION = "sbx-rc"
@@ -50,9 +62,10 @@ WRAPPER = f"""#!/bin/sh
 # systemd user unit {UNIT}; the settings come from ~/{ENV_FILE}.
 set -e
 . "$HOME/{ENV_FILE}"
-# The long-lived token from ~/.config/sbx/claude.env would take precedence
-# over the login and make Remote Control refuse to start.
-unset CLAUDE_CODE_OAUTH_TOKEN
+# The long-lived token from ~/.config/sbx/claude.env, or the Claude proxy's
+# base URL and placeholder, would take precedence over the login and make
+# Remote Control refuse to start.
+unset {" ".join(UNSET_ENV)}
 cd "$RC_DIR"
 mkdir -p "$HOME/.local/state/sbx"
 # `script` keeps the terminal that the status display wants and appends a
@@ -101,7 +114,7 @@ def install_files(vm: Vm) -> None:
 def logged_in(vm: Vm) -> bool:
     """A full-scope login, as `claude auth status` reports it. The long-lived
     token also reports loggedIn, so the env var is unset for the check."""
-    done = vm.run("env -u CLAUDE_CODE_OAUTH_TOKEN claude auth status 2>/dev/null", check=False)
+    done = vm.run(f"env {_ENV_U} claude auth status 2>/dev/null", check=False)
     return done.code == 0 and '"loggedIn": true' in done.stdout and '"claude.ai"' in done.stdout
 
 
@@ -123,7 +136,7 @@ def start_login(vm: Vm, directory: str, timeout: float = 30.0) -> str:
     q = shlex.quote
     vm.run(f"tmux kill-session -t {LOGIN_SESSION} 2>/dev/null; "
            f"tmux new-session -d -s {LOGIN_SESSION} -x 220 -y 50 "
-           f"{q(f'cd {shlex.quote(directory)} && env -u CLAUDE_CODE_OAUTH_TOKEN claude auth login; echo SBX_LOGIN_EXIT=$?; sleep 60')}")
+           f"{q(f'cd {shlex.quote(directory)} && env {_ENV_U} claude auth login; echo SBX_LOGIN_EXIT=$?; sleep 60')}")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         text = _capture(vm, LOGIN_SESSION)

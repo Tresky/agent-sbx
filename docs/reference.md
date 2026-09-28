@@ -23,12 +23,17 @@ path, a git URL, or a name that `sbx projects` lists.
 | Command | What it does |
 |---|---|
 | `sbx new <name> [options]` | makes a sandbox. The options are below. |
-| `sbx list` | every sandbox: name, profile, project, status, VM ID, expiry, address |
-| `sbx ssh <name> [-- command]` | a shell in the sandbox, or one command |
-| `sbx snap <name> [label]` | takes a snapshot. The default label is `clean`. |
-| `sbx rollback <name> [label]` | returns to a snapshot. The default label is `clean`. |
-| `sbx rm <name> [-y]` | destroys the sandbox and its snapshots |
-| `sbx gc [-y]` | destroys each expired sandbox, after a confirmation |
+| `sbx list` | every sandbox: name, profile, template, project, status, VM ID, expiry, start at boot, address |
+| `sbx ssh <name> [--sidecar] [-- command]` | a shell in the sandbox, or one command. `--sidecar`: the sandbox's sidecar instead (the sandbox's name, port 2222). |
+| `sbx snap <name> [label] [--ram]` | takes a snapshot of the sandbox and its sidecar, which keep running. The default label is `clean`. `--ram` saves the memory too, so a rollback resumes them as they were. |
+| `sbx rollback <name> [label]` | returns the sandbox and its sidecar to a snapshot. The default label is `clean`. |
+| `sbx autostart <name>` | the sandbox and its sidecar start at host boot, and the Claude Code sessions live in it are resumed after one. Nothing running is restarted. See [After a host reboot](usage.md#after-a-host-reboot). |
+| `sbx autostart <name> --status` | whether it starts at boot, the sessions it would resume, and the last resume |
+| `sbx autostart <name> --off` | no start at boot, no resume |
+| `sbx extend <name> --days N` | moves the expiry N days later, from today or from the current expiry, whichever is later |
+| `sbx extend <name> --never` | removes the expiry: `sbx gc` never removes the sandbox |
+| `sbx rm <name> [-y]` | destroys the sandbox, its sidecar and their snapshots, and withdraws its previews |
+| `sbx gc [-y]` | destroys each expired sandbox, each sidecar whose sandbox is gone, and each preview tunnel whose sandbox is gone, after a confirmation |
 | `sbx herdr <name> [--attach]` | adds the sandbox to the herdr sidebar. `--attach` opens one full herdr window on it. |
 | `sbx layout <name> [--replace] [--no-run]` | builds the project's `.sandbox/herdr.toml` panes in the sandbox. `--replace` closes the tab of the same name first. `--no-run` types each command and does not start it. |
 | `sbx gpu status` | which sandbox holds the GPU |
@@ -64,13 +69,19 @@ Options of `sbx new`:
 | `sbx project add <project>` | records a checkout, so `--project <name>` works by name |
 | `sbx project rm <name>` | forgets a project. Its token and its bindings stay. |
 | `sbx inputs <project> [--branch B] [--from PATH]` | shows what the recipe asks for, and where each value comes from. It makes nothing. |
-| `sbx git-token <project> [--host H] [--username U] [--stdin] [--no-check] [--remove] [--push NAME]` | stores the project's git token in the keychain, after a check that it covers each repository. `--no-check` skips the check. `--remove` forgets it. `--push NAME` also installs the token into that running sandbox, either profile (repeatable); with a token in the keychain already, it asks for none and installs that one. |
+| `sbx git-token <project> [--host H] [--username U] [--stdin] [--no-check] [--remove] [--push NAME]` | stores the project's git token in [the secret store](#the-secret-store), after a check that it covers each repository. `--no-check` skips the check. `--remove` forgets it. The project may be a git URL: nothing is cloned, and no checkout is needed on this Mac. A project named by URL then reads its `.sandbox/` with this token. `--push NAME` also installs the token into that running sandbox, either profile (repeatable): for an agent sandbox with a sidecar, into its sidecar. With a token in the secret store already, it asks for none and installs that one. |
 | `sbx claude-token` | runs `claude setup-token` and stores the Claude token |
 | `sbx claude-token --stdin` | reads a new Claude token from stdin |
-| `sbx claude-token --push [name ...]` | writes the stored token into running sandboxes, and into the named ones |
+| `sbx claude-token --push [name ...]` | writes the stored token into running sandboxes, and into the named ones (for an agent sandbox with the proxy: into its sidecar) |
 | `sbx claude-token --status` | shows whether a token is stored, and when it expires |
-| `sbx claude-token --remove` | forgets the token, and deletes it from each sandbox |
-| `sbx remote-control <name> [--mode M] [--status] [--off]` | signs a personal sandbox in to claude.ai and runs its Remote Control server |
+| `sbx claude-token --remove` | forgets the token, and deletes it from each sandbox and sidecar |
+| `sbx remote-control <name> [--mode M] [--status] [--off] [--allow-agent]` | signs a personal sandbox in to claude.ai and runs its Remote Control server. `--allow-agent` does it in an agent sandbox too; see [security.md](security.md). |
+| `sbx cloudflare-setup --account-id ID --zone DOMAIN --email ADDRESS [--email ...] [--session HOURS] [--token-env VAR] [--stdin] [--access-only] [--dry-run]` | makes a Cloudflare account ready for `sbx publish`: checks the token, the domain and Zero Trust, adds the One-time PIN login, makes the policy `sbx: me` and the wildcard Access application, stores the token and writes the settings. Idempotent. The token comes from `$CLOUDFLARE_API_TOKEN` (or `--token-env`), `--stdin`, or a prompt. `--access-only`: the policy only, no token stored. |
+| `sbx cloudflare-setup --token-guide` | how to make the API token: the one for sbx, and one for access control only |
+| `sbx cloudflare-token [--stdin] [--remove]` | stores the Cloudflare API token that `sbx publish` uses, and sets `cloudflare_token_command` |
+| `sbx publish <name> <port> [--policy P] [--host LABEL] [--plain]` | publishes a port of an agent sandbox at `https://<label>.<preview_zone>`, behind Cloudflare Access. The default label is `<name>-<port>`; the default policy is `me`. `--plain`: the server speaks plain http on `0.0.0.0`, though the sandbox has a certificate. See [Previews](usage.md#previews). |
+| `sbx publish <name>` | lists what a sandbox publishes, and the policy of each |
+| `sbx publish <name> <port> --off` | withdraws it (`--host LABEL --off` for a label of your own). The last one removes the tunnel too. |
 
 ### Templates
 
@@ -104,6 +115,8 @@ sbx reads three layers. A later layer wins.
 3. `~/.config/sbx/config.toml`: this Mac's own settings. `SBX_CONFIG_DIR`
    names a different directory.
 
+The secrets are not in any layer: see [the secret store](#the-secret-store).
+
 The host scripts read layers 1 and 2 only. A shared key (the column "Mac key"
 below) can therefore not be set in `config.toml` to a value that differs from
 layer 2: sbx stops with an error.
@@ -132,12 +145,14 @@ layer 2: sbx stops with an error.
 | `SBX_TEMPLATE_VMID_MAX` | `template_vmid_max` | `9099` | the last ID that a template version can take. An ID in use is skipped. |
 | `SBX_VMID_MIN` | `vmid_min` | `9100` | the first sandbox ID |
 | `SBX_VMID_MAX` | `vmid_max` | `9199` | the last sandbox ID |
-| `SBX_VM_STORAGE` | `vm_storage` | `local-lvm` | the storage of the VM disks. It must make linked clones. |
+| `SBX_VM_STORAGE` | `vm_storage` | `local-lvm` | the storage of the VM disks, of a type that can make linked clones (LVM-thin, ZFS, a directory with qcow2). Proxmox chooses the kind of clone; on LVM-thin it made full copies. |
 | `SBX_SNIPPET_STORAGE` | | `local` | a file storage for the cloud-init snippet of the build |
 | `SBX_IMAGE_STORAGE_DIR` | | `/var/lib/vz/template/iso` | where the build keeps the Ubuntu image |
 | `SBX_POOL` | `pve_pool` | `sbx` | the Proxmox pool of the sandboxes. The token is scoped to it. |
 | `SBX_GPU_MAPPING` | `gpu_mapping` | | the name of a PCI Resource Mapping. Empty refuses `--gpu`. |
 | `SBX_VM_USER` | `vm_user` | `dev` | the user in each sandbox |
+| `SBX_SIDECAR_LINK` | `sidecar_link` | `10.79.0` | the first three octets of the /30 wire between an agent sandbox and its sidecar: the sidecar is `.1`, the sandbox `.2`. Every pair uses it, on its own VLAN. |
+| `SBX_SIDECAR_TEMPLATE` | `sidecar_template` | `sidecar` | the template definition that the sidecars are cloned from |
 | `SBX_UBUNTU_IMAGE_URL` | | Ubuntu 24.04 cloud image | the image that each template starts from. A definition can name another. |
 
 ### Mac settings (`~/.config/sbx/config.toml`)
@@ -145,7 +160,7 @@ layer 2: sbx stops with an error.
 | Key | Default | Meaning |
 |---|---|---|
 | `pve_api` | | `https://<host>:8006`. `sbx setup` writes it. |
-| `pve_token_command` | | a command (a list of strings) that prints the API token. `sbx setup` writes a keychain command. |
+| `pve_token_command` | | a command (a list of strings) that prints the API token. `sbx setup` writes a command for [the secret store](#the-secret-store). |
 | `pve_ca_file` | | the host's CA file. Exactly one of this and `pve_fingerprint` is set. |
 | `pve_fingerprint` | | the SHA-256 fingerprint of the host's certificate |
 | `pve_ssh` | `root@<pve_api host>` | the root shell for `sbx setup` and `sbx template rebuild` |
@@ -159,6 +174,13 @@ layer 2: sbx stops with an error.
 | `git_token_host` | `github.com` | the host of that token |
 | `remote_control_mode` | `acceptEdits` | the permission mode of Remote Control sessions. `""` turns the server off. |
 | `ssh_key` | `~/.config/sbx/id_ed25519` | the private key for the sandboxes |
+| `agent_sidecar` | `true` | every agent sandbox gets a sidecar: a small trusted VM on the sandbox's own VLAN that holds its credentials and its port policy. `false`: an agent sandbox sits on the agent bridge alone, as before sidecars. |
+| `sidecar_ports` | `open` | what a sidecar forwards to its sandbox. `open`: port 22 and every port from 1024 to 32767. `ask`: port 22, and a port only after the sandbox asked and you approved. An approval lasts until a denial, across reboots. |
+| `preview_zone` | | the domain of the previews, a zone on your Cloudflare account. Use one of its own, not your main domain. |
+| `cloudflare_account_id` | | the Cloudflare account of that zone |
+| `cloudflare_token_command` | | a command that prints the Cloudflare API token. `sbx cloudflare-token` writes it. |
+| `preview_session` | `336h` | how long a sign-in to a preview lasts (hours) |
+| `sidecar_claude` | `proxy` | how Claude Code in an agent sandbox reaches Claude. `proxy`: the token stays in the sidecar; the sandbox gets a placeholder and a base URL. `direct`: the subscription token goes into the sandbox. The proxy buffers each answer, so a long one arrives whole. |
 
 The shared keys of the table above (`domain`, `agent_bridge`, and so on) are
 also accepted, but only with the same value as in `host/local.conf`.
@@ -173,8 +195,9 @@ explains them.
 | `description` | | one line for `sbx template list` |
 | `components` | `[]` | the components, in order, from `template/components/` (or `template/components/local/`) |
 | `apt` | `[]` | more apt packages |
-| `cores`, `memory_mb` | `8`, `8192` | the size of the build VM |
-| `disk_gb` | `60` | the disk of the template. A sandbox can grow it with `--disk`. |
+| `cores`, `memory_mb` | `8`, `8192` | the size of the build VM, and of a sidecar cloned from a bare template. At least 1024 MB; 256 when bare. |
+| `disk_gb` | `60` | the disk of the template. At least 20; 3 when bare (a disk cannot be smaller than its image). A sandbox can grow it with `--disk`. |
+| `bare` | `false` | `true` skips the core (Docker, Node, Chrome, Claude Code, herdr, the mirror): `qemu-guest-agent`, `ca-certificates`, `curl`, `python3`, a user with a bash shell, and the components only. The `sidecar` definition is bare. |
 | `image_url` | `SBX_UBUNTU_IMAGE_URL` | the cloud image to start from |
 | `[<component>]` | | the settings of one listed component, or of `node` or `docker` |
 
@@ -190,9 +213,10 @@ component as `SBX_RUBY_VERSIONS`.
 | `[rust]` | `toolchains` | `["stable"]` | the rustup toolchains; the first is the default |
 | `[rust]` | `components` | `"clippy rustfmt"` | more rustup components |
 | `[python]` | `versions` | `["3.13"]` | the Pythons that uv caches |
+| `[mise]` | `tools` | `[]` | what `mise use --global` installs in the template, such as `["ruby@3.4.10", "node@24"]` |
 | `[odin]` | `version`, `wgpu_version`, `premake_version` | see `template/components/odin.sh` | the Odin, wgpu-native and premake releases |
 
-`rails`, `gis` and `media` take no settings.
+`rails`, `gis`, `media` and `sidecar` take no settings. `rails` needs `ruby` before it in the list.
 
 ### Project bindings (`~/.config/sbx/bindings/<project>.toml`)
 
@@ -218,7 +242,9 @@ the pane layout (`.sandbox/herdr.toml`).
 | `certs/sbx-<name>/` | the certificate of each sandbox |
 | `bindings/` | the project bindings |
 | `projects.toml` | the project registry |
-| `claude-token.toml` | the date of the Claude token. The token itself is in the keychain. |
+| `claude-token.toml` | the date of the Claude token. The token itself is in the secret store. |
+| `previews.toml` | who may open a preview: one `[policy.<name>]` per policy, with `emails` and `email_domains` only. `[policy.me]` is required; it is the default. |
+| `secrets/` | the secret store off macOS: one file per secret, this user only (0700, the files 0600) |
 | `portal/url` | the link of the running portal, with its session token. `sbx web` removes it when it stops. |
 | `portal/jobs/` | the record of each portal job: its command and its output. The last 300 are kept. |
 
@@ -231,13 +257,20 @@ the pane layout (`.sandbox/herdr.toml`).
 | `templates/local/versions.toml` | what `sbx versions --write` found, per template |
 | `template/components/local/*.sh` | your own components |
 
-### In the macOS keychain
+### The secret store
+
+On macOS, the secrets are items in the keychain. On another system, which has
+no keychain, each is a file in `~/.config/sbx/secrets/` with the same name,
+readable by this user only. `SBX_SECRET_STORE` (`keychain` or `file`) names
+the store instead of the platform. The settings name a command that prints a
+secret, never the value.
 
 | Item | What it is |
 |---|---|
 | `sbx-pve-token` | the Proxmox API token of this Mac |
 | `sbx-git-<project>` | the git token of one project |
 | `sbx-claude-token` | the Claude Code token |
+| `sbx-cloudflare-token` | the Cloudflare API token of `sbx publish` |
 
 ### In a sandbox
 
@@ -246,7 +279,10 @@ the pane layout (`.sandbox/herdr.toml`).
 | `~/code/<project>` | the project clone |
 | `~/.local/state/sbx/recipe.log` | the output of the recipe |
 | `~/.local/state/sbx/remote-control.log` | the output of the Remote Control server |
-| `~/.config/sbx/claude.env` | the Claude token, read by every shell |
+| `~/.local/state/sbx/claude-sessions.json` | with `sbx autostart`: the live Claude Code sessions, recorded every minute |
+| `~/.local/state/sbx/claude-resume.log` | with `sbx autostart`: what the last boot resumed |
+| `~/.config/sbx/claude.env` | the Claude token, read by every shell; with `sidecar_claude = "proxy"`, the sidecar's base URL and the placeholder instead |
+| `~/.git-credentials` | with a sidecar: the placeholder for the sidecar's proxy. Without: the project's git token. |
 | `/etc/sbx/tls/` | the sandbox's certificate |
 | `/etc/sbx/mirror.toml` | optional: the ports that the port mirror skips or forces |
 | `/etc/sbx/template` | the template of the sandbox: its name, fingerprint and components |
@@ -259,8 +295,34 @@ the pane layout (`.sandbox/herdr.toml`).
 | `sbx` | the VM is a sandbox |
 | `sbx-agent`, `sbx-personal` | the profile |
 | `sbx-exp-YYYYMMDD` | the expiry date |
+| `sbx-autostart` | `sbx autostart` is on: the sandbox and its sidecar start at boot, after the gateway |
 | `sbx-proj-<project>` | the project |
 | `sbx-tpl-<name>` | the template it was cloned from |
+
+### Proxmox tags on a sidecar
+
+A sidecar does not carry `sbx`, so `sbx list`, `sbx rm` and `sbx gc` never
+take it for a sandbox. Its VM is named `<sandbox>-sc`.
+
+| Tag | Meaning |
+|---|---|
+| `sbx-sidecar` | the VM is the sidecar of an agent sandbox |
+| `sbx-of-<sandbox>` | the sandbox it serves. `sbx rm` destroys the two together; `sbx gc` removes a sidecar whose sandbox is gone. |
+| `sbx-tpl-<name>` | the template it was cloned from |
+
+### In a sidecar
+
+| Path | What it is |
+|---|---|
+| `/etc/sbx/sidecar.env` | the sandbox's policy: the wire, the sandbox's name, `sidecar_ports`, the upstreams. `sbx new` writes it. |
+| `/etc/sbx/sidecar/secret` | the per-sandbox placeholder that the sandbox presents |
+| `/etc/sbx/sidecar/tokens` | `claude=` and `github=`: the real credentials |
+| `/etc/sbx/sidecar/approved` | the ports approved in `ask` mode, one per line. The sidecar opens them again when it starts, so an approval survives a reboot and a policy change. |
+| `/etc/nftables.conf` | the firewall, rendered from `sidecar/nftables.conf.tmpl` by `sbx-sidecar-apply` |
+| `/usr/local/bin/sbx-sidecar-apply` | renders the firewall, registers the sandbox's name, restarts the service. `--claude-token` reads a new token from stdin; `--tunnel-token` the tunnel's connector token (empty: stop the tunnel). |
+| `/etc/sbx/sidecar/cloudflared.env` | `TUNNEL_TOKEN=`: the connector token of the sandbox's preview tunnel, while it publishes |
+| `sbx-cloudflared.service` | runs `cloudflared` for the previews, while the token file exists |
+| `/usr/local/lib/sbx/sidecar.py` | the credential proxy (`<wire>:8080`) and the expose API (`8081` on both sides) |
 
 ### Proxmox tags on a template
 
@@ -275,5 +337,5 @@ the pane layout (`.sandbox/herdr.toml`).
 
 | Path | What it is |
 |---|---|
-| `/root/sbx/` | the copy of `host/`, `gw/`, `template/`, `templates/` and `sbxlib/` that the setup and the builds run |
+| `/root/sbx/` | the copy of `host/`, `gw/`, `template/`, `templates/`, `sidecar/` and `sbxlib/` that the setup and the builds run |
 | `/root/sbx/host/local.conf` | the values of this setup. `sbx setup --mac-only` reads it. |

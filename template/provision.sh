@@ -26,64 +26,84 @@ trap 'echo "PROVISION FAILED at line $LINENO: $BASH_COMMAND"; touch /var/lib/sbx
 trap 'code=$?; [[ $code -eq 0 || -e /var/lib/sbx/provision.ok || -e /var/lib/sbx/provision.failed ]] \
       || { echo "PROVISION FAILED (exit $code)"; touch /var/lib/sbx/provision.failed; }' EXIT
 
+# A BARE template (bare = true in the definition) gets the base packages, the
+# user and its components, and none of the core. The sidecar template is bare.
+BARE="${SBX_TEMPLATE_BARE:-0}"
 # The tools that the final check requires. A component adds its own.
 CHECK_TOOLS="node claude herdr agent-browser"
+[[ "$BARE" == 1 ]] && CHECK_TOOLS=""
 
 step() { printf '\n\033[1m=== %s ===\033[0m\n' "$*"; }
 as_user() { sudo -u "$U" -H zsh -c "$1"; }
 
 export DEBIAN_FRONTEND=noninteractive
 
-step "template ${SBX_TEMPLATE_NAME:-?}: the core, then ${SBX_COMPONENTS:-no components}"
+if [[ "$BARE" == 1 ]]; then
+  step "template ${SBX_TEMPLATE_NAME:-?}: bare, then ${SBX_COMPONENTS:-no components}"
+else
+  step "template ${SBX_TEMPLATE_NAME:-?}: the core, then ${SBX_COMPONENTS:-no components}"
+fi
 
 step "base packages"
 # The CORE: what every template has, whatever its components. Language
 # toolchains and the libraries of one kind of app are components.
 apt-get update -q
-apt-get install -y -q --no-install-recommends \
-  qemu-guest-agent ca-certificates curl wget gnupg unzip zip git git-lfs make pkg-config \
-  build-essential clang lld g++ python3 python3-venv \
-  zsh tmux htop jq ripgrep fd-find fzf direnv rsync openssh-client \
-  libssl-dev zlib1g-dev libffi-dev \
-  fonts-liberation fonts-dejavu fonts-noto-color-emoji
+if [[ "$BARE" == 1 ]]; then
+  # As little as a sidecar needs; its component adds the rest.
+  apt-get install -y -q --no-install-recommends qemu-guest-agent ca-certificates curl python3
+else
+  apt-get install -y -q --no-install-recommends \
+    qemu-guest-agent ca-certificates curl wget gnupg unzip zip git git-lfs make pkg-config \
+    build-essential clang lld g++ python3 python3-venv \
+    zsh tmux htop jq ripgrep fd-find fzf direnv rsync openssh-client \
+    libssl-dev zlib1g-dev libffi-dev \
+    fonts-liberation fonts-dejavu fonts-noto-color-emoji
+fi
 if [[ -n "${SBX_APT_PACKAGES:-}" ]]; then
   # shellcheck disable=SC2086  # a space-separated list
   apt-get install -y -q --no-install-recommends $SBX_APT_PACKAGES
 fi
 systemctl enable --now qemu-guest-agent || true
-ln -sf "$(command -v fdfind)" /usr/local/bin/fd
+[[ "$BARE" == 1 ]] || ln -sf "$(command -v fdfind)" /usr/local/bin/fd
 
 step "system settings"
-# Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor, which
-# is what the Chromium sandbox is built on: without this every headless browser
-# dies with "No usable sandbox".
 cat > /etc/sysctl.d/90-sbx.conf <<'EOF'
-kernel.apparmor_restrict_unprivileged_userns = 0
 fs.inotify.max_user_watches = 524288
 fs.inotify.max_user_instances = 1024
 EOF
+# Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor, which
+# is what the Chromium sandbox is built on: without this every headless browser
+# dies with "No usable sandbox". Debian has no such switch.
+if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+  echo "kernel.apparmor_restrict_unprivileged_userns = 0" >> /etc/sysctl.d/90-sbx.conf
+fi
 sysctl -q --system || true
 
 # A clone must be usable the moment it boots. The apt timers take the dpkg lock
 # for minutes on a first boot; the template is rebuilt to pick up updates.
 systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service 2>/dev/null || true
 
-# Host allow lists. Rails and Vite refuse a Host header they do not know, and
-# every request through the mirror carries the sandbox name. Set once here, so
-# no project needs a change.
-cat >> /etc/environment <<EOF
+if [[ "$BARE" != 1 ]]; then
+  # Host allow lists. Rails and Vite refuse a Host header they do not know, and
+  # every request through the mirror carries the sandbox name. Set once here,
+  # so no project needs a change.
+  cat >> /etc/environment <<EOF
 RAILS_DEVELOPMENT_HOSTS=.$SBX_DOMAIN
 __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=.$SBX_DOMAIN
 EOF
-
-ssh-keyscan -t ed25519,rsa github.com gitlab.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
+  ssh-keyscan -t ed25519,rsa github.com gitlab.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
+fi
 
 step "user $U"
-id "$U" >/dev/null 2>&1 || useradd -m -s /usr/bin/zsh -G sudo "$U"
+# A bare template has no zsh: its user is there for `sbx ssh --sidecar` only.
+if [[ "$BARE" == 1 ]]; then USER_SHELL=/bin/bash; else USER_SHELL=/usr/bin/zsh; fi
+id "$U" >/dev/null 2>&1 || useradd -m -s "$USER_SHELL" -G sudo "$U"
 echo "$U ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/90-$U"
 chmod 0440 "/etc/sudoers.d/90-$U"
-install -o "$U" -g "$U" -m 0644 "$FILES/zshenv" "/home/$U/.zshenv"
-install -o "$U" -g "$U" -m 0644 "$FILES/zshrc"  "/home/$U/.zshrc"
+if [[ "$BARE" != 1 ]]; then
+  install -o "$U" -g "$U" -m 0644 "$FILES/zshenv" "/home/$U/.zshenv"
+  install -o "$U" -g "$U" -m 0644 "$FILES/zshrc"  "/home/$U/.zshrc"
+fi
 # Every level is named: `install -d` gives the owner to the directories it is
 # told about and makes a missing parent as root. A root-owned ~/.local made
 # the Claude Code installer fail with EACCES on mkdir ~/.local/share.
@@ -92,10 +112,17 @@ install -d -o "$U" -g "$U" "/home/$U/code" \
 # herdr and an agent run for hours with no login session attached.
 loginctl enable-linger "$U" || true
 
+if [[ "$BARE" == 1 ]]; then
+  install -d -m 0755 /etc/sbx /usr/local/lib/sbx
+else
+
 step "docker"
 install -m 0755 -d /etc/apt/keyrings
-curl -fsSL --retry 5 --retry-delay 5 https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+# Docker keeps one repository per distribution: ubuntu or debian, by the image.
+OS_ID="$(. /etc/os-release && echo "$ID")"
+OS_CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+curl -fsSL --retry 5 --retry-delay 5 "https://download.docker.com/linux/$OS_ID/gpg" -o /etc/apt/keyrings/docker.asc
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$OS_ID $OS_CODENAME stable" \
   > /etc/apt/sources.list.d/docker.list
 
 step "caddy and gh repositories"
@@ -155,6 +182,8 @@ as_user 'curl -fsSL --retry 5 --retry-delay 5 https://claude.ai/install.sh | bas
 # remote PATH and starts the server side itself; no service is needed.
 as_user 'curl -fsSL --retry 5 --retry-delay 5 https://herdr.dev/install.sh | sh'
 
+fi  # the core
+
 # The components, in the order of the definition. A local component (not in
 # git) wins over a shared one of the same name.
 for comp in ${SBX_COMPONENTS:-}; do
@@ -170,14 +199,16 @@ printf 'SBX_TEMPLATE_NAME=%s\nSBX_TEMPLATE_HASH=%s\nSBX_COMPONENTS="%s"\n' \
   "${SBX_TEMPLATE_NAME:-}" "${SBX_TEMPLATE_HASH:-}" "${SBX_COMPONENTS:-}" > /etc/sbx/template
 
 step "checks"
-docker --version; caddy version
+[[ "$BARE" == 1 ]] || { docker --version; caddy version; }
 for tool in $CHECK_TOOLS; do
   as_user "command -v $tool >/dev/null && echo \"$tool: \$(command -v $tool)\""
 done
 # The check that matters: a NON-interactive ssh-style command, with no tty and
 # no rc files but ~/.zshenv, still finds the tools.
-# shellcheck disable=SC2086
-sudo -u "$U" -H env -i HOME="/home/$U" USER="$U" SHELL=/usr/bin/zsh /usr/bin/zsh -c "command -v $CHECK_TOOLS >/dev/null"
+if [[ -n "$CHECK_TOOLS" ]]; then
+  # shellcheck disable=SC2086
+  sudo -u "$U" -H env -i HOME="/home/$U" USER="$U" SHELL=/usr/bin/zsh /usr/bin/zsh -c "command -v $CHECK_TOOLS >/dev/null"
+fi
 
 step "seal"
 # Not under /run: that file system is mounted noexec, and systemd then refuses

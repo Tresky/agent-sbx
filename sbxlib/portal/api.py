@@ -7,7 +7,7 @@ command that needs the host's root password or a browser sign-in opens in
 Terminal, where the user types the answer: the portal never holds the host
 password.
 
-Nothing here returns a secret. A token's presence is read from the keychain
+Nothing here returns a secret. A token's presence is read from the secret store
 without its value (`security find-generic-password` without -w), a binding's
 literal value is never read, and the secrets that the user types (a git
 token, a Claude token, a sign-in code) go to the child's stdin only.
@@ -27,7 +27,7 @@ import time
 import tomllib
 from pathlib import Path
 
-from .. import claudetoken, cli, doctor, gittoken, herdr as herdr_mod, names, remotecontrol
+from .. import claudetoken, cli, doctor, gittoken, herdr as herdr_mod, names, remotecontrol, secretstore
 from .. import projects as projects_mod
 from .. import templates as templates_mod
 from ..config import (_ENV_MAP, DEFAULTS_ENV, REPO_ROOT, Config, ConfigError, load as load_config,
@@ -162,9 +162,8 @@ def _https(hostname: str) -> bool:
 
 
 def _keychain_has(ctx: Context, service: str, account: str = "sbx") -> bool:
-    # No -w: the item's attributes, not its secret.
-    return ctx.runner.run(["security", "find-generic-password", "-s", service, "-a", account],
-                          check=False).code == 0
+    # The keychain item's attributes, not its secret (no -w); off macOS, the file.
+    return secretstore.exists(ctx.runner, service, account)
 
 
 def _box_dict(cfg: Config, box: Sandbox, resource: dict | None = None) -> dict:

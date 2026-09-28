@@ -4,14 +4,17 @@ This file tells a coding agent how this repository is organized and how to set
 up `sbx` for a user. Read it before you act.
 
 `sbx` makes throwaway Proxmox VMs ("sandboxes") for development. Each user has
-their own Proxmox host, their own Mac, and their own Tailscale tailnet. Nothing
-in this repository connects to another person's host.
+their own Proxmox host, their own Mac (or Linux machine), and their own
+Tailscale tailnet. Nothing in this repository connects to another person's
+host. Each agent sandbox has a sidecar VM that holds its tokens; the diagrams
+in `README.md` and `docs/architecture.md` show how the parts connect.
 
 ## Where to look
 
 | Question | Read |
 |---|---|
 | What sbx is, and a map of the docs | `README.md` |
+| The whole path, from setup to an agent sandbox with Remote Control, a preview and no expiry | `docs/getting-started.md` |
 | The setup, step by step, with a check for each step | `docs/setup.md` |
 | Daily use: profiles, sandboxes, ports, Claude, snapshots | `docs/usage.md` |
 | A project's recipe, manifest and pane layout (`.sandbox/`) | `docs/projects.md` |
@@ -32,8 +35,9 @@ in this repository connects to another person's host.
 | `bin/sbx`, `sbxlib/` | the Mac | the CLI (Python 3.11 or later, no dependencies) |
 | `sbxlib/hostsetup.py` | the Mac | `sbx setup`: reads the host, writes `host/local.conf`, runs the host scripts |
 | `sbxlib/doctor.py` | the Mac | `sbx doctor`: the checks of `docs/setup.md` |
-| `host/` | the Proxmox host, as root | the bridges, the gateway, the template, the API token |
+| `host/` | the Proxmox host, as root | the bridges, the gateway, the templates (the sidecar template too), the API token |
 | `gw/` | the gateway container | dnsmasq, the nftables guard, Tailscale |
+| `sidecar/` | the sidecar VM of each agent sandbox | the credential proxy, the expose API, nftables, the cloudflared unit |
 | `template/` | the template VMs | the core build (`provision.sh`) and the components (`template/components/`) |
 | `templates/` | the Mac and the host | the template definitions; `templates/local/` is the user's own, not in git |
 | `sbxlib/templates.py` | the Mac and the host | reads a definition; the host runs it during a build |
@@ -51,21 +55,33 @@ A shared key (the domain, the bridges, the subnets, the IDs) belongs in
 
 ## Rules for an agent
 
-- **Do not read or print a secret.** The Proxmox token, git tokens and the
-  Claude token live in the macOS keychain. `~/.config/sbx/config.toml` names
-  commands that print them. Do not run those commands, and do not print the
-  keychain items.
+- **Do not read or print a secret.** The Proxmox token, the git tokens, the
+  Claude token and the Cloudflare token live in the macOS keychain, or off
+  macOS in `~/.config/sbx/secrets/`. `~/.config/sbx/config.toml` names
+  commands that print them. Do not run those commands, and do not read the
+  keychain items or the files in `~/.config/sbx/secrets/`.
+- **Never stop, restart or remove a VM that the user did not name.** Before a
+  change that touches a sandbox the user works in, offer a snapshot of it and
+  its sidecar with `sbx snap <name> <label> --ram`; both keep running.
 - **Do not commit `host/local.conf`.** It holds the user's own values.
 - **Ask before a command that changes the host or makes VMs.** These commands
   change real infrastructure:
   - `sbx setup` without `--mac-only` (it changes the host network and builds VMs)
   - `sbx template rebuild`, `rm`, `prune` and `adopt` (they build or remove template VMs)
-  - `sbx doctor --isolation` (it makes two VMs and removes them)
-  - `sbx new`, `sbx rm`, `sbx gc`, `sbx rollback`
+  - `sbx doctor --isolation` (it makes one sandbox per profile, three VMs
+    with the agent's sidecar, and removes them)
+  - `sbx new`, `sbx rm`, `sbx gc`, `sbx rollback`, `sbx snap`
+  - `sbx publish <name> <port>` (a public hostname behind Cloudflare Access),
+    `sbx autostart`, `sbx extend`, `sbx gpu attach|detach`
+  - `sbx remote-control` (it puts a full claude.ai login in a sandbox;
+    `--allow-agent` puts one in an agent sandbox, where the agent can read it)
+  - `sbx claude-token` without `--status` (it writes into every running sandbox)
 - **These commands are safe to run at any time:** `sbx doctor`, `sbx guide`,
   `sbx list`, `sbx projects`, `sbx inputs <project>`, `sbx versions`,
   `sbx template list`, `sbx template show`, `sbx template components`,
-  `sbx template export`, and the unit tests.
+  `sbx template export`, the listing forms `sbx publish <name>`,
+  `sbx autostart <name> --status`, `sbx remote-control <name> --status` and
+  `sbx claude-token --status`, and the unit tests.
 - **The portal (`sbx web`) follows the same rules.** Do not use its API to
   make, change or remove a VM without the user's consent. Do not read the
   portal link in `~/.config/sbx/portal/url`: it holds the session token.
@@ -85,6 +101,8 @@ terminal. The agent prepares, explains, and checks.
    - `ssh` and `scp` exist.
    - The Tailscale app is installed and signed in (`tailscale status`, or
      `/Applications/Tailscale.app/Contents/MacOS/Tailscale status`).
+   - On Linux instead of a Mac: `docs/setup.md`, "A Linux machine instead of
+     a Mac" (accept the subnet routes; the secrets are files).
    - Optional: `mkcert` (https in each sandbox) and `herdr` (the sidebar).
 2. **Ask the user** for these facts:
    - Is this a new host, or a host that another Mac set up already?
@@ -98,8 +116,9 @@ terminal. The agent prepares, explains, and checks.
 
 4. **Tell the user which command to run in their own terminal:**
    - A new host: `sbx setup`. It takes about 30 to 50 minutes, because it
-     builds a template. Ask the user which kinds of projects they work on,
-     and suggest the matching templates (`sbx template list` shows them).
+     builds a template, and then the `sidecar` template that every agent
+     sandbox needs. Ask the user which kinds of projects they work on, and
+     suggest the matching templates (`sbx template list` shows them).
    - A host that is set up already: `sbx setup --mac-only`. It does not change
      the host.
 
@@ -125,8 +144,10 @@ host with an existing gateway keeps its values.
 2. Run `sbx inputs <checkout>`. It shows each input and where its value comes
    from, and it makes nothing.
 3. For an `agent` sandbox of a private repository, the user runs
-   `sbx git-token <checkout>` and pastes a fine-grained token at the hidden
-   prompt. Do not handle the token yourself.
+   `sbx git-token <checkout or git URL>` and pastes a fine-grained token at
+   the hidden prompt. Do not handle the token yourself. With a URL, no
+   checkout is needed on the Mac: `sbx new --project <URL>` reads the
+   recipe with that token.
 4. With the user's consent: `sbx new <name> --project <checkout>`. An agent
    sandbox needs `--with <input>` or `--without <input>` for each input.
 5. If the recipe fails, read `~/.local/state/sbx/recipe.log` in the sandbox:
@@ -163,10 +184,13 @@ host with an existing gateway keeps its values.
   python3 -m unittest discover -s tests -t .
   ```
 
-- Four behavior tests need Docker: `tests/run-guard-test.sh`,
-  `tests/run-dns-test.sh`, `tests/run-mirror-test.sh`, `tests/run-finish-test.sh`.
-  Run the guard test after a change to `gw/nftables.conf.tmpl`, and the DNS
-  test after a change to `gw/dnsmasq.conf.tmpl`.
+- Five behavior tests need Docker: `tests/run-guard-test.sh`,
+  `tests/run-dns-test.sh`, `tests/run-mirror-test.sh`, `tests/run-finish-test.sh`,
+  `tests/run-sidecar-test.sh`. Run the guard test after a change to
+  `gw/nftables.conf.tmpl`, the DNS test after a change to
+  `gw/dnsmasq.conf.tmpl`, and the sidecar test after a change under `sidecar/`.
+- The diagrams in the docs are Mermaid. Check a changed one with the Mermaid
+  CLI (`mmdc`) before a commit: GitHub shows a broken one as an error.
 - A new key in `host/defaults.conf` that the CLI reads also needs a field in
   `sbxlib/config.py` and an entry in `_ENV_MAP`. A test keeps the two defaults
   equal.

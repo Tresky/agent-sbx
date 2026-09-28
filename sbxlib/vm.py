@@ -17,10 +17,23 @@ class VmError(RuntimeError):
     pass
 
 
+# The sidecar's own sshd. Port 22 of the sidecar's address is the sandbox's,
+# by DNAT, so the sandbox's name reaches the VM on 22 and the sidecar on 2222.
+SIDECAR_SSH_PORT = 2222
+
+
+def sidecar_alias(cfg: Config, hostname: str) -> str:
+    """The known_hosts key of a sidecar: it answers at the sandbox's name, so
+    the name alone would collide with the sandbox's own host key."""
+    return f"sidecar.{cfg.fqdn(hostname)}"
+
+
 class Vm:
-    def __init__(self, cfg: Config, runner: Runner, hostname: str, address: str | None = None):
+    def __init__(self, cfg: Config, runner: Runner, hostname: str, address: str | None = None, *,
+                 port: int = 22, alias: str = ""):
         self.cfg, self.runner, self.hostname = cfg, runner, hostname
         self.address = address or cfg.fqdn(hostname)
+        self.port, self.alias = port, alias or cfg.fqdn(hostname)
 
     def ssh_argv(self, *, forward_agent: bool = False, tty: bool = False) -> list[str]:
         # -F /dev/null: the user's config is ignored on purpose. Its `Host sbx-*`
@@ -32,11 +45,13 @@ class Vm:
                 # One known_hosts entry per sandbox, whether it was reached by
                 # name or by the guest-agent address. The full name, because
                 # that is the key `ssh sbx-<name>` writes through the SSH block.
-                "-o", f"HostKeyAlias={self.cfg.fqdn(self.hostname)}",
+                "-o", f"HostKeyAlias={self.alias}",
                 "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR",
                 # Never from the user's config: an agent sandbox must not get
                 # the user's SSH agent because of a wildcard Host block.
                 "-o", f"ForwardAgent={'yes' if forward_agent else 'no'}"]
+        if self.port != 22:
+            argv += ["-p", str(self.port)]
         if tty:
             argv.append("-t")
         return argv + [f"{self.cfg.vm_user}@{self.address}"]

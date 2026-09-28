@@ -44,6 +44,13 @@ DISC = {
 
 
 class ProposeTest(unittest.TestCase):
+    def test_mac_networks_reads_ip_route_too(self):
+        # Off macOS, LOCAL_ROUTES is `ip -4 route`: full addresses, and "default".
+        nets = hostsetup.mac_networks("default via 192.168.1.1 dev eth0 proto dhcp\n"
+                                      "172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1\n"
+                                      "192.168.1.0/24 dev eth0 proto kernel scope link src 192.168.1.20\n")
+        self.assertEqual([str(n) for n in nets], ["172.17.0.0/16", "192.168.1.0/24"])
+
     def test_mac_networks_expands_the_short_forms(self):
         nets = hostsetup.mac_networks(NETSTAT)
         self.assertIn(ipaddress.ip_network("10.0.0.0/24"), nets)
@@ -132,7 +139,7 @@ class _WizardBase(unittest.TestCase):
     def respond(self, argv, data):
         self.cmds.append(argv)
         cmd = argv[-1]
-        if argv[0] == "netstat":
+        if argv == hostsetup.LOCAL_ROUTES:
             return NETSTAT
         if argv[0] == "ssh" and cmd == "bash -s":
             return json.dumps(DISC)
@@ -153,6 +160,7 @@ class WizardTest(_WizardBase):
                         "",              # the LAN has DHCP
                         "",              # the policy pause
                         "rust minimal",  # the templates to build
+                        "",              # build the sidecar template
                         "",              # the Include line
                         ])
         with mock.patch("builtins.input", lambda *_: next(answers)), mock.patch("builtins.print"):
@@ -161,7 +169,7 @@ class WizardTest(_WizardBase):
         steps = [c[-1] for c in self.cmds if c[0] == "ssh" and "/root/sbx/host/" in c[-1]]
         self.assertEqual([s.split("/host/")[1] for s in steps],
                          ["10-bridges.sh", "20-gw-create.sh", "20-gw-create.sh --tailscale",
-                          "30-template-build.sh rust", "30-template-build.sh minimal",
+                          "30-template-build.sh rust", "30-template-build.sh minimal", "30-template-build.sh sidecar",
                           f"40-api-token.sh --rotate --emit --token-id {hostsetup.token_id()}"])
         # The copy goes before the first host script, and after local.conf exists.
         first_scp = next(i for i, c in enumerate(self.cmds) if c[0] == "scp")
@@ -173,7 +181,7 @@ class WizardTest(_WizardBase):
         self.assertEqual(store[-1], "sbx@pve!cli=00000000-0000-0000-0000-000000000000")
         cfg = load()
         self.assertEqual(cfg.pve_api, "https://192.168.1.5:8006")
-        self.assertEqual(cfg.pve_token_command, hostsetup.PVE_TOKEN_COMMAND)
+        self.assertEqual(cfg.pve_token_command, ["security", "find-generic-password", "-s", "sbx-pve-token", "-w"])
         # The address is in the certificate, so the CA is used, not the fingerprint.
         self.assertTrue(cfg.pve_ca_file.endswith("pve-root-ca.crt"))
         self.assertEqual(cfg.pve_fingerprint, "")
@@ -188,7 +196,9 @@ class WizardTest(_WizardBase):
         done = self.respond
         disc = {**DISC, "guests": DISC["guests"] + [
             {"vmid": 9000, "name": "sbx-tpl-rails-20260925-1200", "type": "qemu", "template": True,
-             "tags": ["sbx-template", "sbx-tpl-rails", "sbx-h-abc"]}]}
+             "tags": ["sbx-template", "sbx-tpl-rails", "sbx-h-abc"]},
+            {"vmid": 9005, "name": "sbx-tpl-sidecar-20260925-1200", "type": "qemu", "template": True,
+             "tags": ["sbx-template", "sbx-tpl-sidecar", "sbx-h-sc1"]}]}
 
         def respond(argv, data):
             if argv[0] == "ssh" and argv[-1] == "bash -s":
@@ -223,7 +233,7 @@ class ExistingInstallTest(_WizardBase):
                 return json.dumps(disc)
             return respond(argv, data)
 
-        answers = iter(["192.168.1.5", "", "", "", "", ""])  # host, values, policy, adopt, Include, spare
+        answers = iter(["192.168.1.5", "", "", "", "", "", ""])  # host, values, policy, adopt, sidecar, Include, spare
         with mock.patch("builtins.input", lambda *_: next(answers)), mock.patch("builtins.print"), \
                 mock.patch("sbxlib.hostsetup.socket.gethostbyname", return_value="10.77.0.1"):
             hostsetup.cmd_setup(mock.Mock(host=None, mac_only=False), load(), Runner(responder=responder))
@@ -232,7 +242,9 @@ class ExistingInstallTest(_WizardBase):
                          ("vmbr77", "10.77.0", "9000"))
         steps = [c[-1].split("/host/")[1] for c in self.cmds if c[0] == "ssh" and "/root/sbx/host/" in c[-1]]
         self.assertIn("30-template-build.sh --adopt 9000 default", steps)
-        self.assertFalse([s for s in steps if s.startswith("30-template-build.sh") and "--adopt" not in s])
+        # The adopted template is kept; the only build is the sidecar template, which the setup lacks.
+        self.assertEqual([s for s in steps if s.startswith("30-template-build.sh") and "--adopt" not in s],
+                         ["30-template-build.sh sidecar"])
         self.assertEqual(load().default_template, "default")
 
 

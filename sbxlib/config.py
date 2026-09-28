@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import tomllib
 from dataclasses import dataclass, field
@@ -70,6 +71,22 @@ class Config:
     template_pool: str = "sbx-templates"
     template_vmid_min: int = 9000
     template_vmid_max: int = 9099
+    sidecar_link: str = "10.79.0"       # the /30 wire of each pair: sidecar .1, VM .2
+    sidecar_template: str = "sidecar"   # the template that a sidecar is cloned from
+    # Every agent sandbox gets a sidecar: a trusted VM on the sandbox's own
+    # VLAN that holds the real credentials and the port policy. False makes an
+    # agent sandbox the way it was before sidecars: on the agent bridge alone.
+    agent_sidecar: bool = True
+    # What the sidecar forwards to its sandbox. "open": port 22 and every port
+    # from 1024 to 32767, as the mirror exposes them. "ask": port 22, and a
+    # port only after the sandbox asked for it and you approved.
+    sidecar_ports: str = "open"
+    # How Claude Code in an agent sandbox reaches Claude. "direct": the
+    # subscription token goes into the sandbox, as before. "proxy": the token
+    # stays in the sidecar, and the sandbox gets a placeholder and a base URL.
+    # Claude Code documents the proxy path for a Console API key; the rollout
+    # proved it with the subscription token too (docs/sidecar-rollout.md).
+    sidecar_claude: str = "proxy"
     # The template that `sbx new` clones when neither --template nor the
     # project's manifest names one. Empty: the only template, if there is one.
     default_template: str = ""
@@ -83,10 +100,17 @@ class Config:
     git_token_host: str = "github.com"
     gpu_mapping: str = ""              # name of a PCI Resource Mapping; empty = --gpu is refused
     # Claude Code Remote Control in a PERSONAL sandbox: "" = off, else the
-    # permission mode of the server's sessions. An agent sandbox never gets it:
+    # permission mode of the server's sessions. An agent sandbox gets it only through `sbx remote-control --allow-agent`:
     # a full claude.ai login can make API keys on the organization.
     remote_control_mode: str = "acceptEdits"
     ssh_key: str = ""                  # private key for the VMs; default <state>/id_ed25519
+    # `sbx publish`: previews behind Cloudflare Access (sbxlib/previews.py).
+    # The zone is a domain of its own, not your main one: an agent serves what
+    # it wants there. The token command prints a Cloudflare API token.
+    preview_zone: str = ""
+    cloudflare_account_id: str = ""
+    cloudflare_token_command: list[str] = field(default_factory=list)
+    preview_session: str = "336h"      # how long a sign-in lasts; Cloudflare's form, e.g. 24h
 
     @property
     def ssh_key_path(self) -> Path:
@@ -94,6 +118,29 @@ class Config:
 
     def bridge_for(self, profile: str) -> str:
         return {"agent": self.agent_bridge, "personal": self.personal_bridge}[profile]
+
+    def sidecar_for(self, profile: str) -> bool:
+        """Whether a sandbox of this profile gets a sidecar."""
+        return profile == "agent" and self.agent_sidecar
+
+    def vlan_for(self, vmid: int) -> int:
+        """The VLAN of a sandbox and its sidecar. A VLAN id is 1 to 4094 and a
+        sandbox id is 9100 and up, so the id itself cannot be the tag: the
+        tag is the sandbox's place in the id range, from 2 (1 is the untagged
+        default of the bridge, where the sidecars and the gateway sit)."""
+        return vmid - self.vmid_min + 2
+
+    @property
+    def sidecar_addr(self) -> str:
+        return f"{self.sidecar_link}.1"
+
+    @property
+    def sidecar_vm_addr(self) -> str:
+        return f"{self.sidecar_link}.2"
+
+    @property
+    def sidecar_proxy_url(self) -> str:
+        return f"http://{self.sidecar_addr}:8080"
 
     @property
     def dns_server(self) -> str:
@@ -122,6 +169,7 @@ _ENV_MAP = {
     "SBX_LAN_BRIDGE": "lan_bridge", "SBX_VM_STORAGE": "vm_storage",
     "SBX_TEMPLATE_POOL": "template_pool", "SBX_TEMPLATE_VMID_MIN": "template_vmid_min",
     "SBX_TEMPLATE_VMID_MAX": "template_vmid_max", "SBX_POOL": "pve_pool", "SBX_GPU_MAPPING": "gpu_mapping",
+    "SBX_SIDECAR_LINK": "sidecar_link", "SBX_SIDECAR_TEMPLATE": "sidecar_template",
 }
 
 
@@ -148,6 +196,9 @@ def load(config_path: Path | None = None, defaults_path: Path = DEFAULTS_ENV,
         elif types[key] == "list[str]":
             if not (isinstance(value, list) and all(isinstance(v, str) for v in value)):
                 raise ConfigError(f"{origin}: '{key}' must be a list of strings")
+        elif types[key] == "bool":
+            if not isinstance(value, bool):
+                raise ConfigError(f"{origin}: '{key}' must be true or false")
         elif not isinstance(value, str):
             raise ConfigError(f"{origin}: '{key}' must be a string")
         setattr(cfg, key, value)
@@ -172,4 +223,13 @@ def load(config_path: Path | None = None, defaults_path: Path = DEFAULTS_ENV,
 
     if cfg.default_profile not in ("agent", "personal"):
         raise ConfigError("default_profile must be 'agent' or 'personal'")
+    if cfg.sidecar_ports not in ("open", "ask"):
+        raise ConfigError("sidecar_ports must be 'open' or 'ask'")
+    if cfg.vlan_for(cfg.vmid_max) > 4094:
+        raise ConfigError(f"the sandbox id range {cfg.vmid_min}-{cfg.vmid_max} is wider than the 4093 VLANs "
+                          "that one bridge has; narrow SBX_VMID_MIN/SBX_VMID_MAX in host/local.conf")
+    if cfg.sidecar_claude not in ("direct", "proxy"):
+        raise ConfigError("sidecar_claude must be 'direct' or 'proxy'")
+    if not re.fullmatch(r"[1-9][0-9]*h", cfg.preview_session):
+        raise ConfigError("preview_session must be a number of hours, e.g. \"336h\"")
     return cfg

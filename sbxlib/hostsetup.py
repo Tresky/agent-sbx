@@ -20,9 +20,11 @@ from pathlib import Path
 from .config import DEFAULTS_ENV, REPO_ROOT, Config, ConfigError, load, local_conf_path, parse_env_file, state_dir
 from .templates import load_all
 from .run import Runner
+from . import secretstore
 
 PVE_TOKEN_SERVICE = "sbx-pve-token"
-PVE_TOKEN_COMMAND = ["security", "find-generic-password", "-s", PVE_TOKEN_SERVICE, "-w"]
+# The routes of this machine, which the proposed subnets must miss.
+LOCAL_ROUTES = ["netstat", "-rn", "-f", "inet"] if sys.platform == "darwin" else ["ip", "-4", "route"]
 
 # Linked clones need a storage that can snapshot a disk. Plain LVM cannot.
 _CLONE_TYPES = ("zfspool", "lvmthin", "rbd", "btrfs", "dir", "nfs", "cifs", "cephfs")
@@ -36,8 +38,9 @@ class SetupError(RuntimeError):
 # --- reading the host and the Mac --------------------------------------------
 
 def mac_networks(netstat: str) -> list[ipaddress.IPv4Network]:
-    """The IPv4 destinations in `netstat -rn -f inet`. macOS drops trailing
-    zero octets: "10/24" is 10.0.0.0/24, and "169.254" is 169.254.0.0/16."""
+    """The IPv4 destinations in `netstat -rn -f inet`, or in `ip -4 route`
+    off macOS (LOCAL_ROUTES). macOS drops trailing zero octets: "10/24" is
+    10.0.0.0/24, and "169.254" is 169.254.0.0/16."""
     out = []
     for line in netstat.splitlines():
         dest = line.split(None, 1)[0] if line.strip() else ""
@@ -266,8 +269,8 @@ class Wizard:
 
     def run(self) -> int:
         warn = self.cli.warn
-        if sys.platform != "darwin":
-            warn("sbx keeps its secrets in the macOS keychain; on another system the token steps fail")
+        if secretstore.kind() == "file":
+            warn(f"no macOS keychain: sbx keeps its secrets in {secretstore.where()}, readable by this user only")
         for tool in ("ssh", "scp"):
             if shutil.which(tool) is None:
                 raise SetupError(f"{tool} is not installed")
@@ -351,7 +354,7 @@ class Wizard:
     def _host_steps(self, disc: dict) -> None:
         info = self.cli.info
         self.step("the values of this setup (host/local.conf)")
-        mac = self.runner.run(["netstat", "-rn", "-f", "inet"], check=False).stdout
+        mac = self.runner.run(LOCAL_ROUTES, check=False).stdout
         mac_nets = mac_networks(mac)
         local = local_conf_path()
         current = parse_env_file(local.read_text()) if local.exists() else {}
@@ -381,8 +384,12 @@ class Wizard:
 
         c = self.cfg
         self.step(f"the sandbox bridges {c.agent_bridge} and {c.personal_bridge}")
-        if self.ssh(f"ip link show {c.agent_bridge} >/dev/null 2>&1 && ip link show {c.personal_bridge} >/dev/null 2>&1").code == 0:
-            info("the bridges exist; skipped")
+        # The agent bridge must be VLAN-aware: each sandbox and its sidecar
+        # share a VLAN. A bridge from before sidecars exists but is not; the
+        # script adds the lines.
+        if self.ssh(f"ip link show {c.agent_bridge} >/dev/null 2>&1 && ip link show {c.personal_bridge} >/dev/null 2>&1 "
+                    f"&& [ \"$(cat /sys/class/net/{c.agent_bridge}/bridge/vlan_filtering 2>/dev/null)\" = 1 ]").code == 0:
+            info("the bridges exist, and the agent bridge is VLAN-aware; skipped")
         else:
             print("CAUTION: this step changes /etc/network/interfaces on the host. The script shows the\n"
                   "change and asks before it applies it. It keeps a backup.")
@@ -434,8 +441,10 @@ class Wizard:
         if named:
             info("templates exist: " + ", ".join(sorted({g["name"] for g in named}))
                  + "; skipped (`sbx template list` shows them)")
+            self._sidecar_template(named)
             return
         if legacy:
+            self._sidecar_template(named)
             return
         defs = load_all()
         print("Each template is a definition in templates/ (shared) or templates/local/ (yours):")
@@ -454,6 +463,23 @@ class Wizard:
             set_toml_keys(conf, {"default_template": wanted[0]})
             info(f"default_template = {wanted[0]} in config.toml; `sbx new --template <name>` picks another")
         self.cfg = load()
+        self._sidecar_template([])
+
+    def _sidecar_template(self, named: list[dict]) -> None:
+        """Every agent sandbox needs a sidecar, cloned from the sidecar
+        template. Build it when the setup has none."""
+        c = self.cfg
+        if not c.agent_sidecar:
+            return
+        if any(f"sbx-tpl-{c.sidecar_template}" in g.get("tags", []) for g in named):
+            return
+        print(f"Each agent sandbox gets a sidecar: a small VM that holds its credentials and its\n"
+              f"port policy. It is cloned from the template '{c.sidecar_template}', which takes a few minutes.")
+        if _yes(f"Build the sidecar template '{c.sidecar_template}' now?"):
+            self._host_script(f"30-template-build.sh {c.sidecar_template}")
+        else:
+            self.cli.warn(f"no sidecar template: `sbx new` refuses an agent sandbox until you run "
+                          f"`sbx template rebuild {c.sidecar_template}`, or set agent_sidecar = false")
 
     def _fetch_local_templates(self) -> None:
         """--mac-only: the host has the local definitions and components that
@@ -545,9 +571,9 @@ class Wizard:
     def _token(self, disc: dict, host: str) -> None:
         info = self.cli.info
         conf = state_dir() / "config.toml"
-        values: dict = {"pve_token_command": PVE_TOKEN_COMMAND}
-        have = self.runner.run(["security", "find-generic-password", "-s", PVE_TOKEN_SERVICE], check=False).code == 0
-        if have and not _yes("The keychain has a Proxmox token. Keep it?"):
+        values: dict = {"pve_token_command": secretstore.command(PVE_TOKEN_SERVICE)}
+        have = secretstore.exists(self.runner, PVE_TOKEN_SERVICE)
+        if have and not _yes(f"{secretstore.where().capitalize()} has a Proxmox token. Keep it?"):
             have = False
         if have:
             self._host_script("40-api-token.sh --acl-only")
@@ -556,9 +582,8 @@ class Wizard:
             line = next((l for l in got.stdout.splitlines() if l.startswith("SBX_TOKEN=")), "")
             if got.code != 0 or not line:
                 raise SetupError(f"host/40-api-token.sh failed: {got.stderr.strip()[-400:]}")
-            self.runner.run(["security", "add-generic-password", "-U", "-s", PVE_TOKEN_SERVICE, "-a", "sbx",
-                             "-w", line.removeprefix("SBX_TOKEN=")])
-            info(f"stored the token in the keychain as {PVE_TOKEN_SERVICE}")
+            secretstore.store(self.runner, PVE_TOKEN_SERVICE, line.removeprefix("SBX_TOKEN="))
+            info(f"stored the token in {secretstore.where()} as {PVE_TOKEN_SERVICE}")
 
         # The CA survives a certificate renewal, but it verifies the name in
         # pve_api only when that name is in the certificate. Else: the fingerprint.

@@ -6,6 +6,7 @@ import datetime as dt
 import getpass
 import os
 import posixpath
+import secrets
 import shlex
 import shutil
 import sys
@@ -14,6 +15,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import cfsetup
 from . import claudetoken
 from . import doctor
 from . import gittoken
@@ -23,8 +25,11 @@ from . import inputs as inputs_mod
 from . import layout as layout_mod
 from . import manifest as manifest_mod
 from . import names
+from . import previews as previews_mod
 from . import projects as projects_mod
 from . import remotecontrol
+from . import secretstore
+from . import sessions as sessions_mod
 from . import templates as templates_mod
 from . import versions as versions_mod
 from .config import Config, ConfigError, load as load_config, local_conf_path, state_dir
@@ -32,7 +37,7 @@ from .inputs import PLACEHOLDER, REPO, SEND, InputError
 from .manifest import MANIFEST_PATH, Manifest, ManifestError
 from .pve import HttpApi, Pve, PveError, TemplateVm
 from .run import CommandError, Runner
-from .vm import Vm, VmError, dns_has, resolves
+from .vm import SIDECAR_SSH_PORT, Vm, VmError, dns_has, resolves, sidecar_alias
 
 SSH_INCLUDE = "Include ~/.config/sbx/ssh_config"
 
@@ -69,9 +74,13 @@ def _read_manifest(root: Path) -> Manifest | None:
 
 
 def resolve_project(spec: str, branch: str | None, from_path: str | None, runner: Runner,
-                    need_remote: bool = True) -> Project:
+                    need_remote: bool = True, manifest: bool = True) -> Project:
     """`spec` is a checkout path, a registered project name, or a git URL, in
-    that order. A checkout that resolves is recorded in the registry."""
+    that order. A checkout that resolves is recorded in the registry.
+
+    For a URL, the manifest is read with a sparse clone on this Mac, with the
+    project's own git token when one is stored. manifest=False skips it: `sbx
+    git-token` stores a token before this Mac can read the repository at all."""
     local = Path(spec).expanduser()
     if not local.is_dir() and "/" not in spec and ":" not in spec:
         known = projects_mod.load().get(spec)
@@ -107,21 +116,46 @@ def resolve_project(spec: str, branch: str | None, from_path: str | None, runner
         return Project(names.project_name(url), url, branch, local, _read_manifest(local))
 
     url = manifest_mod.check_git_url(spec, "--project")
+    checkout = Path(from_path).expanduser() if from_path else None
+    if checkout is not None and not checkout.is_dir():
+        raise InputError(f"--from {from_path}: not a directory")
+    name = names.project_name(url)
+    if not manifest:
+        return Project(name, url, branch, checkout, None)
     tmp = Path(tempfile.mkdtemp(prefix="sbx-manifest-"))
     try:
         # Only .sandbox/ is fetched: a sparse, shallow, blob-filtered clone
         # works against every git host, unlike a provider's contents API.
-        cmd = ["git", "clone", "-q", "--depth", "1", "--filter=blob:none", "--sparse"]
+        cmd = ["git"] + _url_credential_args(name, url, runner, tmp)
+        cmd += ["clone", "-q", "--depth", "1", "--filter=blob:none", "--sparse"]
         cmd += ["--branch", branch] if branch else []
         runner.run(cmd + ["--", url, str(tmp / "r")])
         runner.run(["git", "-C", str(tmp / "r"), "sparse-checkout", "set", ".sandbox"])
         found = _read_manifest(tmp / "r")
     finally:
+        # The credential file goes with the clone, whatever happened.
         shutil.rmtree(tmp, ignore_errors=True)
-    checkout = Path(from_path).expanduser() if from_path else None
-    if checkout is not None and not checkout.is_dir():
-        raise InputError(f"--from {from_path}: not a directory")
-    return Project(names.project_name(url), url, branch, checkout, found)
+    return Project(name, url, branch, checkout, found)
+
+
+def _url_credential_args(name: str, url: str, runner: Runner, tmp: Path) -> list[str]:
+    """git options that answer with the project's stored token, for an https
+    URL of the token's host; [] when there is none. The token goes into a file
+    of `tmp` (0600), which the caller removes: it is in no argv and no git
+    config, and the helper replaces any helper the user configured."""
+    access = inputs_mod.load_bindings(state_dir() / "bindings" / f"{name}.toml").git
+    parsed = gittoken.repo_path(url)
+    if access is None or not url.startswith("https://") or parsed is None or parsed[0] != access.host:
+        return []
+    token = runner.run(access.token_command).stdout.strip()
+    if not token:
+        return []
+    creds = tmp / "credentials"
+    fd = os.open(creds, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(f"username={access.username}\npassword={token}\n")
+    helper = f"!f() {{ test \"$1\" = get && cat {shlex.quote(str(creds))}; }}; f"
+    return ["-c", "credential.helper=", "-c", f"credential.helper={helper}"]
 
 
 def _bindings(project: Project) -> inputs_mod.Bindings:
@@ -240,18 +274,18 @@ GUIDE = """\
 sbx: throwaway Proxmox sandboxes for development
 
 WHAT IT IS
-  One command makes a VM on the Proxmox host in about 30 s, from one of your
-  templates. Each template has the core (Node, Docker, Chrome, Claude Code,
-  herdr) and the components that its definition names (Ruby, Go, Rust, ...).
+  One command makes a VM on the Proxmox host in a few minutes, from one of
+  your templates: the core (Node, Docker, Chrome, Claude Code, herdr) and the
+  components that its definition names (Ruby, Go, Rust, mise, ...).
   The VM gets a name at once, and every port on it is direct, with https on
   the same port:
 
       https://sbx-<name>.{domain}:<port>
 
 TWO PROFILES
-  agent      for an AI agent with full permissions. Internet only: no LAN, no
-             tailnet, no other sandbox. Secrets go in only when you name them.
-             A "clean" snapshot after setup. Expires after {ttl} days.
+  agent      for an AI agent with full permissions. Internet only, through its
+             own sidecar VM, which holds its git and Claude tokens. Secrets go
+             in only when you name them. A "clean" snapshot. Expires: {ttl} days.
   personal   for your own work. Internet and LAN. Your SSH agent for git,
              forwarded for the clones only. No expiry.
 
@@ -263,14 +297,15 @@ A SANDBOX, FROM START TO END
   sbx ssh lab                          a shell        (or: ssh sbx-lab)
   sbx herdr lab                        put it in your herdr sidebar (done by `new` too)
   sbx layout app --replace             the project's .sandbox/herdr.toml panes, again
-  sbx remote-control lab               Claude Code Remote Control (personal sandboxes only)
-  sbx claude-token                     sign Claude Code in every sandbox in to your
-                                       Claude subscription; again when the token expires
+  sbx remote-control lab               Claude Code Remote Control (agent: --allow-agent)
+  sbx claude-token                     sign every sandbox in to your Claude subscription
   sbx list                             every sandbox
-  sbx snap lab  /  sbx rollback lab    a snapshot, and back to it
+  sbx snap lab [--ram]  /  sbx rollback lab   a snapshot of it and its sidecar, and back
+  sbx publish lab 3000                 a preview of port 3000, behind Cloudflare Access
+  sbx extend lab --days 7              a later expiry (--never: none)
+  sbx autostart lab                    start at host boot, resume its Claude sessions
   sbx rm lab                           destroy it; `sbx gc` destroys expired ones
-  sbx web                              the portal: every sandbox, template, project,
-                                       token, setting and log, in a web page on this Mac
+  sbx web                              the portal: all of sbx, in a web page on this Mac
 
 A PROJECT
   sbx projects                         the projects this Mac has used
@@ -295,21 +330,20 @@ INSIDE A SANDBOX
 
 ON THE PROXMOX HOST
   Three things that are not sandboxes. `sbx setup` made them, and they stay.
-  {gw_ctid} {gw_host:<9}  a small container: the DHCP and DNS server for the
-                  sandboxes, their route to the internet, the firewall that
-                  keeps an agent sandbox off your LAN, and the Tailscale route
-                  that lets your Mac reach them. A sandbox's name comes from
-                  its DHCP request to this container, and from nothing else.
-  sbx-tpl-*       the templates, in the pool {template_pool}: one Ubuntu VM per
-                  definition and version. A sandbox is a linked clone of one,
-                  which is why `sbx new` takes seconds. They never run.
+  {gw_ctid} {gw_host:<9}  a small container: DHCP and DNS for the sandboxes (a name
+                  comes from a DHCP request, nothing else), their route out,
+                  the firewall, and the Tailscale route that reaches them.
+  sbx-tpl-*       the templates, in the pool {template_pool}: one VM per
+                  definition and version (Ubuntu 24.04, or Debian 13 for
+                  `debian` and `sidecar`). A sandbox is a copy of one. They
+                  never run.
   {agent_bridge}, {personal_bridge}  two bridges with no physical port: the agent subnet
                   ({agent_net}.0/24) and the personal subnet ({personal_net}.0/24).
                   The bridge a sandbox sits on IS its profile: the firewall
                   keys on it, and nothing inside a sandbox can change it.
 
 WHERE THINGS ARE
-  {state}/            config.toml, the sandbox key, bindings/, projects.toml
+  {state}/            config.toml, the sandbox key, bindings/, previews.toml, secrets/
   {docs}/
       usage.md         daily use: profiles, ports, Claude, snapshots
       projects.md      recipes, manifests, inputs, git tokens, pane layouts
@@ -351,7 +385,7 @@ def _copy_to_host(cfg: Config, runner: Runner) -> None:
     info(f"copying the scripts and the template definitions to {target}:/root/sbx/")
     runner.run(["ssh", *_host_ssh(cfg), target, "mkdir -p /root/sbx"], capture=False, check=False)
     done = runner.run(["scp", *_host_ssh(cfg), "-q", "-r"]
-                      + [str(REPO_ROOT / d) for d in ("host", "gw", "template", "templates", "sbxlib")]
+                      + [str(REPO_ROOT / d) for d in ("host", "gw", "template", "templates", "sbxlib", "sidecar")]
                       + [f"{target}:/root/sbx/"], capture=False, check=False)
     if done.code != 0:
         raise CommandError(["scp"], done.code, "the copy to the host failed")
@@ -398,8 +432,10 @@ def _project_template(cfg: Config, project: "Project | None", built: dict) -> st
         return project.manifest.template
     if cfg.default_template:
         return cfg.default_template
-    if len(built) == 1:
-        return next(iter(built))
+    # The sidecar template is never a sandbox's template.
+    candidates = [name for name in built if name != cfg.sidecar_template]
+    if len(candidates) == 1:
+        return candidates[0]
     return ""
 
 
@@ -685,7 +721,7 @@ def cmd_projects(args, cfg: Config, runner: Runner, api=None) -> int:
         return cmd_projects(argparse.Namespace(action="list"), cfg, runner, api)
     if action == "rm":
         if projects_mod.forget(args.project):
-            info(f"forgot {args.project}; its bindings file and keychain token are untouched")
+            info(f"forgot {args.project}; its bindings file and stored token are untouched")
             return 0
         raise projects_mod.ProjectError(f"no project named {args.project!r}")
 
@@ -703,8 +739,7 @@ def cmd_projects(args, cfg: Config, runner: Runner, api=None) -> int:
     rows = [("PROJECT", "TOKEN", "CHECKOUT", "SANDBOXES")]
     for name in sorted(entries):
         e = entries[name]
-        token = runner.run(["security", "find-generic-password", "-s", gittoken.keychain_service(name), "-a", "sbx"],
-                           check=False).code == 0
+        token = secretstore.exists(runner, gittoken.keychain_service(name), "sbx")
         checkout = e.checkout.replace(str(Path.home()), "~") if e.checkout else "-"
         if e.checkout and not Path(e.checkout).is_dir():
             checkout += " (gone)"
@@ -722,13 +757,14 @@ def _project_repos(project: Project) -> list[str]:
 
 
 def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
-    project = resolve_project(args.project, args.branch, args.from_path, runner, need_remote=False)
+    # No manifest: for a URL, reading it needs the very token this stores.
+    project = resolve_project(args.project, args.branch, args.from_path, runner, need_remote=False, manifest=False)
     binding = state_dir() / "bindings" / f"{project.name}.toml"
 
     if args.remove:
         gone = gittoken.forget(runner, project.name)
         dropped = gittoken.remove_binding(binding)
-        info(f"{project.name}: keychain item {'removed' if gone else 'was absent'}, "
+        info(f"{project.name}: token in {secretstore.where()} {'removed' if gone else 'was absent'}, "
              f"[git] section {'removed' if dropped else 'was absent'}")
         return 0
 
@@ -736,14 +772,16 @@ def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
     if not repos:
         raise InputError(f"{project.name}: no origin remote, so there is nothing for a token to cover")
 
-    # `--push` alone, with a token in the keychain already, installs that one:
-    # the usual case is a sandbox that exists and needs the token now.
+    # `--push` alone, with a token in the secret store already, installs that
+    # one: the usual case is a sandbox that exists and needs the token now.
     token = gittoken.stored(runner, project.name) if args.push and not args.stdin else ""
     if token:
         info(f"using the token stored for {project.name}; `sbx git-token {args.project} --remove` first to replace it")
     else:
         print(f"project: {project.name}")
         print("the token must cover: " + ", ".join(repos))
+        if project.checkout is None:
+            print("  (from the URL alone: a repository that the recipe adds is checked by `sbx new`)")
         if args.host == "github.com":
             print("make it at github.com > Settings > Developer settings > Fine-grained tokens:")
             print("  Only select repositories (the ones above); Contents: Read, or Read and write to push")
@@ -769,19 +807,26 @@ def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
 
         service = gittoken.store(runner, project.name, token)
         gittoken.write_binding(binding, project.name, args.host, args.username)
-        info(f"stored in the keychain as {service}")
+        info(f"stored in {secretstore.where()} as {service}")
         info(f"wrote [git] in {binding}")
 
     # Into sandboxes that run already, either profile. `sbx new` does this on
     # its own for an agent sandbox; a personal sandbox has the forwarded SSH
     # agent for its clone and for `sbx ssh` only, so a pane or an agent in it
-    # has no git credential until a token is pushed.
+    # has no git credential until a token is pushed. A sandbox with a sidecar
+    # holds only the placeholder: the token goes into the sidecar, never the VM.
     if args.push:
         pve = _pve(cfg, runner, api)
+        sidecars = pve.sidecars()
         for name in args.push:
             box = pve.require(names.hostname(name))
-            _install_git_token(Vm(cfg, runner, box.hostname), args.username, args.host, token)
-            info(f"{box.hostname}: git uses the token for {args.host} now, in every shell")
+            if box.hostname in sidecars:
+                sc = Vm(cfg, runner, box.hostname, port=SIDECAR_SSH_PORT, alias=sidecar_alias(cfg, box.hostname))
+                sc.run("sudo sbx-sidecar-apply --git-token", input=(token + "\n").encode())
+                info(f"{box.hostname}: its sidecar adds the token to git requests now")
+            else:
+                _install_git_token(Vm(cfg, runner, box.hostname), args.username, args.host, token)
+                info(f"{box.hostname}: git uses the token for {args.host} now, in every shell")
     else:
         print(f"an agent sandbox of {project.name} now clones with this token: sbx new <name> --project {args.project}")
         print(f"a sandbox that runs already gets it with: sbx git-token {args.project} --push <name>")
@@ -792,7 +837,7 @@ def cmd_claude_token(args, cfg: Config, runner: Runner, api=None) -> int:
     if args.status:
         stored = bool(claudetoken.get(runner))
         end = claudetoken.expires()
-        print(f"Claude token: {'stored in the keychain' if stored else 'NONE'}"
+        print(f"Claude token: {'stored in ' + secretstore.where() if stored else 'NONE'}"
               + (f", expires {end}" if stored and end else ""))
         if stored and (note := claudetoken.expiry_warning()):
             warn(note)
@@ -802,19 +847,161 @@ def cmd_claude_token(args, cfg: Config, runner: Runner, api=None) -> int:
         if args.sandboxes:
             raise InputError("--remove takes no sandbox names; it acts on every running sandbox")
         gone = claudetoken.forget(runner)
-        info(f"keychain item {'removed' if gone else 'was absent'}")
+        info(f"token in {secretstore.where()} {'removed' if gone else 'was absent'}")
         _each_claude_sandbox(cfg, runner, api, [], f"rm -f {shlex.quote(claudetoken.ENV_FILE)}", "token removed")
         return 0
 
     if args.push:
         token = claudetoken.get(runner)
         if not token:
-            raise InputError("no Claude token in the keychain; run: sbx claude-token")
+            raise InputError(f"no Claude token in {secretstore.where()}; run: sbx claude-token")
     else:
         token = _new_claude_token(args, runner)
         claudetoken.store(runner, token)
-        info(f"stored in the keychain as {claudetoken.SERVICE}; it expires {claudetoken.expires()}")
+        info(f"stored in {secretstore.where()} as {claudetoken.SERVICE}; it expires {claudetoken.expires()}")
     return _each_claude_sandbox(cfg, runner, api, args.sandboxes, None, "token updated", token)
+
+
+CLOUDFLARE_TOKEN_SERVICE = "sbx-cloudflare-token"
+
+
+def cmd_cloudflare_token(args, cfg: Config, runner: Runner, api=None) -> int:
+    conf = state_dir() / "config.toml"
+    if args.remove:
+        gone = secretstore.forget(runner, CLOUDFLARE_TOKEN_SERVICE)
+        hostsetup.set_toml_keys(conf, {"cloudflare_token_command": []})
+        info(f"token in {secretstore.where()} {'removed' if gone else 'was absent'}")
+        return 0
+    if args.stdin:
+        token = sys.stdin.readline().strip()
+    else:
+        if not sys.stdin.isatty():
+            raise InputError("no terminal to ask for the token; pass --stdin and pipe it in")
+        token = getpass.getpass("Cloudflare API token (hidden): ").strip()
+    if not token or any(c.isspace() for c in token):
+        raise InputError("the token is empty or has whitespace in it")
+    secretstore.store(runner, CLOUDFLARE_TOKEN_SERVICE, token)
+    hostsetup.set_toml_keys(conf, {"cloudflare_token_command": secretstore.command(CLOUDFLARE_TOKEN_SERVICE)})
+    info(f"stored in {secretstore.where()} as {CLOUDFLARE_TOKEN_SERVICE}")
+    return 0
+
+
+def cmd_cloudflare_setup(args, cfg: Config, runner: Runner, api=None, cf=None) -> int:
+    """A fresh Cloudflare account, ready for `sbx publish` (sbxlib/cfsetup.py)."""
+    if args.token_guide:
+        print(cfsetup.TOKEN_GUIDE, end="")
+        return 0
+    missing = [o for o, v in (("--account-id", args.account_id), ("--zone", args.zone)) if not v]
+    if missing:
+        raise InputError(f"give {' and '.join(missing)} (or --token-guide first)")
+    session = args.session or cfg.preview_session
+    cfsetup.check_args(args.account_id, args.zone, args.email, session)
+    # The token: never an argument. --stdin, else the environment, else a prompt.
+    if args.stdin:
+        token = sys.stdin.readline().strip()
+    elif os.environ.get(args.token_env):
+        token = os.environ[args.token_env].strip()
+    elif sys.stdin.isatty():
+        token = getpass.getpass("Cloudflare API token (hidden): ").strip()
+    else:
+        raise InputError(f"no token: set {args.token_env}, pass --stdin, or run in a terminal")
+    if not token or any(c.isspace() for c in token):
+        raise InputError("the token is empty or has whitespace in it")
+
+    rep = cfsetup.run(cf or previews_mod.HttpApi(cfg, runner, token=token), args.account_id, args.zone,
+                      args.email, session, dry_run=args.dry_run, access_only=args.access_only)
+    if not args.dry_run:
+        conf = state_dir() / "config.toml"
+        keys: dict = {"preview_zone": args.zone, "cloudflare_account_id": args.account_id}
+        if args.session:
+            keys["preview_session"] = args.session
+        if not args.access_only:
+            secretstore.store(runner, CLOUDFLARE_TOKEN_SERVICE, token)
+            keys["cloudflare_token_command"] = secretstore.command(CLOUDFLARE_TOKEN_SERVICE)
+            rep.add("made", f"the token in {secretstore.where()} as {CLOUDFLARE_TOKEN_SERVICE}")
+        hostsetup.set_toml_keys(conf, keys)
+        path = previews_mod.policies_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(cfsetup.previews_toml(path.read_text() if path.exists() else "", args.email))
+        rep.add("made", f"preview_zone and cloudflare_account_id in {conf}; [policy.me] in {path}")
+    for status, text in rep.lines:
+        print(f"  {status:<5} {text}")
+    if rep.todo:
+        warn("one step is left for the dashboard (todo above)")
+        return 1
+    if not args.dry_run:
+        info("ready: sbx publish <name> <port>" + ("" if not args.access_only else
+             " needs the full token: sbx cloudflare-token"))
+    return 0
+
+
+def _previews(cfg: Config, runner: Runner, cf=None) -> "previews_mod.Previews":
+    return previews_mod.Previews(cfg, cf or previews_mod.HttpApi(cfg, runner))
+
+
+def cmd_publish(args, cfg: Config, runner: Runner, api=None, cf=None) -> int:
+    pve = _pve(cfg, runner, api)
+    box = pve.require(names.hostname(args.name))
+    pv = _previews(cfg, runner, cf)
+    if args.port is None and not args.off:
+        rules = pv.published(box.hostname)
+        if not rules:
+            print(f"{box.hostname} publishes nothing; sbx publish {args.name} <port>")
+        for r in rules:
+            print(f"  https://{r['hostname']}  -> {r['service'].rsplit(':', 1)[-1]}  "
+                  f"(policy: {pv.policy_of(r['hostname'])})")
+        return 0
+    if args.port is not None and not 1 <= args.port <= 65535:
+        raise InputError("the port must be from 1 to 65535")
+    sidecar = pve.sidecars().get(box.hostname)
+    if sidecar is None:
+        raise InputError(f"{box.hostname} has no sidecar; a preview runs its tunnel in the sidecar, "
+                         "so only an agent sandbox with a sidecar can publish")
+    sc = Vm(cfg, runner, box.hostname, port=SIDECAR_SSH_PORT, alias=sidecar_alias(cfg, box.hostname))
+    if args.off:
+        if args.port is None and not args.host:
+            raise InputError("--off needs the port, or --host")
+        fqdn = pv.fqdn(previews_mod.label_for(box.hostname, args.port or 0, args.host))
+        if pv.withdraw(box.hostname, fqdn):
+            sc.run("sudo sbx-sidecar-apply --tunnel-token", input=b"\n")
+            if t := pv.tunnel(box.hostname):
+                pv.delete_tunnel(t["id"])
+            info(f"{fqdn} withdrawn; {box.hostname} publishes nothing now, and its tunnel is gone")
+        else:
+            info(f"{fqdn} withdrawn")
+        return 0
+    # A sidecar from a template before previews has no cloudflared. Ask before
+    # anything is made at Cloudflare, not after.
+    if sc.run("test -x /usr/bin/cloudflared", check=False).code != 0:
+        raise InputError(f"the sidecar of {box.hostname} has no cloudflared: its template is older than previews. "
+                         f"Run `sbx template rebuild {cfg.sidecar_template}`, then make the sandbox again")
+    policies = previews_mod.load_policies()
+    name = args.policy or previews_mod.DEFAULT_POLICY
+    if name not in policies:
+        raise InputError(f"no policy {name!r} in {previews_mod.policies_path()}; it has: " + ", ".join(sorted(policies)))
+    fqdn = pv.fqdn(previews_mod.label_for(box.hostname, args.port, args.host))
+    # With a certificate, the port mirror serves https and redirects http, so
+    # the tunnel speaks https. --plain: a server of its own on 0.0.0.0, no TLS.
+    tls = not args.plain and (state_dir() / "certs" / box.hostname).is_dir()
+    service = f"{'https' if tls else 'http'}://{cfg.sidecar_vm_addr}:{args.port}"
+    token, new = pv.publish(box.hostname, fqdn, service, policies[name], policies, tls=tls)
+    # The connector token goes to the sidecar on stdin: it is in no argv, and
+    # it never enters the sandbox.
+    sc.run("sudo sbx-sidecar-apply --tunnel-token", input=(token + "\n").encode())
+    info(f"https://{fqdn} -> port {args.port} of {box.hostname}, for policy {name!r}"
+         + (" (a new tunnel; the first visit can take a minute)" if new else ""))
+    return 0
+
+
+def _withdraw_previews(cfg: Config, runner: Runner, hostname: str, cf=None) -> None:
+    """sbx rm: what the sandbox published, and its tunnel. Never blocks a removal."""
+    if not (cfg.preview_zone and cfg.cloudflare_token_command):
+        return
+    try:
+        if gone := _previews(cfg, runner, cf).remove_all(hostname):
+            info(f"withdrew the previews of {hostname}: " + ", ".join(gone))
+    except (previews_mod.PreviewError, ConfigError, CommandError) as exc:
+        warn(f"the previews of {hostname} stay at Cloudflare ({exc}); `sbx gc` tries again")
 
 
 def _new_claude_token(args, runner: Runner) -> str:
@@ -844,7 +1031,9 @@ def _each_claude_sandbox(cfg: Config, runner: Runner, api, wanted: list[str], co
     the token file, and in each sandbox that `wanted` names. A sandbox with no
     file was made with --no-claude, or before a token existed; it is left out
     unless it is named."""
-    boxes = _pve(cfg, runner, api).sandboxes()
+    pve = _pve(cfg, runner, api)
+    boxes = pve.sandboxes()
+    sidecars = pve.sidecars()
     named = {names.hostname(n) for n in wanted}
     if unknown := named - {b.hostname for b in boxes}:
         raise PveError("no sandbox named " + ", ".join(sorted(unknown)))
@@ -855,15 +1044,28 @@ def _each_claude_sandbox(cfg: Config, runner: Runner, api, wanted: list[str], co
             stopped.append(box.hostname)
             continue
         vm = Vm(cfg, runner, box.hostname)
+        sc = (Vm(cfg, runner, box.hostname, port=SIDECAR_SSH_PORT, alias=sidecar_alias(cfg, box.hostname))
+              if box.hostname in sidecars else None)
         try:
-            if box.hostname not in named:
-                has = vm.run(f"test -f {q(claudetoken.ENV_FILE)} && echo yes || echo no")
-                if has.stdout.strip() != "yes":
-                    continue
-            if command is None:
-                _install_claude(vm, token)
-            else:
+            # "proxy": the sandbox points at its sidecar, which holds the token.
+            # "direct": the sandbox holds the token. "none": no file.
+            mode = vm.run(f"if grep -q ANTHROPIC_BASE_URL {q(claudetoken.ENV_FILE)} 2>/dev/null; then echo proxy; "
+                          f"elif test -f {q(claudetoken.ENV_FILE)}; then echo direct; else echo none; fi").stdout.strip()
+            if mode == "none" and box.hostname not in named:
+                continue
+            if mode == "none" and sc is not None and cfg.sidecar_claude == "proxy":
+                mode = "proxy"
+                if command is None:
+                    placeholder = sc.run("sudo cat /etc/sbx/sidecar/secret").stdout.strip()
+                    _install_claude_proxy(vm, placeholder)
+            if command is not None:
                 vm.run(command)
+                if mode == "proxy" and sc is not None:
+                    sc.run("sudo sbx-sidecar-apply --claude-token", input=b"\n")
+            elif mode == "proxy" and sc is not None:
+                sc.run("sudo sbx-sidecar-apply --claude-token", input=(token + "\n").encode())
+            else:
+                _install_claude(vm, token)
             info(f"{box.hostname}: {done_text}")
         except (CommandError, VmError):
             failed.append(box.hostname)
@@ -887,20 +1089,25 @@ def _rc_directory(project: Project | None) -> str:
 
 
 def _remote_control_setup(cfg: Config, runner: Runner, vm: Vm, hostname: str, profile: str,
-                          project: Project | None, mode: str) -> bool:
+                          project: Project | None, mode: str, allow_agent: bool = False) -> bool:
     """Sign the sandbox in (one click and one paste, on the Mac) and start the
     server. Returns whether the server runs."""
-    remotecontrol.check_profile(profile, hostname)
+    remotecontrol.check_profile(profile, hostname, allow_agent)
+    if profile != remotecontrol.ALLOWED_PROFILE:
+        warn(f"{hostname} is an {profile} sandbox. Its claude.ai login can make API keys on your "
+             "organization, and the agent in it can read that login. `sbx rm` is the way to take it back")
     directory = _rc_directory(project)
     if not remotecontrol.logged_in(vm):
         if not sys.stdin.isatty():
             warn(f"Remote Control needs a sign-in, which needs a terminal. Later: sbx remote-control {hostname[4:]}")
             return False
         url = remotecontrol.start_login(vm, directory)
-        print("\nRemote Control: sign the sandbox in. A browser opens on this Mac; click Authorize,")
+        print("\nRemote Control: sign the sandbox in. Open the link, click Authorize,")
         print(f"copy the code the page shows, and paste it here.\n  {url}")
-        if runner.run(["open", url], check=False).code != 0:
-            print("  (the browser did not open; use the link above)")
+        # macOS has `open`; a Linux desktop has `xdg-open`; a server has neither.
+        opener = shutil.which("open" if sys.platform == "darwin" else "xdg-open")
+        if opener is None or runner.run([opener, url], check=False).code != 0:
+            print("  (no browser opened here; open the link above yourself)")
         code = getpass.getpass("code (hidden): ").strip()
         remotecontrol.finish_login(vm, code)
         info(f"{hostname} is signed in to claude.ai")
@@ -916,7 +1123,6 @@ def _remote_control_setup(cfg: Config, runner: Runner, vm: Vm, hostname: str, pr
 def cmd_remote_control(args, cfg: Config, runner: Runner, api=None) -> int:
     hostname = names.hostname(args.name)
     box = _pve(cfg, runner, api).require(hostname)
-    remotecontrol.check_profile(box.profile, hostname)
     vm = Vm(cfg, runner, hostname)
     if args.off:
         remotecontrol.disable(vm)
@@ -925,12 +1131,14 @@ def cmd_remote_control(args, cfg: Config, runner: Runner, api=None) -> int:
     if args.status:
         print(f"{hostname}: {remotecontrol.status(vm)}")
         return 0
+    # Stopping and asking need no switch; a sign-in does.
+    remotecontrol.check_profile(box.profile, hostname, args.allow_agent)
     mode = args.mode or _rc_mode(cfg, box.profile) or "acceptEdits"
     project = None
     if box.project:
         known = projects_mod.load().get(box.project)
         project = Project(box.project, known.url if known else "", None, None, None)
-    return 0 if _remote_control_setup(cfg, runner, vm, hostname, box.profile, project, mode) else 1
+    return 0 if _remote_control_setup(cfg, runner, vm, hostname, box.profile, project, mode, args.allow_agent) else 1
 
 
 def _mkcert_root(runner: Runner) -> Path | None:
@@ -963,13 +1171,60 @@ def _install_claude(vm: Vm, token: str) -> None:
     vm.run(claudetoken.SKIP_ONBOARDING)
 
 
+def _install_claude_proxy(vm: Vm, placeholder: str) -> None:
+    """Point Claude Code in the sandbox at its sidecar. The sandbox holds the
+    placeholder only; the sidecar holds the token."""
+    vm.put(claudetoken.proxy_env_file(placeholder, vm.cfg.sidecar_proxy_url), claudetoken.ENV_FILE)
+    vm.run(claudetoken.SKIP_ONBOARDING)
+
+
+def _git_token(cfg: Config, runner: Runner, project: Project) -> tuple[str, str] | None:
+    """(host, token) for an agent sandbox of this project, or None when there
+    is no token and only public repositories can be cloned."""
+    access = _git_access(cfg, _bindings(project))
+    if access is None:
+        return None
+    return access.host, runner.run(access.token_command).stdout.strip()
+
+
+def _provision_sidecar(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostname: str,
+                       secret: str, claude_token: str, git: tuple[str, str] | None) -> Vm:
+    """Reach the new sidecar by its address on the sidecar network and give it
+    the sandbox's policy, the secret and the real credentials, over SSH stdin.
+    The sidecar then registers the sandbox's NAME, so the sandbox itself is
+    reached by name after this."""
+    deadline = time.monotonic() + 240
+    address = None
+    while time.monotonic() < deadline:
+        address = pve.guest_ipv4(node, vmid, prefix=f"{cfg.agent_net}.")
+        if address:
+            break
+        time.sleep(3)
+    if not address:
+        raise VmError(f"the sidecar (VM {vmid}) got no address on the sidecar network in 240 s; "
+                      "open its console in the Proxmox web UI")
+    sc = Vm(cfg, runner, f"{hostname}-sc", address, port=SIDECAR_SSH_PORT, alias=sidecar_alias(cfg, hostname))
+    sc.wait(120.0)
+    sc.run("cloud-init status --wait >/dev/null 2>&1 || true")
+    git_host, git_token = git or ("github.com", "")
+    env = (f"SBX_SIDECAR_LINK={cfg.sidecar_link}\nSBX_AGENT_NET={cfg.agent_net}\n"
+           f"SBX_SANDBOX_HOSTNAME={hostname}\nSBX_SIDECAR_PORTS={cfg.sidecar_ports}\n"
+           f"SBX_CLAUDE_UPSTREAM=https://api.anthropic.com\nSBX_GIT_UPSTREAM=https://{git_host}\n")
+    sc.put(env.encode(), "/etc/sbx/sidecar.env", mode="0644", sudo=True)
+    sc.put((secret + "\n").encode(), "/etc/sbx/sidecar/secret", sudo=True)
+    sc.put(f"claude={claude_token}\ngithub={git_token}\n".encode(), "/etc/sbx/sidecar/tokens", sudo=True)
+    sc.run("sudo sbx-sidecar-apply", capture=False)
+    return sc
+
+
 def _identity_hint(runner: Runner, host: str) -> str:
     """The ssh-add line for the key that the user's own config uses for `host`."""
+    add = "ssh-add --apple-use-keychain" if sys.platform == "darwin" else "ssh-add"
     done = runner.run(["ssh", "-G", host], check=False)
     for line in done.stdout.splitlines():
         if line.lower().startswith("identityfile "):
-            return f"ssh-add --apple-use-keychain {line.split(None, 1)[1]}"
-    return "ssh-add --apple-use-keychain ~/.ssh/<the key for that host>"
+            return f"{add} {line.split(None, 1)[1]}"
+    return f"{add} ~/.ssh/<the key for that host>"
 
 
 def _preflight_git(cfg: Config, runner: Runner, profile: str, project: Project) -> None:
@@ -1010,12 +1265,26 @@ def _preflight_git(cfg: Config, runner: Runner, profile: str, project: Project) 
                          + f"\n  Make one that covers every repository, then: sbx git-token {project.name}")
 
 
-def _git_auth(cfg: Config, runner: Runner, vm: Vm, profile: str, project: Project) -> bool:
+def _git_auth(cfg: Config, runner: Runner, vm: Vm, profile: str, project: Project, placeholder: str = "") -> bool:
     """Returns whether git commands in the VM need the forwarded SSH agent.
-    _preflight_git has already proved that the access works."""
+    _preflight_git has already proved that the access works.
+
+    With a placeholder (a sandbox with a sidecar), git in the VM talks to the
+    sidecar's proxy and presents the placeholder; the sidecar adds the token.
+    The VM then holds no git token at all."""
     if profile == "personal":
         return True
     access = _git_access(cfg, _bindings(project))
+    if placeholder:
+        q = shlex.quote
+        host = access.host if access else "github.com"
+        proxy = f"{cfg.sidecar_proxy_url}/github/"
+        vm.put(f"http://sbx:{placeholder}@{cfg.sidecar_addr}:8080\n".encode(), ".git-credentials")
+        vm.run("git config --global credential.helper store && "
+               f"git config --global url.{q(proxy)}.insteadOf {q(f'https://{host}/')} && "
+               f"git config --global --add url.{q(proxy)}.insteadOf {q(f'git@{host}:')} && "
+               f"git config --global --add url.{q(proxy)}.insteadOf {q(f'ssh://git@{host}/')}")
+        return False
     if access is None:
         return False
     token = runner.run(access.token_command).stdout.strip()
@@ -1123,45 +1392,80 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
     built = pve.templates()
     tpl_name = args.template or _project_template(cfg, project, built)
     if not tpl_name:
-        if not built:
+        others = [n for n in built if n != cfg.sidecar_template]
+        if not others:
             raise PveError("no template is built. Build one: sbx template rebuild <name> "
                            "(`sbx template list` shows the definitions)")
-        raise InputError(f"more than one template is built ({', '.join(built)}); pass --template, "
+        raise InputError(f"more than one template is built ({', '.join(others)}); pass --template, "
                          "set [recipe] template in the project, or set default_template in config.toml")
     template = pve.template(tpl_name)
     if note := _stale_warning(template):
         warn(note)
+    sidecar = cfg.sidecar_for(profile)
+    sc_template = None
+    if sidecar:
+        try:
+            sc_template = pve.template(cfg.sidecar_template)
+        except PveError as exc:
+            raise PveError(f"{exc}\n  Every agent sandbox needs a sidecar. Build the template: "
+                           f"sbx template rebuild {cfg.sidecar_template}  "
+                           "(or set agent_sidecar = false in config.toml)") from None
     if args.gpu and (holder := pve.gpu_holder()):
         raise PveError(f"the GPU is held by VM {holder[0]} ({holder[1]}); run `sbx gpu detach` there first")
 
     ttl = args.ttl if args.ttl is not None else (cfg.agent_ttl_days if profile == "agent" else 0)
     expires = dt.date.today() + dt.timedelta(days=ttl) if ttl else None
     vmid = pve.next_vmid()
+    sc_vmid = pve.next_vmid(start=vmid + 1) if sidecar else 0
+    pubkey = cfg.ssh_key_path.with_suffix(".pub").read_text()
+    known_hosts = str(state_dir() / "known_hosts")
+    # The per-sandbox secret: the sandbox presents it to its sidecar, and to
+    # nothing else. It goes to both over SSH stdin and appears in no command.
+    secret = secrets.token_urlsafe(24) if sidecar else ""
+    vlan = cfg.vlan_for(vmid)
+    if sidecar:
+        info(f"cloning template {sc_template.name} into VM {sc_vmid} ({hostname}-sc, the sidecar; VLAN {vlan})")
+        pve.create_sidecar(sc_template, sc_vmid, hostname, vlan=vlan, pubkey=pubkey)
     info(f"cloning template {template.name} ({template.vm_name}) into VM {vmid} ({hostname}, {profile})")
-    node = pve.create(template, vmid, hostname, profile, cfg.ssh_key_path.with_suffix(".pub").read_text(),
+    node = pve.create(template, vmid, hostname, profile, pubkey,
                       cores=args.cores or cfg.cores, memory_mb=args.memory or cfg.memory_mb,
-                      disk_gb=args.disk, expires=expires, project=project.name if project else "")
+                      disk_gb=args.disk, expires=expires, project=project.name if project else "",
+                      vlan=vlan if sidecar else None,
+                      ipconfig=f"ip={cfg.sidecar_vm_addr}/30,gw={cfg.sidecar_addr}" if sidecar else "ip=dhcp",
+                      nameserver=cfg.dns_server if sidecar else "", searchdomain=cfg.domain if sidecar else "")
     if args.gpu:
         pve.gpu_attach(node, vmid)
+    if sidecar:
+        pve.start(node, sc_vmid)
     pve.start(node, vmid)
 
     # A reused name must not trip over the previous VM's host key.
-    runner.run(["ssh-keygen", "-R", cfg.fqdn(hostname), "-f", str(state_dir() / "known_hosts")], check=False)
+    runner.run(["ssh-keygen", "-R", cfg.fqdn(hostname), "-f", known_hosts], check=False)
+    if sidecar:
+        runner.run(["ssh-keygen", "-R", sidecar_alias(cfg, hostname), "-f", known_hosts], check=False)
+        info("waiting for the sidecar")
+        _provision_sidecar(cfg, runner, pve, node, sc_vmid, hostname, secret,
+                           claude if cfg.sidecar_claude == "proxy" else "",
+                           _git_token(cfg, runner, project) if project is not None else None)
 
     info("waiting for the sandbox")
-    vm = _connect(cfg, runner, pve, node, vmid, hostname)
+    vm = _connect(cfg, runner, pve, node, vmid, hostname, by_name_only=sidecar)
     vm.run("cloud-init status --wait >/dev/null 2>&1 || true")
     _refresh_shell_files(vm)
 
     https = _install_cert(cfg, runner, vm)
     if claude:
         # Before the recipe and the 'clean' snapshot: a rollback keeps the sign-in.
-        _install_claude(vm, claude)
-        info("Claude Code is signed in to your Claude subscription")
+        if sidecar and cfg.sidecar_claude == "proxy":
+            _install_claude_proxy(vm, secret)
+            info("Claude Code goes through the sidecar; the token stays there")
+        else:
+            _install_claude(vm, claude)
+            info("Claude Code is signed in to your Claude subscription")
     code = 0
     if project is not None:
         try:
-            code = _setup_project(vm, project, decisions, _git_auth(cfg, runner, vm, profile, project), profile)
+            code = _setup_project(vm, project, decisions, _git_auth(cfg, runner, vm, profile, project, secret), profile)
         except (CommandError, VmError) as exc:
             # The VM exists; a bare error would leave the user with a dead end.
             raise VmError(f"{exc}\n  The sandbox {hostname} is up without its project. "
@@ -1173,6 +1477,9 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
         # After the recipe, so a rollback returns to a VM that is ready for work.
         info("taking the 'clean' snapshot")
         pve.snapshot(node, vmid, "clean")
+        if sidecar:
+            # The pair, as `sbx snap` takes it: a rollback to clean returns both.
+            pve.snapshot(node, sc_vmid, "clean")
 
     if not args.no_herdr:
         _herdr_add(runner, hostname)
@@ -1211,7 +1518,8 @@ def _refresh_shell_files(vm: Vm) -> None:
            f"else mv {lib}.new {lib} && systemctl restart sbx-mirror; fi'", check=False)
 
 
-def _connect(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostname: str) -> Vm:
+def _connect(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostname: str,
+             by_name_only: bool = False) -> Vm:
     """By name as soon as dnsmasq has the name; by address until then.
 
     The name comes from the DHCP request that carries the final hostname, which
@@ -1219,6 +1527,10 @@ def _connect(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostna
     first, the sandbox is asked for that lease at once. The Mac's own resolver
     is asked only AFTER dnsmasq has the name: an earlier query would plant a
     negative answer that the Mac keeps for about 75 s.
+
+    A sandbox with a sidecar has no address the Mac can reach: its name is
+    registered by the sidecar, and resolves to the sidecar, which translates
+    port 22 to the VM. So that sandbox is reached by name only.
     """
     deadline = time.monotonic() + 240
     fqdn = cfg.fqdn(hostname)
@@ -1235,6 +1547,9 @@ def _connect(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostna
                     return vm
                 time.sleep(3)
             break
+        if by_name_only:
+            time.sleep(3)
+            continue
         if by_address is None and (address := pve.guest_ipv4(node, vmid)):
             by_address = Vm(cfg, runner, hostname, address)
         if by_address is not None and not kicked:
@@ -1246,6 +1561,9 @@ def _connect(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostna
             except VmError:
                 pass
         time.sleep(3)
+    if by_name_only:
+        raise VmError(f"{fqdn} did not appear in DNS in 240 s. The sidecar registers that name; look at it: "
+                      f"sbx ssh {hostname[4:]} --sidecar -- sudo journalctl -u sbx-sidecar-apply -n 30")
     if by_address is None:
         raise VmError(f"VM {vmid} got no address in 240 s; open its console in the Proxmox web UI")
     warn(f"{fqdn} does not resolve on this Mac; using {by_address.address}. "
@@ -1255,12 +1573,12 @@ def _connect(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostna
 
 def cmd_list(args, cfg: Config, runner: Runner, api=None) -> int:
     today = dt.date.today()
-    rows = [("NAME", "PROFILE", "TEMPLATE", "PROJECT", "STATUS", "VMID", "EXPIRES", "ADDRESS")]
+    rows = [("NAME", "PROFILE", "TEMPLATE", "PROJECT", "STATUS", "VMID", "EXPIRES", "BOOT", "ADDRESS")]
     for box in _pve(cfg, runner, api).sandboxes():
         exp = box.expires
         rows.append((box.hostname, box.profile, box.template or "-", box.project or "-", box.status, str(box.vmid),
                      "-" if exp is None else f"{exp}{' (EXPIRED)' if exp < today else ''}",
-                     cfg.fqdn(box.hostname)))
+                     "yes" if box.autostart else "-", cfg.fqdn(box.hostname)))
     widths = [max(len(r[c]) for r in rows) for c in range(len(rows[0]))]
     for r in rows:
         print("  ".join(cell.ljust(w) for cell, w in zip(r, widths)).rstrip())
@@ -1271,10 +1589,18 @@ def cmd_list(args, cfg: Config, runner: Runner, api=None) -> int:
 
 def cmd_ssh(args, cfg: Config, runner: Runner, api=None) -> int:
     hostname = names.hostname(args.name)
-    box = _pve(cfg, runner, api).require(hostname)
-    # The agent is forwarded to a personal sandbox only. A full-permission
-    # agent could use the forwarded key for as long as the session lasts.
-    argv = Vm(cfg, runner, hostname).ssh_argv(forward_agent=box.profile == "personal", tty=not args.command)
+    pve = _pve(cfg, runner, api)
+    box = pve.require(hostname)
+    if args.sidecar:
+        if hostname not in pve.sidecars():
+            raise PveError(f"{hostname} has no sidecar")
+        # The sidecar answers at the sandbox's name, on its own port.
+        vm = Vm(cfg, runner, hostname, port=SIDECAR_SSH_PORT, alias=sidecar_alias(cfg, hostname))
+        argv = vm.ssh_argv(tty=not args.command)
+    else:
+        # The agent is forwarded to a personal sandbox only. A full-permission
+        # agent could use the forwarded key for as long as the session lasts.
+        argv = Vm(cfg, runner, hostname).ssh_argv(forward_agent=box.profile == "personal", tty=not args.command)
     # Joined with spaces, as ssh itself does: `sbx ssh x -- ls code` runs
     # `ls code`, and a quoted 'a; b' stays one argument that the remote shell
     # splits. shlex.join would turn that into one word, a command not found.
@@ -1367,28 +1693,81 @@ def cmd_herdr(args, cfg: Config, runner: Runner, api=None) -> int:
 
 
 def cmd_snap(args, cfg: Config, runner: Runner, api=None) -> int:
+    """The sandbox and its sidecar, with one label: the sidecar holds the
+    sandbox's network and credentials, so the two only make sense together.
+    Both keep running."""
     pve = _pve(cfg, runner, api)
     box = pve.require(names.hostname(args.name))
-    pve.snapshot(box.node, box.vmid, args.label)
-    info(f"snapshot '{args.label}' taken")
+    sidecar = pve.sidecars().get(box.hostname)
+    for vm in [box] + ([sidecar] if sidecar else []):
+        pve.snapshot(vm.node, vm.vmid, args.label, ram=args.ram)
+    what = f"{box.hostname}" + (" and its sidecar" if sidecar else "")
+    info(f"snapshot '{args.label}' of {what} taken" + (", with RAM" if args.ram else ""))
     return 0
 
 
 def cmd_rollback(args, cfg: Config, runner: Runner, api=None) -> int:
     pve = _pve(cfg, runner, api)
     box = pve.require(names.hostname(args.name))
+    # The sidecar first: the sandbox's network runs through it. A sidecar
+    # with no snapshot of that label (made before snap covered sidecars)
+    # keeps its state.
+    if sidecar := pve.sidecars().get(box.hostname):
+        try:
+            pve.rollback(sidecar.node, sidecar.vmid, args.label)
+        except PveError as exc:
+            warn(f"the sidecar of {box.hostname} stays as it is: {exc}")
     pve.rollback(box.node, box.vmid, args.label)
     info(f"rolled back to '{args.label}'")
+    return 0
+
+
+def cmd_autostart(args, cfg: Config, runner: Runner, api=None) -> int:
+    """Start at boot, and resume the Claude Code sessions that were live.
+    Config and files only: nothing running is stopped or restarted."""
+    pve = _pve(cfg, runner, api)
+    box = pve.require(names.hostname(args.name))
+    vm = Vm(cfg, runner, box.hostname)
+    if args.status:
+        recorded, live, logtail = sessions_mod.status(vm)
+        live_ids = {s["sessionId"] for s in live}
+        print(f"{box.hostname}: start at boot {'on' if box.autostart else 'off'}")
+        print(f"sessions to resume after a reboot ({len(recorded)}):")
+        for s in recorded:
+            print(f"  {s['sessionId'][:8]}  {s['name'] or '-':<24} {s['cwd']}"
+                  f"  {'live' if s['sessionId'] in live_ids else 'not running'}")
+        if logtail.strip():
+            print("last resume:\n" + "\n".join("  " + line for line in logtail.strip().splitlines()))
+        return 0
+    if args.off:
+        pve.set_autostart(box, False)
+        sessions_mod.disable(vm)
+        info(f"{box.hostname} and its sidecar no longer start at boot; its sessions are not resumed")
+        return 0
+    pve.set_autostart(box, True)
+    sessions_mod.enable(vm)
+    info(f"{box.hostname} and its sidecar start at boot (after the gateway), and the Claude Code sessions "
+         f"live at a reboot are resumed. See them: sbx autostart {args.name} --status")
     return 0
 
 
 def _remove(cfg: Config, runner: Runner, pve: Pve, box) -> None:
     info(f"destroying {box.hostname} (VM {box.vmid}) and its snapshots")
     pve.destroy(box.node, box.vmid)
-    runner.run(["ssh-keygen", "-R", cfg.fqdn(box.hostname), "-f", str(state_dir() / "known_hosts")], check=False)
+    known_hosts = str(state_dir() / "known_hosts")
+    runner.run(["ssh-keygen", "-R", cfg.fqdn(box.hostname), "-f", known_hosts], check=False)
+    if sc := pve.sidecars().get(box.hostname):
+        _withdraw_previews(cfg, runner, box.hostname)
+        _remove_sidecar(cfg, runner, pve, box.hostname, sc)
     shutil.rmtree(state_dir() / "certs" / box.hostname, ignore_errors=True)
     if herdr_mod.remove(runner, box.hostname):
         info(f"{box.hostname} left your herdr sidebar")
+
+
+def _remove_sidecar(cfg: Config, runner: Runner, pve: Pve, hostname: str, sc) -> None:
+    info(f"destroying the sidecar of {hostname} (VM {sc.vmid})")
+    pve.destroy(sc.node, sc.vmid)
+    runner.run(["ssh-keygen", "-R", sidecar_alias(cfg, hostname), "-f", str(state_dir() / "known_hosts")], check=False)
 
 
 def _confirm(question: str, yes: bool) -> bool:
@@ -1400,6 +1779,24 @@ def _confirm(question: str, yes: bool) -> bool:
         # No terminal to answer on: that is a no, not a traceback.
         print("\nno answer: stopped (pass -y to proceed without a question)")
         return False
+
+
+def cmd_extend(args, cfg: Config, runner: Runner, api=None) -> int:
+    pve = _pve(cfg, runner, api)
+    box = pve.require(names.hostname(args.name))
+    if args.never:
+        pve.set_expiry(box, None)
+        info(f"{box.hostname} never expires now; `sbx gc` leaves it alone")
+        return 0
+    if args.days is None or args.days < 1:
+        raise InputError("give --days N (1 or more), or --never")
+    # From today, or from the current expiry if that is later: extending
+    # never shortens.
+    start = max(dt.date.today(), box.expires or dt.date.today())
+    expires = start + dt.timedelta(days=args.days)
+    pve.set_expiry(box, expires)
+    info(f"{box.hostname} expires {expires}")
+    return 0
 
 
 def cmd_rm(args, cfg: Config, runner: Runner, api=None) -> int:
@@ -1414,16 +1811,38 @@ def cmd_rm(args, cfg: Config, runner: Runner, api=None) -> int:
 def cmd_gc(args, cfg: Config, runner: Runner, api=None) -> int:
     pve = _pve(cfg, runner, api)
     today = dt.date.today()
-    expired = [b for b in pve.sandboxes() if b.expires and b.expires < today]
-    if not expired:
+    boxes = pve.sandboxes()
+    expired = [b for b in boxes if b.expires and b.expires < today]
+    # A sidecar whose sandbox is gone (a removal that stopped halfway).
+    names_ = {b.hostname for b in boxes}
+    orphans = {h: s for h, s in pve.sidecars().items() if h not in names_}
+    # A tunnel whose sandbox is gone (a removal that could not reach Cloudflare).
+    stray = []
+    if cfg.preview_zone and cfg.cloudflare_token_command:
+        try:
+            pv = _previews(cfg, runner)
+            stray = [t for t in pv.tunnels() if t["name"] not in names_]
+        except (previews_mod.PreviewError, ConfigError, CommandError) as exc:
+            warn(f"cannot list the preview tunnels ({exc})")
+    if stray:
+        for t in stray:
+            print(f"  preview tunnel {t['name']}, whose sandbox is gone")
+        if _confirm(f"Withdraw {len(stray)} tunnel(s) and their previews?", args.yes):
+            for t in stray:
+                pv.remove_all(t["name"], t)
+    if not expired and not orphans:
         print("no expired sandbox")
         return 0
     for box in expired:
         print(f"  {box.hostname}  expired {box.expires}")
-    if not _confirm(f"Destroy {len(expired)} sandbox(es)?", args.yes):
+    for h, s in orphans.items():
+        print(f"  {s.hostname}  (VM {s.vmid}) the sidecar of {h}, which is gone")
+    if not _confirm(f"Destroy {len(expired) + len(orphans)} VM(s)?", args.yes):
         return 1
     for box in expired:
         _remove(cfg, runner, pve, box)
+    for h, s in orphans.items():
+        _remove_sidecar(cfg, runner, pve, h, s)
     return 0
 
 
@@ -1547,7 +1966,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_rm.add_argument("project", help="the project name")
     s.set_defaults(fn=cmd_projects)
 
-    s = sub.add_parser("git-token", help="store a project's git token in the keychain and bind it")
+    s = sub.add_parser("git-token", help="store a project's git token (keychain, or a private file) and bind it")
     project_opts(s, required=True)
     s.add_argument("--host", default="github.com", help="the git host the token is for")
     s.add_argument("--username", default="x-access-token", help="the user name sent with the token")
@@ -1556,7 +1975,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--remove", action="store_true", help="forget the token and the binding")
     s.add_argument("--push", action="append", default=[], metavar="NAME",
                    help="also install the token into this running sandbox (repeatable); "
-                        "with a token in the keychain already, install that one")
+                        "with a token in the secret store already, install that one")
     s.set_defaults(fn=cmd_git_token)
 
     s = sub.add_parser("claude-token", help="sign Claude Code in every sandbox in to your Claude subscription")
@@ -1568,6 +1987,36 @@ def build_parser() -> argparse.ArgumentParser:
     how.add_argument("--status", action="store_true", help="show whether a token is stored, and its expiry")
     how.add_argument("--remove", action="store_true", help="forget the token, and delete it from every sandbox")
     s.set_defaults(fn=cmd_claude_token)
+
+    s = sub.add_parser("cloudflare-token", help="store the Cloudflare API token that sbx publish uses")
+    s.add_argument("--stdin", action="store_true", help="read the token from stdin instead of a hidden prompt")
+    s.add_argument("--remove", action="store_true", help="forget the token")
+    s.set_defaults(fn=cmd_cloudflare_token)
+
+    s = sub.add_parser("cloudflare-setup", help="make a fresh Cloudflare account ready for sbx publish")
+    s.add_argument("--account-id", metavar="ID", help="the Cloudflare account ID (32 hex characters)")
+    s.add_argument("--zone", metavar="DOMAIN", help="the preview domain, on that account and active")
+    s.add_argument("--email", action="append", default=[], metavar="ADDRESS",
+                   help="who may open a preview: the policy 'me' (repeatable)")
+    s.add_argument("--session", metavar="HOURS", help="how long a sign-in lasts, e.g. 336h (default: preview_session)")
+    s.add_argument("--token-env", default="CLOUDFLARE_API_TOKEN", metavar="VAR",
+                   help="the environment variable that holds the token (default: CLOUDFLARE_API_TOKEN)")
+    s.add_argument("--stdin", action="store_true", help="read the token from stdin")
+    s.add_argument("--access-only", action="store_true",
+                   help="the token may manage Access only: update the policy, store no token")
+    s.add_argument("--dry-run", action="store_true", help="check, and show what would be made")
+    s.add_argument("--token-guide", action="store_true", help="how to make the API token, and print nothing else")
+    s.set_defaults(fn=cmd_cloudflare_setup)
+
+    s = sub.add_parser("publish", help="a sandbox's port at a public hostname, behind Cloudflare Access")
+    s.add_argument("name")
+    s.add_argument("port", nargs="?", type=int, help="the port in the sandbox (none: list what is published)")
+    s.add_argument("--policy", metavar="NAME", help="a policy of previews.toml (default: me)")
+    s.add_argument("--host", metavar="LABEL", help="the hostname label (default: <name>-<port>)")
+    s.add_argument("--plain", action="store_true",
+                   help="the server speaks plain http on 0.0.0.0 (default: https when the sandbox has a certificate)")
+    s.add_argument("--off", action="store_true", help="withdraw it")
+    s.set_defaults(fn=cmd_publish)
 
     s = sub.add_parser("new", help="make a sandbox")
     s.add_argument("name")
@@ -1596,6 +2045,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--mode", metavar="MODE", help="permission mode of the sessions (acceptEdits, bypassPermissions, ...)")
     s.add_argument("--off", action="store_true", help="stop and disable the server")
     s.add_argument("--status", action="store_true", help="the server's state")
+    s.add_argument("--allow-agent", action="store_true",
+                   help="sign an AGENT sandbox in too: its login can make API keys on your organization")
     s.set_defaults(fn=cmd_remote_control)
 
     s = sub.add_parser("list", help="every sandbox")
@@ -1603,6 +2054,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("ssh", help="open a shell, or run a command after --")
     s.add_argument("name")
+    s.add_argument("--sidecar", action="store_true", help="the sandbox's sidecar instead of the sandbox")
     s.add_argument("command", nargs="*")
     s.set_defaults(fn=cmd_ssh)
 
@@ -1617,11 +2069,29 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-run", action="store_true", help="type each command, do not start it")
     s.set_defaults(fn=cmd_layout)
 
-    for name, fn, text in (("snap", cmd_snap, "take a snapshot"), ("rollback", cmd_rollback, "return to a snapshot")):
+    for name, fn, text in (("snap", cmd_snap, "take a snapshot of a sandbox and its sidecar"),
+                           ("rollback", cmd_rollback, "return a sandbox and its sidecar to a snapshot")):
         s = sub.add_parser(name, help=text)
         s.add_argument("name")
         s.add_argument("label", nargs="?", default="clean")
+        if name == "snap":
+            s.add_argument("--ram", action="store_true",
+                           help="save the memory too: a rollback resumes the VMs as they were")
         s.set_defaults(fn=fn)
+
+    s = sub.add_parser("autostart", help="start a sandbox at boot and resume its Claude Code sessions")
+    s.add_argument("name")
+    how = s.add_mutually_exclusive_group()
+    how.add_argument("--off", action="store_true", help="no start at boot, no resume")
+    how.add_argument("--status", action="store_true", help="whether it starts at boot, and the sessions it would resume")
+    s.set_defaults(fn=cmd_autostart)
+
+    s = sub.add_parser("extend", help="move a sandbox's expiry later, or remove it")
+    s.add_argument("name")
+    how = s.add_mutually_exclusive_group(required=True)
+    how.add_argument("--days", type=int, metavar="N", help="N more days, from today or the current expiry")
+    how.add_argument("--never", action="store_true", help="no expiry: `sbx gc` never removes it")
+    s.set_defaults(fn=cmd_extend)
 
     s = sub.add_parser("rm", help="destroy a sandbox and its snapshots")
     s.add_argument("name")
@@ -1657,7 +2127,7 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, api=None) 
         cfg = load_config()
         return args.fn(args, cfg, runner or Runner(verbose=args.verbose), api) or 0
     except (ConfigError, ManifestError, InputError, names.NameError_, PveError, VmError, CommandError,
-            projects_mod.ProjectError, templates_mod.TemplateError) as exc:
+            projects_mod.ProjectError, templates_mod.TemplateError, previews_mod.PreviewError, cfsetup.SetupError) as exc:
         print(f"sbx: error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

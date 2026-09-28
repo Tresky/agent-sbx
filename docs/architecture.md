@@ -8,22 +8,67 @@ For the security view of the same design, read [security.md](security.md).
 
 ## The shape of the system
 
-```
-                 your Mac
-                 sbx CLI · herdr · browser · ssh
-                          │
-                          │  Tailscale: a subnet route to the two sandbox
-                          │  subnets, and split DNS for <domain>
-                          ▼
-   Proxmox host ──── sbx-gw (container) ────── lan0: your LAN, the internet
-                       │            │
-                  sbxa0 <agent>.1   sbxp0 <personal>.1
-                       │            │
-                  agent bridge      personal bridge        (no physical port)
-                       │            │
-                agent sandboxes   personal sandboxes        (linked clones)
-                       ▲
-           the templates (sbx-tpl-<name>-<date>)
+```mermaid
+flowchart TB
+    tailnet{{"🔒 tailnet<br/><small>your devices</small>"}}
+    lanrouter["🏠 LAN router → internet"]
+
+    subgraph gwbox["sbx-gw · unprivileged container · starts first at boot"]
+        direction LR
+        ts0["tailscale0"]
+        lan0["lan0<br/><small>DHCP from your LAN</small>"]
+        sbxa0["sbxa0<br/><small>10.77.0.1/24</small>"]
+        sbxp0["sbxp0<br/><small>10.78.0.1/24</small>"]
+    end
+
+    subgraph vmbr77["vmbr77 · agent bridge · VLAN-aware · no host address"]
+        direction TB
+        subgraph untagged["untagged: the sidecar network"]
+            direction LR
+            sc1net["sidecar A · net1<br/><small>10.77.0.x · DHCP</small>"]
+            sc2net["sidecar B · net1<br/><small>10.77.0.y · DHCP</small>"]
+        end
+        subgraph vlan2["VLAN 2 · pair A only"]
+            direction LR
+            sc1wire["sidecar A · net0<br/><small>10.79.0.1/30</small>"]
+            a1["🤖 sandbox A<br/><small>10.79.0.2/30 · static</small>"]
+        end
+        subgraph vlan3["VLAN 3 · pair B only"]
+            direction LR
+            sc2wire["sidecar B · net0<br/><small>10.79.0.1/30</small>"]
+            a2["🤖 sandbox B<br/><small>10.79.0.2/30 · static</small>"]
+        end
+    end
+
+    subgraph vmbr78["vmbr78 · personal bridge · no host address"]
+        p1["👤 personal sandbox<br/><small>10.78.0.z · DHCP</small>"]
+    end
+
+    tailnet --- ts0
+    lan0 --- lanrouter
+    sbxa0 --- sc1net & sc2net
+    sbxp0 --- p1
+    sc1wire --- a1
+    sc2wire --- a2
+    sc1net -. "same VM" .- sc1wire
+    sc2net -. "same VM" .- sc2wire
+
+    classDef infra fill:#e2e8f0,stroke:#334155,color:#0f172a
+    classDef guard fill:#dcfce7,stroke:#15803d,color:#0f172a
+    classDef untrusted fill:#fef3c7,stroke:#b45309,color:#0f172a
+    classDef personalc fill:#ede9fe,stroke:#6d28d9,color:#0f172a
+    classDef outside fill:#f8fafc,stroke:#64748b,color:#0f172a,stroke-dasharray:4 3
+    class ts0,lan0,sbxa0,sbxp0 infra
+    class sc1net,sc2net,sc1wire,sc2wire guard
+    class a1,a2 untrusted
+    class p1 personalc
+    class tailnet,lanrouter outside
+    style gwbox fill:#f1f5f9,stroke:#334155,color:#0f172a
+    style vmbr77 fill:#fffbeb,stroke:#b45309,color:#0f172a
+    style vmbr78 fill:#f5f3ff,stroke:#6d28d9,color:#0f172a
+    style untagged fill:#f0fdf4,stroke:#15803d,color:#0f172a,stroke-dasharray:5 3
+    style vlan2 fill:#fefce8,stroke:#ca8a04,color:#0f172a,stroke-dasharray:5 3
+    style vlan3 fill:#fefce8,stroke:#ca8a04,color:#0f172a,stroke-dasharray:5 3
 ```
 
 Three things on the host are not sandboxes. `sbx setup` makes them one time:
@@ -31,8 +76,8 @@ Three things on the host are not sandboxes. `sbx setup` makes them one time:
 | Thing | What it is |
 |---|---|
 | `sbx-gw`, one unprivileged container | The DHCP and DNS server of the sandboxes, their NAT route to the internet, the firewall, and the Tailscale subnet router. It runs only dnsmasq, nftables and Tailscale, and installs security updates by itself. |
-| The templates, `sbx-tpl-<name>-<date>` | One Ubuntu 24.04 VM for each template definition and each version, converted to a Proxmox template, in its own pool. A sandbox is a linked clone of one. |
-| Two bridges | Linux bridges with no physical port. The host holds no address on them, so a sandbox cannot reach the hypervisor. |
+| The templates, `sbx-tpl-<name>-<date>` | One VM for each template definition and each version (Ubuntu 24.04, or the definition's `image_url`: Debian 13 for `debian` and `sidecar`), converted to a Proxmox template, in its own pool. A sandbox is a copy of one: sbx asks Proxmox for its default clone, which on the reference host (LVM-thin) is a full copy. |
+| Two bridges | Linux bridges with no physical port. The host holds no address on them, so a sandbox cannot reach the hypervisor. The agent bridge is VLAN-aware: each agent sandbox and its sidecar share a VLAN of their own. |
 
 The `sbx` command on the Mac makes and destroys everything else. The default
 numbers are in [reference.md](reference.md): subnets `10.77.0.0/24` and
@@ -67,6 +112,96 @@ range or a MAC prefix would give no protection.
 The API token may attach a card to the two sandbox bridges only, so even the
 CLI cannot put a sandbox on the LAN bridge.
 
+## The sidecar: one agent, one wire, one trusted neighbour
+
+An agent sandbox does not sit on the agent bridge alone. The bridge is
+VLAN-aware (`host/10-bridges.sh`), and `sbx new` gives the sandbox's only
+network card a tag of its own: `2 + (vmid - vmid_min)`, because a VLAN id
+stops at 4094 and a sandbox id starts at 9100 (`Config.vlan_for`). Beside it, `sbx new` clones a **sidecar** from
+the `sidecar` template (`templates/sidecar.toml`, `bare = true`, Debian 13:
+nftables, one Python service and `cloudflared`, none of the core). The sidecar's `net0` carries the same
+tag, with the wire address `<sidecar_link>.1/30`; the sandbox has
+`<sidecar_link>.2/30` from cloud-init, static, with the sidecar as its router
+and the gateway as its resolver. The sidecar's `net1` sits untagged on the
+bridge, where the gateway routes, and takes an address from dnsmasq. Every
+pair uses the same /30, because no two pairs share a segment. The tag is
+applied on the host side of the tap, so root in the VM cannot move it.
+
+**What the sidecar does** (`sidecar/`):
+
+- `nftables.conf.tmpl`, rendered by `sbx-sidecar-apply` with the two
+  interface names it finds: from the sandbox, the two services (8080, 8081),
+  a ping, DNS to the gateway, and the internet, nothing private; from the
+  shared network, the gateway side only, never another sidecar. Port 22 of the
+  sidecar's address is translated to the VM; with `sidecar_ports = open` so is
+  1024 to 32767, so the mirror's ports stay direct. With `ask`, a port is
+  translated once it is in the nftables set `approved`.
+- `sidecar.py`: the credential proxy on the wire (`8080`): the sandbox
+  presents its placeholder (bearer, `x-api-key`, or the basic-auth password
+  that git sends); the sidecar swaps in the real token and forwards. A
+  refusal is a 401 with `WWW-Authenticate: Basic`: git asks first with no
+  credential and sends its stored one only after a 401 that names a scheme.
+  The expose API (`8081`, on both sides): the sandbox asks for a port; only
+  the net side may approve, which adds the port to the set and to
+  `/etc/sbx/sidecar/approved`, which the service opens again when it starts.
+- `sbx-sidecar-apply`: renders the firewall from `/etc/sbx/sidecar.env`,
+  sets the hostname to the SANDBOX's name and asks for the lease again, so
+  dnsmasq maps the sandbox's name to the sidecar. It runs after cloud-init on
+  each boot, because cloud-init sets the VM's own name back, and then
+  restarts the service. `--claude-token` and `--tunnel-token` replace one
+  credential from stdin.
+
+**The credential proxy, for a git clone:**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    box rgba(245,158,11,0.15) agent sandbox
+        participant git as git
+    end
+    box rgba(34,197,94,0.15) sidecar
+        participant p as 🛡️ proxy :8080
+    end
+    box rgba(100,116,139,0.12) internet
+        participant gh as GitHub
+    end
+    Note over git: ~/.git-credentials holds<br/>sbx:<placeholder>@sidecar only
+    git->>p: GET /github/org/repo/info/refs (no credential)
+    p-->>git: 401 + WWW-Authenticate: Basic
+    git->>p: GET … with basic auth sbx:<placeholder>
+    alt the placeholder is this sandbox's
+        p->>gh: GET /org/repo/info/refs<br/>basic auth x-access-token:<real token>
+        gh-->>p: 200 refs
+        p-->>git: 200 refs
+    else anything else
+        p-->>git: 401 · nothing goes upstream
+    end
+    Note over p,gh: The real token lives only in the sidecar.<br/>Claude calls work the same way:<br/>placeholder in → real bearer token out.
+```
+
+**Why the sidecar is a VM, not a container.** A container would need a shell
+on the host to provision it (`pct exec`), which the token does not have. A VM
+gets its SSH key through cloud-init from the token, the guest agent reports
+its address, and the whole template machinery applies. Its sshd moves to 2222,
+since 22 is the sandbox's; the CLI keys its host key under
+`sidecar.<fqdn>` (`vm.py`).
+
+**What the token needs.** Nothing new: `VM.Config.Network` sets the tag, the
+bridge ACL covers a VLAN on that bridge, and the sidecar template sits in the
+templates pool. `_project_template` never counts the sidecar template as a
+sandbox's template.
+
+**The trap.** Proxmox's own "isolate ports" VNet option would have done the
+VLAN's job, but it isolates a container's port too, and the gateway is a
+container: every VM would lose its route. The VLAN per pair needs no such
+option.
+
+`tests/run-sidecar-test.sh` builds the whole thing in network namespaces and
+proves each refusal with a control; `tests/test_sidecar.py` drives the
+handlers with in-memory sockets. The sidecar's code comes from its template
+only: a fix under `sidecar/` reaches a sandbox after
+`sbx template rebuild sidecar` and a new sandbox.
+
 ## Names, with no configuration
 
 A sandbox gets its address and its name in one step, from one program:
@@ -84,6 +219,31 @@ A sandbox gets its address and its name in one step, from one program:
 The DHCP request is the registration. No record is written, and no address is
 static.
 
+```mermaid
+sequenceDiagram
+    autonumber
+    box rgba(245,158,11,0.15) a new VM
+        participant vm as sandbox or sidecar
+    end
+    box rgba(100,116,139,0.15) sbx-gw
+        participant dns as dnsmasq · DHCP + DNS
+    end
+    box rgba(59,130,246,0.15) your machine
+        participant mac as browser · ssh · sbx
+    end
+    vm->>dns: DHCP request, host name "sbx-lab"
+    dns-->>vm: address + one-hour lease
+    Note over dns: the lease IS the DNS record:<br/>sbx-lab.sbx.internal → that address
+    mac->>dns: sbx-lab.sbx.internal? (Tailscale split DNS)
+    dns-->>mac: the address
+    Note over vm,mac: No record is written or removed. A removed VM's name<br/>ends with its lease, and a new VM of that name takes it at once.<br/>An agent sandbox's name is answered by its SIDECAR's request.
+```
+
+An agent sandbox with a sidecar has a static wire address and no path to the
+gateway's DHCP. Its sidecar asks for its own lease under the SANDBOX's name
+(`sbx-sidecar-apply`), so the name maps to the sidecar, which passes port 22
+and the forwarded ports to the VM.
+
 **Why not mDNS, and why `.internal`.** The first design used `.local` and mDNS,
 so that no DNS server was needed. Two facts ended it: macOS may try unicast
 DNS first for a `.local` name with two labels, and mDNS is link-local, which
@@ -91,7 +251,7 @@ would force the sandboxes onto the LAN segment. `.internal` is reserved for
 private use. `.local` cannot work with a DNS server at all, because macOS sends
 every `.local` name to mDNS.
 
-**The first DHCP request carries `ubuntu`,** the image's own host name,
+**The first DHCP request carries the image's own host name** (`ubuntu` on the Ubuntu image),
 because it leaves before cloud-init sets the name. `sbx-dhcp-hostname.service`
 asks for the lease again after cloud-init, with `networkctl reconfigure` (a
 plain `renew` repeats the old request). The unit must be
@@ -249,8 +409,8 @@ token that `host/40-api-token.sh` makes. The token belongs to the user
 one Mac does not stop the others. `sbx doctor` reads `/access/permissions` and
 fails when the token has a right on any other path.
 
-- The token lives in the macOS keychain. `config.toml` holds a command that
-  prints it.
+- The token lives in the macOS keychain, or off macOS in
+  `~/.config/sbx/secrets/`. `config.toml` holds a command that prints it.
 - The host's certificate is self-signed, and the CLI refuses to run with no
   verification: either the host's CA file, or a SHA-256 fingerprint pin. With
   a pin, the CLI checks the certificate before it sends the request.
@@ -272,20 +432,23 @@ fails when the token has a right on any other path.
    socket, and runs `host/discover.sh` through it. That script prints JSON:
    the bridges, the storage, the guests, the routes, the addresses, the CA,
    the fingerprint and the certificate's names.
-2. It reads the Mac's routes (`netstat -rn`) and proposes values for
+2. It reads the Mac's routes (`netstat -rn`, or `ip -4 route` off macOS) and proposes values for
    `host/local.conf`: the bridge of the default route, a free bridge pair, a
    subnet pair that collides with no route on either side, a free block of
-   IDs, and a storage that can make linked clones. A value that
+   IDs, and a storage for VM disks (of a type that could make linked
+   clones). A value that
    `host/local.conf` has already stays. When the gateway exists, every current
    value stays.
-3. It copies `host/`, `gw/`, `template/`, `templates/` and `sbxlib/` to
+3. It copies `host/`, `gw/`, `template/`, `templates/`, `sbxlib/` and `sidecar/` to
    `/root/sbx/`, then runs each host script whose check fails: the bridges,
    the gateway, Tailscale. It stops at each manual step in the Tailscale admin
    console.
 4. The templates: it adopts a template from before named templates, or asks
-   which definitions to build, builds them, and sets `default_template`.
+   which definitions to build, builds them, and sets `default_template`. Then
+   it offers to build the `sidecar` template, which every agent sandbox needs.
 5. It makes this Mac's token (`40-api-token.sh --emit`) and stores it in the
-   keychain, or keeps the one in the keychain and applies the ACLs again.
+   secret store (the keychain, or a file off macOS), or keeps the stored one
+   and applies the ACLs again.
 6. It sets up the Mac and runs `sbx doctor`.
 
 `--mac-only` skips steps 2 to 4: it copies `/root/sbx/host/local.conf`, and the
@@ -296,6 +459,40 @@ instead, so the second Mac and the host agree.
 
 `sbx new lab --profile agent --project ~/code/app --with rails-master-key`
 
+```mermaid
+sequenceDiagram
+    autonumber
+    box rgba(59,130,246,0.15) your machine
+        actor you as 🧑‍💻 you
+        participant cli as sbx CLI
+    end
+    box rgba(100,116,139,0.15) Proxmox host
+        participant pve as Proxmox API
+        participant gw as sbx-gw · dnsmasq
+    end
+    box rgba(34,197,94,0.15) trusted
+        participant sc as 🛡️ sidecar
+    end
+    box rgba(245,158,11,0.15) untrusted
+        participant vm as 🤖 sandbox
+    end
+    you->>cli: sbx new app --project <repo>
+    cli->>cli: read .sandbox/ recipe, decide inputs,<br/>check the git token covers the repo
+    cli->>pve: clone the sidecar template (its VLAN, 2 NICs)
+    cli->>pve: clone the sandbox template (1 NIC on that VLAN)
+    cli->>pve: start both
+    sc->>gw: DHCP with the SANDBOX's hostname
+    Note over gw: sbx-app.sbx.internal → the sidecar
+    cli->>sc: policy, placeholder, real tokens (over SSH stdin)
+    sc->>sc: sbx-sidecar-apply: firewall, proxy, expose API
+    cli->>vm: SSH through the sidecar (port 22 is DNAT'ed)
+    cli->>vm: placeholder credentials, Claude proxy settings
+    vm->>sc: git clone via the proxy
+    cli->>vm: run the recipe
+    cli->>pve: snapshot "clean"
+    cli-->>you: sbx-app is up
+```
+
 1. **Everything that can fail without a VM fails first.** The name, the
    project (its origin, branch and manifest), a decision for each input, the
    git access (for `personal`, the SSH agent must hold a key that GitHub
@@ -304,37 +501,56 @@ instead, so the second Mac and the host agree.
 2. **Clone.** The template is `--template`, the manifest's `[recipe]
    template`, `default_template`, or the only one that is built; `sbx new`
    clones its newest version with `POST /nodes/<node>/qemu/<vmid>/clone`
-   (`newid`, `name`, `pool`). A template clones as a linked clone: seconds,
-   not minutes.
+   (`newid`, `name`, `pool`), and no `full` flag: Proxmox picks the kind of
+   clone. On the reference host (LVM-thin) it makes a full copy, so a clone
+   takes a minute or two and does not depend on its template. For `agent`,
+   the sidecar is cloned first, from the `sidecar` template, under the next
+   free id and the name `<hostname>-sc`.
 3. **Configure.** The network card on the profile's bridge, cores, memory, the
    cloud-init user, `ip=dhcp`, the sandbox public key (URL-encoded inside the
    form body, which the API expects), and the tags `sbx`, the profile, the
-   template, the expiry and the project.
-4. **Start**, and remove the old host key of that name from the CLI's own
-   `known_hosts`.
-5. **Connect.** Poll dnsmasq for the name. When the guest agent reports an
-   address first, connect by address, wait for cloud-init, start the
-   DHCP-hostname unit, and move to the name as soon as dnsmasq has it.
+   template, the expiry and the project. For `agent`: the card carries the
+   sandbox's VLAN tag, the address is the static wire address with the sidecar as
+   router, and the resolver is the gateway. The sidecar gets its two cards,
+   the wire address, DHCP on the second, and the tags `sbx-sidecar` and
+   `sbx-of-<hostname>`.
+4. **Start** the sidecar, then the sandbox, and remove the old host keys of
+   that name from the CLI's own `known_hosts`.
+5. **Connect.** For `agent`: reach the sidecar first, by the address the guest
+   agent reports on the sidecar network, on port 2222; write its policy, the
+   per-sandbox secret and the real tokens over SSH stdin; run
+   `sbx-sidecar-apply`, which registers the sandbox's name. Then poll dnsmasq
+   for the name and connect to the sandbox by name alone (port 22 of the
+   sidecar's address is the VM's). For `personal`: poll dnsmasq for the name;
+   when the guest agent reports an address first, connect by address, wait
+   for cloud-init, start the DHCP-hostname unit, and move to the name as soon
+   as dnsmasq has it.
 6. **Refresh.** `~/.zshenv`, `~/.zshrc` and `sbx_mirror.py` come from the
    checkout, over the template's copies, so a fix to them reaches the next
    sandbox without a template build. The mirror restarts only when its file
-   changed.
+   changed. The sidecar gets no refresh: its code comes from its template.
 7. **Certificate.** mkcert on the Mac, two files into the sandbox over SSH,
    then `caddy` and `sbx-mirror` restart.
-8. **Claude Code.** The Claude token goes into `~/.config/sbx/claude.env`.
+8. **Claude Code.** The Claude token goes into `~/.config/sbx/claude.env`;
+   with `sidecar_claude = proxy`, the sidecar's base URL and the placeholder
+   go there instead, and the token stays in the sidecar.
 9. **Git access.** For `personal`, the SSH agent is forwarded for the clones.
-   For `agent`, the project's token goes into `~/.git-credentials`, and git
-   uses HTTPS for the host even for a URL in the SSH form.
+   For `agent`, the placeholder goes into `~/.git-credentials` for the
+   sidecar's proxy, and every URL of the git host is rewritten to
+   `http://<sidecar>:8080/github/`; the sidecar adds the token. Without a
+   sidecar, the token itself goes into `~/.git-credentials`, and git uses
+   HTTPS for the host even for a URL in the SSH form.
 10. **Clone the project** into `~/code/<project>`, with each `repo` input.
 11. **Send the inputs** over the SSH channel, and add each path to
     `.git/info/exclude`.
 12. **Run the recipe** with `sbx-recipe-run`.
-13. **Snapshot** `clean`, for `agent`.
+13. **Snapshot** `clean`, for `agent`: the sandbox and its sidecar.
 14. **herdr and the layout.** Add the sandbox to the herdr sidebar, and build
     the project's panes.
 15. **Remote Control**, for `personal` with a terminal.
 
-A plain sandbox takes 24 to 30 seconds on the reference host.
+A plain agent sandbox, with its sidecar, takes a few minutes on the reference
+host; most of it is the two clones and the sidecar's first boot.
 
 ## SSH
 
@@ -411,23 +627,121 @@ digest of the files that the user reviewed.
 ## Claude Code
 
 **The subscription token.** `sbx claude-token` runs `claude setup-token`,
-which prints a token valid for one year. The keychain holds the one master
-copy (`sbx-claude-token`), and `~/.config/sbx/claude-token.toml` records its
-date. `sbx new` writes `export CLAUDE_CODE_OAUTH_TOKEN=...` into
-`~/.config/sbx/claude.env` in the sandbox, and `~/.zshenv` reads that file in
-every shell. The token does not refresh itself. A copy of the Mac's own
+which prints a token valid for one year. The secret store holds the one
+master copy (`sbx-claude-token`), and `~/.config/sbx/claude-token.toml`
+records its date. `sbx new` writes `export CLAUDE_CODE_OAUTH_TOKEN=...` into
+`~/.config/sbx/claude.env` in a personal sandbox, and `~/.zshenv` reads that
+file in every shell. An agent sandbox with the proxy (the default) gets the
+sidecar's base URL and its placeholder there instead; the token goes to the
+sidecar, and `sbx claude-token` updates it there with
+`sbx-sidecar-apply --claude-token`. The token does not refresh itself. A copy of the Mac's own
 Claude login would be no better: Claude Code replaces the refresh token when it
 uses it, so copies on several machines sign each other out.
 
 **Remote Control** needs a full claude.ai login. It refuses the
-inference-only token. So each personal sandbox signs in once: the CLI starts
+inference-only token. So each sandbox signs in once: the CLI starts
 `claude auth login` in a tmux session in the sandbox, opens the URL on the
 Mac, and types the pasted code into the sandbox. The server runs as a systemd
 user service in tmux, logs to `~/.local/state/sbx/remote-control.log`, and
 needs no inbound port. The CLI first writes the answers to two one-time
 dialogs into `~/.claude.json`: the workspace trust and the Remote Control
 consent. A full login carries `org:create_api_key` among its scopes, which is
-why an agent sandbox never gets one: every entry point checks the profile.
+why an agent sandbox gets one only through `sbx remote-control --allow-agent`.
+
+**Resume after a reboot** (`sbx autostart`, `sbxlib/sessions.py`). Claude Code
+writes `~/.claude/sessions/<pid>.json` for each running process: the session
+id, its folder, its name, and its Remote Control id. The file can outlive its
+process, so a session is live only when `/proc/<pid>` exists with the start
+time (field 22 of its `stat`) that the file records; a reused pid has another.
+A user timer records the live ones every minute, and skips a tick while the
+machine shuts down (`/run/nologin`), so a shutdown never empties the list. At
+boot a oneshot user unit waits for the network, then resumes each recorded
+session that is not live, in a tmux server of its own (`-L sbx-resume`): the
+unit stays active after it ran, so systemd leaves that server alone, and a
+restart of the Remote Control server's tmux cannot take it down. At boot
+Proxmox starts the gateway first (`startup: order=1`), then the guests with
+`onboot` and no order, by id, so a sandbox may come up seconds before its
+sidecar; the resume waits for the network. The CLI sets `onboot` only: a start
+order needs `Sys.Modify` on the whole host, which the token must not have.
+
+```mermaid
+sequenceDiagram
+    box rgba(100,116,139,0.15) Proxmox host
+        participant px as Proxmox
+        participant gw as sbx-gw
+    end
+    box rgba(34,197,94,0.15) trusted
+        participant sc as sidecar
+    end
+    box rgba(245,158,11,0.15) sandbox with sbx autostart
+        participant rc as Remote Control server
+        participant res as sbx-claude-resume
+        participant trk as sbx-claude-track
+    end
+    Note over trk: while running: every minute, the live<br/>sessions → claude-sessions.json
+    Note over px,trk: ⚡ the host restarts
+    px->>gw: start (order 1)
+    px->>sc: start (onboot)
+    px->>rc: start the sandbox (onboot)
+    sc->>gw: DHCP: the sandbox's name comes back
+    rc->>rc: the server comes back (a user service)
+    res->>res: wait for the network (up to 3 min)
+    res->>res: for each recorded session not live:<br/>tmux -L sbx-resume · claude --resume <id><br/>--remote-control (full login) or in a terminal
+    trk->>trk: from 2 min: record again
+    Note over res: A session you ended was dropped from the list<br/>within a minute, so it is not resumed.
+```
+
+## Previews behind Cloudflare Access
+
+`sbx publish` (`sbxlib/previews.py`) puts a port of an agent sandbox at
+`https://<label>.<preview_zone>`. The pieces:
+
+- **One tunnel per sandbox**, named after it and remotely managed: its routes
+  (ingress) live at Cloudflare, and only the CLI sets them, with an API token
+  that stays in the Mac's secret store. The sidecar runs `cloudflared` with
+  that tunnel's connector token alone, which reaches it over SSH stdin
+  (`sbx-sidecar-apply --tunnel-token`), so a compromised sidecar cannot add a
+  hostname or point one elsewhere.
+- **The route** goes to the VM on the pair's wire, `<sidecar_link>.2:<port>`,
+  through the port mirror: https when the sandbox has a certificate (with no
+  verification on that one private hop), http otherwise or with `--plain`.
+- **Access comes first.** A wildcard Access application for `*.<zone>`, with
+  the policy `me`, exists before any hostname. Another policy
+  (`previews.toml`) gets an application for its hostname alone, which
+  Cloudflare prefers because it is more specific. A policy names emails and
+  email domains only, so a Bypass or an "Everyone" rule cannot be written.
+- **The order is the safety:**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    box rgba(59,130,246,0.15) your machine
+        participant cli as sbx publish
+    end
+    box rgba(100,116,139,0.12) Cloudflare API
+        participant acc as Access
+        participant tun as Tunnel
+        participant dns as DNS
+    end
+    box rgba(34,197,94,0.15) sidecar
+        participant cfd as cloudflared
+    end
+    cli->>acc: wildcard app *.zone with policy "me" (made once)
+    cli->>acc: an app for this hostname (only with --policy)
+    cli->>tun: tunnel of this sandbox, route host → VM:port
+    tun-->>cli: connector token of that tunnel only
+    cli->>cfd: token over SSH stdin, start the service
+    cfd->>tun: outbound connection
+    cli->>dns: CNAME host → tunnel (last)
+    Note over acc,dns: Access before the route, the route before the name:<br/>no moment exists when the hostname is public.
+```
+
+`--off` removes the DNS record first, then the route, then the hostname's
+Access application; the last hostname takes the tunnel with it. `sbx rm`
+withdraws a sandbox's previews before it destroys the VMs, and `sbx gc` those
+of a sandbox that is gone. The token file on the sidecar and the enabled
+`sbx-cloudflared` service bring the tunnel back after a reboot; the app in the
+sandbox must be started again.
 
 ## The templates
 
@@ -461,13 +775,15 @@ sandboxes use, and `--write` saves each group in `templates/local/versions.toml`
 A build adds those after the definition's own versions, so the definition's
 first version stays the default.
 
-**What is in a template.** Ubuntu 24.04 and the **core**, which every template
-has:
+**What is in a template.** The definition's image (Ubuntu 24.04 by default,
+Debian 13 for `debian` and `sidecar`) and the **core**, which every template
+has unless its definition is `bare`:
 
 - build tools, shells (zsh, tmux), and command-line tools (jq, ripgrep, fd,
   fzf, direnv, gh);
 - the OpenSSL, zlib and ffi headers that most native builds need;
-- Docker with compose, Caddy, and the Docker images of `[docker] images`;
+- Docker with compose (from Docker's repository for the image's
+  distribution), Caddy, and the Docker images of `[docker] images`;
 - Node through nvm, with yarn and pnpm, at the versions of `[node] versions`;
 - Chrome through `agent-browser`, with Playwright's system libraries;
 - Claude Code and herdr;
@@ -503,14 +819,14 @@ the SSH host keys and the payload) and powers off. The host script then
 removes the snippet, turns off the first-boot upgrade, converts the VM to a
 template, drops the `sbx-building` tag, and moves it into the templates pool.
 
-**Versions of a template, and their cleanup.** A rebuild never destroys the
-version that sandboxes use: Proxmox refuses to destroy a template with linked
-clones, and a rebuild must not depend on removing sandboxes. `sbx new` clones
-the newest version of a name (by the date in the VM name). After each build,
-the host script removes each OLDER version of that name that no VM uses any
-more. A linked clone's disk names its base (`base-<vmid>-disk-N`) on every
-storage type, so a search of `/etc/pve/nodes/*/qemu-server/*.conf` finds the
-users of a version. That cleanup needs root, and runs over SSH as part of
+**Versions of a template, and their cleanup.** `sbx new` clones the newest
+version of a name (by the date in the VM name). After each build, the host
+script removes each OLDER version of that name that no VM uses any more. A
+version is "used" only by a LINKED clone, whose disk names its base
+(`base-<vmid>-disk-N`), which a search of
+`/etc/pve/nodes/*/qemu-server/*.conf` finds. A full copy, which is what the
+reference host makes, names no base and needs no template, so every older
+version goes after the next build; the sandboxes keep running. That cleanup needs root, and runs over SSH as part of
 `sbx template rebuild` or `sbx template prune`: the API token can still clone
 and read templates only.
 
@@ -559,7 +875,7 @@ Each of these cost real time. Keep them in mind when you change the code.
 |---|---|---|
 | `*` as a Tailscale ACL source | includes approved subnet routes; every sandbox reaches every tailnet device | `autogroup:member` as the source; the nftables drop in a separate table |
 | `WantedBy=multi-user.target` with `After=cloud-init.target` | an ordering cycle; systemd deletes the unit's job silently | `WantedBy=cloud-init.target`, `After=cloud-final.service` |
-| a VM's first DHCP request | carries the image's host name, `ubuntu` | ask again after cloud-init with `networkctl reconfigure`, not `renew` |
+| a VM's first DHCP request | carries the image's host name (`ubuntu`), or none on Debian | ask again after cloud-init with `networkctl reconfigure`, not `renew` |
 | the Mac's negative DNS cache | a name looked up too early stays unknown ~75 s | ask dnsmasq directly first |
 | `HostKeyAlias %h` in ssh_config | `%h` is not expanded there; every sandbox shares one alias | no `HostKeyAlias`; key by the resolved name |
 | a `Host sbx-*` block and a full name | the block matches the full name and appends the domain again | the CLI uses `-F /dev/null` |
@@ -579,10 +895,16 @@ Each of these cost real time. Keep them in mind when you change the code.
 | `$HOME` in a systemd `ExecStart` | not expanded | the `%h` specifier |
 | `script -c` and a zsh user | `script` runs the command through `$SHELL`, and zsh reads `~/.zshenv` again | `SHELL=/bin/sh` for `script` |
 | `herdr machine add` from a tool | with a terminal on stdin and output in a pipe, herdr may ask a question nobody sees | run it with stdin closed; never let it fail the sandbox |
-| a forwarded SSH agent and a key named in ssh config | the sandbox sees the agent only | `ssh-add --apple-use-keychain ~/.ssh/<key>`; the CLI checks before a VM exists |
+| a forwarded SSH agent and a key named in ssh config | the sandbox sees the agent only | `ssh-add --apple-use-keychain ~/.ssh/<key>` (plain `ssh-add` off macOS); the CLI checks before a VM exists |
 | a Python f-string with `\"` inside `{}` | a syntax error before Python 3.12 | different quotes, or a heredoc |
 | `set \| grep '^SBX_'` to save variables | a multi-line variable of another name has lines that start with `SBX_`; they pass the filter and overwrite the real values when the file is sourced | `declare -p` for each name from `compgen -v SBX_` |
+| the VM id as a VLAN tag | `bridge vlan add ... vid 9150` says "Invalid VLAN ID": a VLAN id stops at 4094 | `Config.vlan_for`: the sandbox's place in the id range, from 2 |
 | `a && b && c` as the last command of a loop, under `set -e` and pipefail | when the last item does not match, the failed chain becomes the loop's status, and the script stops | an `if` statement; `\|\| true` after a `grep` that may find nothing |
+| a 401 that names no auth scheme | git asks again with no credential, gets a second 401, and deletes the stored placeholder from `~/.git-credentials` | `WWW-Authenticate: Basic` on the proxy's 401 |
+| `HTTPServer.server_bind` with no resolver in reach | asks DNS for its own name before it listens; the port refuses connections until the lookups time out | skip the lookup (`sidecar.py`), or wait for the socket, not a fixed time |
+| "open" mode's DNAT of 1024-32767 | takes the sidecar's own 2222 and 8081 to the VM | return those two ports before any DNAT |
+| a oneshot unit that starts tmux | systemd kills the tmux server when the unit exits | `RemainAfterExit=yes`, and a tmux server of its own (`-L`) |
+| `startup` order through the API token | refused: needs `Sys.Modify` on `/` | `onboot` only; root sets the gateway's `order=1` |
 
 ## What is tested, and how
 
@@ -617,7 +939,21 @@ dependencies):
   tools (`tests/test_rails_example.py`);
 - the settings: the Python defaults equal `defaults.conf`, and
   `docs/reference.md` names every command and every key
-  (`tests/test_docs.py`).
+  (`tests/test_docs.py`);
+- the sidecar's handlers (`tests/test_sidecar.py`), with in-memory sockets
+  and a fake upstream: the credential swap, the refusal of a wrong
+  placeholder with a 401 that names Basic, that only the trusted side opens
+  a port, and that an approval survives a restart;
+- `sbx-sidecar-apply` and the bridge stanzas of `10-bridges.sh` with stub
+  commands (`tests/test_host_scripts.py`);
+- `sbx publish` against a fake Cloudflare API: Access before the route
+  before the name, the policies file, and that the connector token reaches
+  the sidecar on stdin only (`tests/test_previews.py`);
+- `sbx autostart`: the tracker's liveness rule, the resumer's commands, and
+  that turning it on makes no power, rollback or delete call
+  (`tests/test_sessions.py`);
+- Remote Control, `--allow-agent` included (`tests/test_remotecontrol.py`);
+  the secret store (`tests/test_secretstore.py`).
 
 **Behaviour tests** (Docker):
 
@@ -629,11 +965,17 @@ dependencies):
 - `tests/run-mirror-test.sh`: the port mirror with a real Caddy.
 - `tests/run-finish-test.sh`: `30-template-build.sh --finish` with a fake `qm`
   and the real seal script.
+- `tests/run-sidecar-test.sh`: the sidecar (`sidecar/`) and the
+  VLAN-per-sandbox wiring, against the real gateway rules, with a control for
+  every refusal, "open" mode, git's way of sending a credential, and a
+  restart of the service. Run it after each change under `sidecar/`.
 
 **On the reference host,** by hand: the gateway, the template build, the
-token, `sbx new` in 24 seconds, the first-boot naming from the boot journal,
-the isolation table of [security.md](security.md), the mirror from a real
-client, the herdr sidebar, and Remote Control in a personal sandbox. Every
+token, `sbx new`, the first-boot naming from the boot journal, the isolation
+table of [security.md](security.md), the mirror from a real client, the herdr
+sidebar, Remote Control, a private clone and a Claude prompt through a
+sidecar, and a preview behind Access. [sidecar-rollout.md](sidecar-rollout.md)
+has the dated record. Every
 refusal was checked with a controlled pair: the same probe that must fail in
 one profile must pass in the other. A refusal with no control proves nothing,
 because a broken network refuses everything. `sbx doctor --isolation` now
@@ -662,7 +1004,11 @@ sbxlib/
   inputs.py                 a decision for each input; the bindings file
   gittoken.py               sbx git-token
   claudetoken.py            sbx claude-token
-  remotecontrol.py          Remote Control in a personal sandbox
+  secretstore.py            the keychain, or files off macOS
+  previews.py               sbx publish: Cloudflare tunnel, Access, DNS
+  cfsetup.py                sbx cloudflare-setup: a fresh Cloudflare account for previews
+  sessions.py               sbx autostart: track and resume Claude sessions
+  remotecontrol.py          Remote Control (personal; agent with --allow-agent)
   projects.py               the project registry; the project tag
   versions.py               sbx versions
   templates.py              the template definitions; the host runs it during a build
@@ -693,7 +1039,12 @@ template/
   files/                    sbx_mirror.py and its unit, the DHCP-hostname unit,
                             sbx-recipe-run, zshenv, zshrc, Caddyfile
 tailscale/policy.example.hujson
+sidecar/
+  nftables.conf.tmpl        the sidecar's boundary; sbx-sidecar-apply renders it
+  sidecar.py                the credential proxy and the expose API
+  sbx-sidecar-apply         renders the firewall, registers the sandbox's name
+  sbx-sidecar.service, sbx-sidecar-apply.service, sbx-cloudflared.service
 examples/rails/.sandbox/    a Rails recipe, manifest and pane layout
-tests/                      unit tests and four Docker behaviour tests
+tests/                      unit tests and five Docker behaviour tests
 docs/                       the documentation
 ```
