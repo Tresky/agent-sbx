@@ -8,6 +8,7 @@
 #   sbx-sidecar-apply                 apply the env file
 #   sbx-sidecar-apply --claude-token  read a new Claude token from stdin (one line;
 #                                     empty removes it), write it, restart the service
+#   sbx-sidecar-apply --git-token     the same, for the git token
 #   sbx-sidecar-apply --tunnel-token  read the Cloudflare tunnel's connector token from
 #                                     stdin (one line; empty stops the tunnel and removes it)
 set -euo pipefail
@@ -25,13 +26,15 @@ RUN_DIR="$R/run/sbx"
 source "$ENV"
 : "${SBX_SIDECAR_LINK:?}" "${SBX_AGENT_NET:?}"
 
-if [[ "${1:-}" == "--claude-token" ]]; then
+if [[ "${1:-}" == "--claude-token" || "${1:-}" == "--git-token" ]]; then
+  # The key of the line in the tokens file, as sidecar.py reads it.
+  if [[ "$1" == "--claude-token" ]]; then key=claude label=claude; else key=github label=git; fi
   IFS= read -r token || token=""
-  { grep -v '^claude=' "$DIR/tokens" 2>/dev/null || true; printf 'claude=%s\n' "$token"; } > "$DIR/tokens.new"
+  { grep -v "^$key=" "$DIR/tokens" 2>/dev/null || true; printf '%s=%s\n' "$key" "$token"; } > "$DIR/tokens.new"
   chmod 0600 "$DIR/tokens.new"
   mv "$DIR/tokens.new" "$DIR/tokens"
   systemctl restart sbx-sidecar
-  echo "claude token ${token:+updated}${token:-removed}"
+  if [[ -n "$token" ]]; then echo "$label token updated"; else echo "$label token removed"; fi
   exit 0
 fi
 

@@ -76,6 +76,11 @@ def store(runner: Runner, project: str, token: str) -> str:
     return service
 
 
+def stored(runner: Runner, project: str) -> str:
+    """The project's token from the secret store, or "" when there is none."""
+    return secretstore.get(runner, keychain_service(project), "sbx")
+
+
 def forget(runner: Runner, project: str) -> bool:
     return secretstore.forget(runner, keychain_service(project))
 

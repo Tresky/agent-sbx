@@ -298,14 +298,14 @@ A SANDBOX, FROM START TO END
   sbx herdr lab                        put it in your herdr sidebar (done by `new` too)
   sbx layout app --replace             the project's .sandbox/herdr.toml panes, again
   sbx remote-control lab               Claude Code Remote Control (agent: --allow-agent)
-  sbx claude-token                     sign Claude Code in every sandbox in to your
-                                       Claude subscription; again when the token expires
+  sbx claude-token                     sign every sandbox in to your Claude subscription
   sbx list                             every sandbox
   sbx snap lab [--ram]  /  sbx rollback lab   a snapshot of it and its sidecar, and back
   sbx publish lab 3000                 a preview of port 3000, behind Cloudflare Access
   sbx extend lab --days 7              a later expiry (--never: none)
   sbx autostart lab                    start at host boot, resume its Claude sessions
   sbx rm lab                           destroy it; `sbx gc` destroys expired ones
+  sbx web                              the portal: all of sbx, in a web page on this Mac
 
 A PROJECT
   sbx projects                         the projects this Mac has used
@@ -353,15 +353,19 @@ WHERE THINGS ARE
 """
 
 
-def cmd_guide(args, cfg: Config, runner: Runner, api=None) -> int:
+def guide_text(cfg: Config) -> str:
     from .config import REPO_ROOT
     home = str(Path.home())
-    print(GUIDE.format(domain=cfg.domain, ttl=cfg.agent_ttl_days, profile=cfg.default_profile,
-                       user=cfg.vm_user, state=str(state_dir()).replace(home, "~"),
-                       docs=str(REPO_ROOT / "docs").replace(home, "~"),
-                       gw_ctid=cfg.gw_ctid, gw_host=cfg.gw_hostname, template_pool=cfg.template_pool,
-                       agent_bridge=cfg.agent_bridge, personal_bridge=cfg.personal_bridge,
-                       agent_net=cfg.agent_net, personal_net=cfg.personal_net), end="")
+    return GUIDE.format(domain=cfg.domain, ttl=cfg.agent_ttl_days, profile=cfg.default_profile,
+                        user=cfg.vm_user, state=str(state_dir()).replace(home, "~"),
+                        docs=str(REPO_ROOT / "docs").replace(home, "~"),
+                        gw_ctid=cfg.gw_ctid, gw_host=cfg.gw_hostname, template_pool=cfg.template_pool,
+                        agent_bridge=cfg.agent_bridge, personal_bridge=cfg.personal_bridge,
+                        agent_net=cfg.agent_net, personal_net=cfg.personal_net)
+
+
+def cmd_guide(args, cfg: Config, runner: Runner, api=None) -> int:
+    print(guide_text(cfg), end="")
     return 0
 
 
@@ -767,38 +771,65 @@ def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
     repos = _project_repos(project)
     if not repos:
         raise InputError(f"{project.name}: no origin remote, so there is nothing for a token to cover")
-    print(f"project: {project.name}")
-    print("the token must cover: " + ", ".join(repos))
-    if project.checkout is None:
-        print("  (from the URL alone: a repository that the recipe adds is checked by `sbx new`)")
-    if args.host == "github.com":
-        print("make it at github.com > Settings > Developer settings > Fine-grained tokens:")
-        print("  Only select repositories (the ones above); Contents: Read, or Read and write to push")
 
-    if args.stdin:
-        token = sys.stdin.readline().strip()
+    # `--push` alone, with a token in the secret store already, installs that
+    # one: the usual case is a sandbox that exists and needs the token now.
+    token = gittoken.stored(runner, project.name) if args.push and not args.stdin else ""
+    if token:
+        info(f"using the token stored for {project.name}; `sbx git-token {args.project} --remove` first to replace it")
     else:
-        if not sys.stdin.isatty():
-            raise InputError("no terminal to ask for the token; pass --stdin and pipe it in")
-        token = getpass.getpass(f"token for {project.name} (hidden): ").strip()
-    if not token or any(c.isspace() for c in token):
-        raise InputError("the token is empty or has whitespace in it")
+        print(f"project: {project.name}")
+        print("the token must cover: " + ", ".join(repos))
+        if project.checkout is None:
+            print("  (from the URL alone: a repository that the recipe adds is checked by `sbx new`)")
+        if args.host == "github.com":
+            print("make it at github.com > Settings > Developer settings > Fine-grained tokens:")
+            print("  Only select repositories (the ones above); Contents: Read, or Read and write to push")
 
-    if not args.no_check:
-        checks = gittoken.check_token(runner, token, args.host, repos)
-        for c in checks:
-            print(f"  {c.status:<12} {c.repo}")
-        if any(c.status == "bad token" for c in checks):
-            raise InputError("the git host does not know this token; nothing stored")
-        if any(c.status == "no access" for c in checks):
-            raise InputError("the token does not cover every repository above; nothing stored. "
-                             "Add the missing ones to its repository access, or pass --no-check")
+        if args.stdin:
+            token = sys.stdin.readline().strip()
+        else:
+            if not sys.stdin.isatty():
+                raise InputError("no terminal to ask for the token; pass --stdin and pipe it in")
+            token = getpass.getpass(f"token for {project.name} (hidden): ").strip()
+        if not token or any(c.isspace() for c in token):
+            raise InputError("the token is empty or has whitespace in it")
 
-    service = gittoken.store(runner, project.name, token)
-    gittoken.write_binding(binding, project.name, args.host, args.username)
-    info(f"stored in {secretstore.where()} as {service}")
-    info(f"wrote [git] in {binding}")
-    print(f"an agent sandbox of {project.name} now clones with this token: sbx new <name> --project {args.project}")
+        if not args.no_check:
+            checks = gittoken.check_token(runner, token, args.host, repos)
+            for c in checks:
+                print(f"  {c.status:<12} {c.repo}")
+            if any(c.status == "bad token" for c in checks):
+                raise InputError("the git host does not know this token; nothing stored")
+            if any(c.status == "no access" for c in checks):
+                raise InputError("the token does not cover every repository above; nothing stored. "
+                                 "Add the missing ones to its repository access, or pass --no-check")
+
+        service = gittoken.store(runner, project.name, token)
+        gittoken.write_binding(binding, project.name, args.host, args.username)
+        info(f"stored in {secretstore.where()} as {service}")
+        info(f"wrote [git] in {binding}")
+
+    # Into sandboxes that run already, either profile. `sbx new` does this on
+    # its own for an agent sandbox; a personal sandbox has the forwarded SSH
+    # agent for its clone and for `sbx ssh` only, so a pane or an agent in it
+    # has no git credential until a token is pushed. A sandbox with a sidecar
+    # holds only the placeholder: the token goes into the sidecar, never the VM.
+    if args.push:
+        pve = _pve(cfg, runner, api)
+        sidecars = pve.sidecars()
+        for name in args.push:
+            box = pve.require(names.hostname(name))
+            if box.hostname in sidecars:
+                sc = Vm(cfg, runner, box.hostname, port=SIDECAR_SSH_PORT, alias=sidecar_alias(cfg, box.hostname))
+                sc.run("sudo sbx-sidecar-apply --git-token", input=(token + "\n").encode())
+                info(f"{box.hostname}: its sidecar adds the token to git requests now")
+            else:
+                _install_git_token(Vm(cfg, runner, box.hostname), args.username, args.host, token)
+                info(f"{box.hostname}: git uses the token for {args.host} now, in every shell")
+    else:
+        print(f"an agent sandbox of {project.name} now clones with this token: sbx new <name> --project {args.project}")
+        print(f"a sandbox that runs already gets it with: sbx git-token {args.project} --push <name>")
     return 0
 
 
@@ -1243,9 +1274,9 @@ def _git_auth(cfg: Config, runner: Runner, vm: Vm, profile: str, project: Projec
     The VM then holds no git token at all."""
     if profile == "personal":
         return True
-    q = shlex.quote
+    access = _git_access(cfg, _bindings(project))
     if placeholder:
-        access = _git_access(cfg, _bindings(project))
+        q = shlex.quote
         host = access.host if access else "github.com"
         proxy = f"{cfg.sidecar_proxy_url}/github/"
         vm.put(f"http://sbx:{placeholder}@{cfg.sidecar_addr}:8080\n".encode(), ".git-credentials")
@@ -1254,17 +1285,24 @@ def _git_auth(cfg: Config, runner: Runner, vm: Vm, profile: str, project: Projec
                f"git config --global --add url.{q(proxy)}.insteadOf {q(f'git@{host}:')} && "
                f"git config --global --add url.{q(proxy)}.insteadOf {q(f'ssh://git@{host}/')}")
         return False
-    git = _git_token(cfg, runner, project)
-    if git is None:
+    if access is None:
         return False
-    host, token = git
-    access = _git_access(cfg, _bindings(project))
-    vm.put(f"https://{access.username}:{token}@{host}\n".encode(), ".git-credentials")
+    token = runner.run(access.token_command).stdout.strip()
+    _install_git_token(vm, access.username, access.host, token)
+    return False
+
+
+def _install_git_token(vm: Vm, username: str, host: str, token: str) -> None:
+    """A stored credential for the host, and an SSH-to-HTTPS rewrite, so every
+    git command in the VM uses the token, in any shell or pane, with no agent.
+    Safe to run again: the rewrite is replaced, never added to."""
+    vm.put(f"https://{username}:{token}@{host}\n".encode(), ".git-credentials")
+    q = shlex.quote
+    https = q(f"https://{host}/")
     # The manifest and `origin` may use the SSH form; the token works over HTTPS.
     vm.run("git config --global credential.helper store && "
-           f"git config --global url.{q(f'https://{host}/')}.insteadOf {q(f'git@{host}:')} && "
-           f"git config --global --add url.{q(f'https://{host}/')}.insteadOf {q(f'ssh://git@{host}/')}")
-    return False
+           f"git config --global --replace-all url.{https}.insteadOf {q(f'git@{host}:')} && "
+           f"git config --global --add url.{https}.insteadOf {q(f'ssh://git@{host}/')}")
 
 
 def _setup_project(vm: Vm, project: Project, decisions, forward_agent: bool, profile: str = "agent") -> int:
@@ -1830,6 +1868,12 @@ def cmd_gpu(args, cfg: Config, runner: Runner, api=None) -> int:
     return 0
 
 
+def _cmd_web(args, cfg: Config, runner: Runner, api=None) -> int:
+    # Imported here: the portal is large, and no other command needs it.
+    from .portal import server
+    return server.serve(args.port, open_browser=not args.no_open)
+
+
 # --- entry ------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1929,6 +1973,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--stdin", action="store_true", help="read the token from stdin instead of a hidden prompt")
     s.add_argument("--no-check", action="store_true", help="store without asking the git host about it")
     s.add_argument("--remove", action="store_true", help="forget the token and the binding")
+    s.add_argument("--push", action="append", default=[], metavar="NAME",
+                   help="also install the token into this running sandbox (repeatable); "
+                        "with a token in the secret store already, install that one")
     s.set_defaults(fn=cmd_git_token)
 
     s = sub.add_parser("claude-token", help="sign Claude Code in every sandbox in to your Claude subscription")
@@ -2054,6 +2101,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("gc", help="destroy every expired sandbox")
     s.add_argument("-y", "--yes", action="store_true")
     s.set_defaults(fn=cmd_gc)
+
+    s = sub.add_parser("web", help="the management portal: a local web page for everything sbx does")
+    s.add_argument("--port", type=int, default=8765, help="the local port (default: 8765)")
+    s.add_argument("--no-open", action="store_true", help="print the link; do not open the browser")
+    s.set_defaults(fn=_cmd_web)
 
     s = sub.add_parser("gpu", help="move the host GPU between sandboxes")
     s.add_argument("action", choices=("attach", "detach", "status"))

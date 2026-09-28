@@ -159,6 +159,7 @@ sbx publish <name> <port>    a preview behind Cloudflare Access
 sbx autostart <name>         start at host boot, resume its Claude sessions
 sbx rm <name>                destroy it
 sbx doctor                   check the setup
+sbx web                      the portal: all of the above in a web page on this Mac
 ```
 
 [docs/reference.md](docs/reference.md) lists every command and option.

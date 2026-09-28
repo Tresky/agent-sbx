@@ -16,6 +16,7 @@ path, a git URL, or a name that `sbx projects` lists.
 | `sbx guide` | the basic usage on one screen. `sbx` with no command does the same. |
 | `sbx setup [--host H] [--mac-only]` | the one-time setup of a Proxmox host and this Mac, step by step. It is safe to run again. `--mac-only` sets up one more Mac for a host that is set up already, and does not change the host. |
 | `sbx doctor [--isolation]` | the setup checks. `--isolation` also makes one sandbox in each profile, proves what each can reach, and removes them (about two minutes). |
+| `sbx web [--port N] [--no-open]` | starts the management portal, a web page on this Mac only, and opens it. The default port is 8765. `--no-open` prints the link and does not open the browser. If the portal runs already, the command opens it. [usage.md](usage.md#the-portal) explains it. |
 
 ### Sandboxes
 
@@ -68,7 +69,7 @@ Options of `sbx new`:
 | `sbx project add <project>` | records a checkout, so `--project <name>` works by name |
 | `sbx project rm <name>` | forgets a project. Its token and its bindings stay. |
 | `sbx inputs <project> [--branch B] [--from PATH]` | shows what the recipe asks for, and where each value comes from. It makes nothing. |
-| `sbx git-token <project> [--host H] [--username U] [--stdin] [--no-check] [--remove]` | stores the project's git token in [the secret store](#the-secret-store), after a check that it covers each repository. `--no-check` skips the check. `--remove` forgets it. The project may be a git URL: nothing is cloned, and no checkout is needed on this Mac. A project named by URL then reads its `.sandbox/` with this token. |
+| `sbx git-token <project> [--host H] [--username U] [--stdin] [--no-check] [--remove] [--push NAME]` | stores the project's git token in [the secret store](#the-secret-store), after a check that it covers each repository. `--no-check` skips the check. `--remove` forgets it. The project may be a git URL: nothing is cloned, and no checkout is needed on this Mac. A project named by URL then reads its `.sandbox/` with this token. `--push NAME` also installs the token into that running sandbox, either profile (repeatable): for an agent sandbox with a sidecar, into its sidecar. With a token in the secret store already, it asks for none and installs that one. |
 | `sbx claude-token` | runs `claude setup-token` and stores the Claude token |
 | `sbx claude-token --stdin` | reads a new Claude token from stdin |
 | `sbx claude-token --push [name ...]` | writes the stored token into running sandboxes, and into the named ones (for an agent sandbox with the proxy: into its sidecar) |
@@ -244,6 +245,8 @@ the pane layout (`.sandbox/herdr.toml`).
 | `claude-token.toml` | the date of the Claude token. The token itself is in the secret store. |
 | `previews.toml` | who may open a preview: one `[policy.<name>]` per policy, with `emails` and `email_domains` only. `[policy.me]` is required; it is the default. |
 | `secrets/` | the secret store off macOS: one file per secret, this user only (0700, the files 0600) |
+| `portal/url` | the link of the running portal, with its session token. `sbx web` removes it when it stops. |
+| `portal/jobs/` | the record of each portal job: its command and its output. The last 300 are kept. |
 
 ### In the repository, not in git
 
