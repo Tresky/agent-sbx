@@ -25,6 +25,7 @@ import base64
 import http.client
 import http.server
 import json
+import os
 import socketserver
 import subprocess
 import sys
@@ -191,11 +192,52 @@ class Proxy(Quiet):
 
 class Requests:
     """The exposure requests of this sandbox: port -> state.
-    pending -> approved | denied. An approval opens the port in the firewall."""
+    pending -> approved | denied. An approval opens the port in the firewall.
 
-    def __init__(self):
+    The approved ports are also kept in a file, one per line: sbx-sidecar-apply
+    renders the firewall afresh (at every boot, and on every policy change) and
+    then restarts this service, which opens them again (restore). A pending
+    request is not kept: the sandbox asks again."""
+
+    def __init__(self, path: str = ""):
         self.lock = threading.Lock()
         self.state: dict[int, str] = {}
+        self.path = path
+
+    def _save(self) -> None:
+        if not self.path:
+            return
+        ports = sorted(p for p, s in self.state.items() if s == "approved")
+        tmp = f"{self.path}.new"
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write("".join(f"{p}\n" for p in ports))
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            # The firewall already changed; only the memory of it is lost.
+            log(f"cannot keep the approved ports in {self.path}: {exc}")
+
+    def restore(self) -> list[int]:
+        """Open the saved ports again. A line that is not a port in the range,
+        or is the sidecar's own, is skipped: the file is re-checked as input."""
+        try:
+            with open(self.path) as fh:
+                lines = fh.read().split()
+        except (OSError, TypeError):
+            return []
+        opened = []
+        with self.lock:
+            for line in lines:
+                if not line.isdigit():
+                    continue
+                port = int(line)
+                if not PORT_MIN <= port <= PORT_MAX or port in RESERVED:
+                    continue
+                if open_port(port):
+                    self.state[port] = "approved"
+                    opened.append(port)
+        return opened
 
     def snapshot(self):
         with self.lock:
@@ -215,6 +257,7 @@ class Requests:
                 if not open_port(port):
                     return "error"
                 self.state[port] = "approved"
+                self._save()
             return "approved"
 
     def deny(self, port: int) -> str:
@@ -224,6 +267,7 @@ class Requests:
             if self.state[port] == "approved":
                 close_port(port)
             self.state[port] = "denied"
+            self._save()
             return "denied"
 
 
@@ -297,9 +341,14 @@ def main(argv=None) -> int:
     ap.add_argument("--github-upstream", default="https://github.com")
     ap.add_argument("--net-expose-port", type=int, default=8081,
                     help="the trusted side's port; only a loopback test needs it to differ")
+    ap.add_argument("--approved-file", default="/etc/sbx/sidecar/approved",
+                    help="the approved ports, kept across restarts and reboots ('' keeps none)")
     args = ap.parse_args(argv)
     global CFG
     CFG = Config(args)
+    REQUESTS.path = args.approved_file
+    if reopened := REQUESTS.restore():
+        log("approved ports opened again: " + ", ".join(map(str, reopened)))
 
     servers = [
         Server((CFG.agent_addr, 8080), Proxy),

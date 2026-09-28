@@ -225,6 +225,35 @@ class ExposeTest(Base):
         self.assertEqual(status, 200)
         self.assertEqual(len(self.nft), 2, "a denial of a port that is not open deletes nothing")
 
+    def test_approvals_survive_a_restart_and_a_denial_is_kept_too(self):
+        path = Path(self.tmp.name) / "approved"
+        sidecar.REQUESTS = sidecar.Requests(str(path))
+        self.ask()
+        self.decide("approve")
+        self.assertEqual(path.read_text(), "4400\n")
+        self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+        # A restart (the apply script renders an empty firewall, then restarts
+        # the service): a fresh Requests opens the port again.
+        self.nft.clear()
+        sidecar.REQUESTS = sidecar.Requests(str(path))
+        self.assertEqual(sidecar.REQUESTS.restore(), [4400])
+        self.assertEqual(self.nft, [("add", 4400)])
+        self.assertEqual(self.states(), {4400: "approved"})
+        self.decide("deny")
+        self.assertEqual(path.read_text(), "")
+        self.assertEqual(sidecar.Requests(str(path)).restore(), [])
+
+    def test_restore_rechecks_the_file(self):
+        # The file is input: only ports of the range, never the sidecar's own.
+        path = Path(self.tmp.name) / "approved"
+        path.write_text("4400\n22\n8081\n2222\n70000\nx; rm -rf /\n5173\n")
+        self.assertEqual(sidecar.Requests(str(path)).restore(), [4400, 5173])
+        self.assertEqual(self.nft, [("add", 4400), ("add", 5173)])
+
+    def test_a_missing_file_restores_nothing(self):
+        self.assertEqual(sidecar.Requests(str(Path(self.tmp.name) / "none")).restore(), [])
+        self.assertEqual(sidecar.Requests("").restore(), [])
+
     def test_a_refused_firewall_change_is_an_error_not_an_approval(self):
         self.ask()
         self.nft_ok = False

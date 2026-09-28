@@ -116,11 +116,15 @@ for n in lan ts gw agentA agentB; do ns "$n" python3 -m http.server 8000 --bind 
 ns agentA python3 -m http.server 22 --bind 0.0.0.0 >/dev/null 2>&1 &
 ns agentA python3 -m http.server 4400 --bind 0.0.0.0 >/dev/null 2>&1 &
 ns lan python3 /sbx/tests/sidecar_fake_api.py 203.0.113.10 9000 &
-ns sideA python3 /sbx/sidecar/sidecar.py --agent-addr 10.79.0.1 --vm-addr 10.79.0.2 --net-addr 10.77.0.57 \
-  --secret-file /tmp/secretA --tokens-file /tmp/tokensA \
-  --claude-upstream http://203.0.113.10:9000 --github-upstream http://203.0.113.10:9000 2>/tmp/sideA.log &
+start_sideA() {
+  ns sideA python3 /sbx/sidecar/sidecar.py --agent-addr 10.79.0.1 --vm-addr 10.79.0.2 --net-addr 10.77.0.57 \
+    --secret-file /tmp/secretA --tokens-file /tmp/tokensA --approved-file /tmp/approvedA \
+    --claude-upstream http://203.0.113.10:9000 --github-upstream http://203.0.113.10:9000 2>>/tmp/sideA.log &
+  SIDEA_PID=$!
+}
+start_sideA
 ns sideB python3 /sbx/sidecar/sidecar.py --agent-addr 10.79.0.5 --vm-addr 10.79.0.6 --net-addr 10.77.0.58 \
-  --secret-file /tmp/secretB --tokens-file /tmp/tokensB \
+  --secret-file /tmp/secretB --tokens-file /tmp/tokensB --approved-file /tmp/approvedB \
   --claude-upstream http://203.0.113.10:9000 --github-upstream http://203.0.113.10:9000 2>/tmp/sideB.log &
 sleep 2
 
@@ -186,6 +190,14 @@ report "sandbox cannot approve its own request"  "$(code agentA -H "Authorizatio
 contains "trusted side sees the request pending" "$(c ts http://10.77.0.57:8081/requests)" pending
 report "trusted side approves"                   "$(code ts -d '{"port":4400}' http://10.77.0.57:8081/approve)" 200
 report "tailnet device -> port 4400 after approval" "$(code ts http://10.77.0.57:4400/)" 200
+# A reboot of the sidecar: the apply script renders the firewall afresh (the
+# approved set empty), then restarts the service, which opens the port again.
+ns sideA nft -f /tmp/sideA.conf
+expect_tcp fail "port 4400 with a fresh firewall, before the restart"    ts 10.77.0.57 4400
+kill "$SIDEA_PID"; wait "$SIDEA_PID" 2>/dev/null || true
+start_sideA
+for _ in $(seq 60); do ns sideA ss -ltn | grep -q '10.77.0.57:8081 ' && break; sleep 0.5; done
+report "tailnet device -> port 4400 after a restart"   "$(code ts http://10.77.0.57:4400/)" 200
 expect_tcp fail "agent B -> sidecar A port 4400"                       agentB 10.77.0.57 4400
 expect_tcp fail "LAN host -> sidecar A port 4400"                      lan    10.77.0.57 4400
 report "trusted side denies"                     "$(code ts -d '{"port":4400}' http://10.77.0.57:8081/deny)" 200

@@ -172,7 +172,7 @@ layer 2: sbx stops with an error.
 | `remote_control_mode` | `acceptEdits` | the permission mode of Remote Control sessions. `""` turns the server off. |
 | `ssh_key` | `~/.config/sbx/id_ed25519` | the private key for the sandboxes |
 | `agent_sidecar` | `true` | every agent sandbox gets a sidecar: a small trusted VM on the sandbox's own VLAN that holds its credentials and its port policy. `false`: an agent sandbox sits on the agent bridge alone, as before sidecars. |
-| `sidecar_ports` | `open` | what a sidecar forwards to its sandbox. `open`: port 22 and every port from 1024 to 32767. `ask`: port 22, and a port only after the sandbox asked and you approved. |
+| `sidecar_ports` | `open` | what a sidecar forwards to its sandbox. `open`: port 22 and every port from 1024 to 32767. `ask`: port 22, and a port only after the sandbox asked and you approved. An approval lasts until a denial, across reboots. |
 | `preview_zone` | | the domain of the previews, a zone on your Cloudflare account. Use one of its own, not your main domain. |
 | `cloudflare_account_id` | | the Cloudflare account of that zone |
 | `cloudflare_token_command` | | a command that prints the Cloudflare API token. `sbx cloudflare-token` writes it. |
@@ -311,6 +311,7 @@ take it for a sandbox. Its VM is named `<sandbox>-sc`.
 | `/etc/sbx/sidecar.env` | the sandbox's policy: the wire, the sandbox's name, `sidecar_ports`, the upstreams. `sbx new` writes it. |
 | `/etc/sbx/sidecar/secret` | the per-sandbox placeholder that the sandbox presents |
 | `/etc/sbx/sidecar/tokens` | `claude=` and `github=`: the real credentials |
+| `/etc/sbx/sidecar/approved` | the ports approved in `ask` mode, one per line. The sidecar opens them again when it starts, so an approval survives a reboot and a policy change. |
 | `/etc/nftables.conf` | the firewall, rendered from `sidecar/nftables.conf.tmpl` by `sbx-sidecar-apply` |
 | `/usr/local/bin/sbx-sidecar-apply` | renders the firewall, registers the sandbox's name, restarts the service. `--claude-token` reads a new token from stdin; `--tunnel-token` the tunnel's connector token (empty: stop the tunnel). |
 | `/etc/sbx/sidecar/cloudflared.env` | `TUNNEL_TOKEN=`: the connector token of the sandbox's preview tunnel, while it publishes |
