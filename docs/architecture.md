@@ -456,7 +456,23 @@ user service in tmux, logs to `~/.local/state/sbx/remote-control.log`, and
 needs no inbound port. The CLI first writes the answers to two one-time
 dialogs into `~/.claude.json`: the workspace trust and the Remote Control
 consent. A full login carries `org:create_api_key` among its scopes, which is
-why an agent sandbox never gets one: every entry point checks the profile.
+why an agent sandbox gets one only through `sbx remote-control --allow-agent`.
+
+**Resume after a reboot** (`sbx autostart`, `sbxlib/sessions.py`). Claude Code
+writes `~/.claude/sessions/<pid>.json` for each running process: the session
+id, its folder, its name, and its Remote Control id. The file can outlive its
+process, so a session is live only when `/proc/<pid>` exists with the start
+time (field 22 of its `stat`) that the file records; a reused pid has another.
+A user timer records the live ones every minute, and skips a tick while the
+machine shuts down (`/run/nologin`), so a shutdown never empties the list. At
+boot a oneshot user unit waits for the network, then resumes each recorded
+session that is not live, in a tmux server of its own (`-L sbx-resume`): the
+unit stays active after it ran, so systemd leaves that server alone, and a
+restart of the Remote Control server's tmux cannot take it down. At boot
+Proxmox starts the gateway first (`startup: order=1`), then the guests with
+`onboot` and no order, by id, so a sandbox may come up seconds before its
+sidecar; the resume waits for the network. The CLI sets `onboot` only: a start
+order needs `Sys.Modify` on the whole host, which the token must not have.
 
 ## The templates
 

@@ -24,8 +24,11 @@ path, a git URL, or a name that `sbx projects` lists.
 | `sbx new <name> [options]` | makes a sandbox. The options are below. |
 | `sbx list` | every sandbox: name, profile, project, status, VM ID, expiry, address |
 | `sbx ssh <name> [--sidecar] [-- command]` | a shell in the sandbox, or one command. `--sidecar`: the sandbox's sidecar instead (the sandbox's name, port 2222). |
-| `sbx snap <name> [label]` | takes a snapshot. The default label is `clean`. |
-| `sbx rollback <name> [label]` | returns to a snapshot. The default label is `clean`. |
+| `sbx snap <name> [label] [--ram]` | takes a snapshot of the sandbox and its sidecar, which keep running. The default label is `clean`. `--ram` saves the memory too, so a rollback resumes them as they were. |
+| `sbx rollback <name> [label]` | returns the sandbox and its sidecar to a snapshot. The default label is `clean`. |
+| `sbx autostart <name>` | the sandbox and its sidecar start at host boot, and the Claude Code sessions live in it are resumed after one. Nothing running is restarted. See [After a host reboot](usage.md#after-a-host-reboot). |
+| `sbx autostart <name> --status` | whether it starts at boot, the sessions it would resume, and the last resume |
+| `sbx autostart <name> --off` | no start at boot, no resume |
 | `sbx extend <name> --days N` | moves the expiry N days later, from today or from the current expiry, whichever is later |
 | `sbx extend <name> --never` | removes the expiry: `sbx gc` never removes the sandbox |
 | `sbx rm <name> [-y]` | destroys the sandbox and its snapshots |
@@ -270,6 +273,8 @@ secret, never the value.
 | `~/code/<project>` | the project clone |
 | `~/.local/state/sbx/recipe.log` | the output of the recipe |
 | `~/.local/state/sbx/remote-control.log` | the output of the Remote Control server |
+| `~/.local/state/sbx/claude-sessions.json` | with `sbx autostart`: the live Claude Code sessions, recorded every minute |
+| `~/.local/state/sbx/claude-resume.log` | with `sbx autostart`: what the last boot resumed |
 | `~/.config/sbx/claude.env` | the Claude token, read by every shell; with `sidecar_claude = "proxy"`, the sidecar's base URL and the placeholder instead |
 | `~/.git-credentials` | with a sidecar: the placeholder for the sidecar's proxy. Without: the project's git token. |
 | `/etc/sbx/tls/` | the sandbox's certificate |
@@ -284,6 +289,7 @@ secret, never the value.
 | `sbx` | the VM is a sandbox |
 | `sbx-agent`, `sbx-personal` | the profile |
 | `sbx-exp-YYYYMMDD` | the expiry date |
+| `sbx-autostart` | `sbx autostart` is on: the sandbox and its sidecar start at boot, after the gateway |
 | `sbx-proj-<project>` | the project |
 | `sbx-tpl-<name>` | the template it was cloned from |
 

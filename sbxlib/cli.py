@@ -28,6 +28,7 @@ from . import previews as previews_mod
 from . import projects as projects_mod
 from . import remotecontrol
 from . import secretstore
+from . import sessions as sessions_mod
 from . import templates as templates_mod
 from . import versions as versions_mod
 from .config import Config, ConfigError, load as load_config, local_conf_path, state_dir
@@ -1478,12 +1479,12 @@ def _connect(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostna
 
 def cmd_list(args, cfg: Config, runner: Runner, api=None) -> int:
     today = dt.date.today()
-    rows = [("NAME", "PROFILE", "TEMPLATE", "PROJECT", "STATUS", "VMID", "EXPIRES", "ADDRESS")]
+    rows = [("NAME", "PROFILE", "TEMPLATE", "PROJECT", "STATUS", "VMID", "EXPIRES", "BOOT", "ADDRESS")]
     for box in _pve(cfg, runner, api).sandboxes():
         exp = box.expires
         rows.append((box.hostname, box.profile, box.template or "-", box.project or "-", box.status, str(box.vmid),
                      "-" if exp is None else f"{exp}{' (EXPIRED)' if exp < today else ''}",
-                     cfg.fqdn(box.hostname)))
+                     "yes" if box.autostart else "-", cfg.fqdn(box.hostname)))
     widths = [max(len(r[c]) for r in rows) for c in range(len(rows[0]))]
     for r in rows:
         print("  ".join(cell.ljust(w) for cell, w in zip(r, widths)).rstrip())
@@ -1598,18 +1599,61 @@ def cmd_herdr(args, cfg: Config, runner: Runner, api=None) -> int:
 
 
 def cmd_snap(args, cfg: Config, runner: Runner, api=None) -> int:
+    """The sandbox and its sidecar, with one label: the sidecar holds the
+    sandbox's network and credentials, so the two only make sense together.
+    Both keep running."""
     pve = _pve(cfg, runner, api)
     box = pve.require(names.hostname(args.name))
-    pve.snapshot(box.node, box.vmid, args.label)
-    info(f"snapshot '{args.label}' taken")
+    sidecar = pve.sidecars().get(box.hostname)
+    for vm in [box] + ([sidecar] if sidecar else []):
+        pve.snapshot(vm.node, vm.vmid, args.label, ram=args.ram)
+    what = f"{box.hostname}" + (" and its sidecar" if sidecar else "")
+    info(f"snapshot '{args.label}' of {what} taken" + (", with RAM" if args.ram else ""))
     return 0
 
 
 def cmd_rollback(args, cfg: Config, runner: Runner, api=None) -> int:
     pve = _pve(cfg, runner, api)
     box = pve.require(names.hostname(args.name))
+    # The sidecar first: the sandbox's network runs through it. A sidecar
+    # with no snapshot of that label (made before snap covered sidecars)
+    # keeps its state.
+    if sidecar := pve.sidecars().get(box.hostname):
+        try:
+            pve.rollback(sidecar.node, sidecar.vmid, args.label)
+        except PveError as exc:
+            warn(f"the sidecar of {box.hostname} stays as it is: {exc}")
     pve.rollback(box.node, box.vmid, args.label)
     info(f"rolled back to '{args.label}'")
+    return 0
+
+
+def cmd_autostart(args, cfg: Config, runner: Runner, api=None) -> int:
+    """Start at boot, and resume the Claude Code sessions that were live.
+    Config and files only: nothing running is stopped or restarted."""
+    pve = _pve(cfg, runner, api)
+    box = pve.require(names.hostname(args.name))
+    vm = Vm(cfg, runner, box.hostname)
+    if args.status:
+        recorded, live, logtail = sessions_mod.status(vm)
+        live_ids = {s["sessionId"] for s in live}
+        print(f"{box.hostname}: start at boot {'on' if box.autostart else 'off'}")
+        print(f"sessions to resume after a reboot ({len(recorded)}):")
+        for s in recorded:
+            print(f"  {s['sessionId'][:8]}  {s['name'] or '-':<24} {s['cwd']}"
+                  f"  {'live' if s['sessionId'] in live_ids else 'not running'}")
+        if logtail.strip():
+            print("last resume:\n" + "\n".join("  " + line for line in logtail.strip().splitlines()))
+        return 0
+    if args.off:
+        pve.set_autostart(box, False)
+        sessions_mod.disable(vm)
+        info(f"{box.hostname} and its sidecar no longer start at boot; its sessions are not resumed")
+        return 0
+    pve.set_autostart(box, True)
+    sessions_mod.enable(vm)
+    info(f"{box.hostname} and its sidecar start at boot (after the gateway), and the Claude Code sessions "
+         f"live at a reboot are resumed. See them: sbx autostart {args.name} --status")
     return 0
 
 
@@ -1907,11 +1951,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-run", action="store_true", help="type each command, do not start it")
     s.set_defaults(fn=cmd_layout)
 
-    for name, fn, text in (("snap", cmd_snap, "take a snapshot"), ("rollback", cmd_rollback, "return to a snapshot")):
+    for name, fn, text in (("snap", cmd_snap, "take a snapshot of a sandbox and its sidecar"),
+                           ("rollback", cmd_rollback, "return a sandbox and its sidecar to a snapshot")):
         s = sub.add_parser(name, help=text)
         s.add_argument("name")
         s.add_argument("label", nargs="?", default="clean")
+        if name == "snap":
+            s.add_argument("--ram", action="store_true",
+                           help="save the memory too: a rollback resumes the VMs as they were")
         s.set_defaults(fn=fn)
+
+    s = sub.add_parser("autostart", help="start a sandbox at boot and resume its Claude Code sessions")
+    s.add_argument("name")
+    how = s.add_mutually_exclusive_group()
+    how.add_argument("--off", action="store_true", help="no start at boot, no resume")
+    how.add_argument("--status", action="store_true", help="whether it starts at boot, and the sessions it would resume")
+    s.set_defaults(fn=cmd_autostart)
 
     s = sub.add_parser("extend", help="move a sandbox's expiry later, or remove it")
     s.add_argument("name")

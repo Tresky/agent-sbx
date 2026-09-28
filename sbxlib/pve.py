@@ -27,6 +27,12 @@ from . import projects
 from .config import Config, ConfigError
 from .run import Runner
 
+# `sbx autostart`: the sandbox and its sidecar start at boot. Only `onboot`:
+# a start ORDER needs Sys.Modify on the whole host, which the token must not
+# have. Proxmox starts the gateway first (order 1, host/20-gw-create.sh), then
+# the unordered guests by id; the resume in the sandbox waits for the network.
+AUTOSTART_TAG = "sbx-autostart"
+
 _TOKEN_RE = re.compile(r"^[^@\s]+@[^!\s]+![^=\s]+=[0-9a-fA-F-]{36}$")
 TASK_TIMEOUT = 900.0
 
@@ -149,6 +155,10 @@ class Sandbox:
         return "default"
 
     @property
+    def autostart(self) -> bool:
+        return AUTOSTART_TAG in self.tags
+
+    @property
     def expires(self) -> dt.date | None:
         for tag in self.tags:
             if tag.startswith("sbx-exp-"):
@@ -242,6 +252,16 @@ class Pve:
         if expires:
             tags.append(f"sbx-exp-{expires:%Y%m%d}")
         self.api("PUT", self._vm(box.node, box.vmid, "/config"), {"tags": ";".join(tags)})
+
+    def set_autostart(self, box: Sandbox, on: bool) -> None:
+        """Start at boot, or not, for the sandbox and its sidecar: config only,
+        which a running VM takes without a restart. The tag lets `sbx list`
+        show it without a call per VM."""
+        sidecar = self.sidecars().get(box.hostname)
+        if sidecar is not None:
+            self.api("PUT", self._vm(sidecar.node, sidecar.vmid, "/config"), {"onboot": 1 if on else 0})
+        tags = [t for t in box.tags if t != AUTOSTART_TAG] + ([AUTOSTART_TAG] if on else [])
+        self.api("PUT", self._vm(box.node, box.vmid, "/config"), {"onboot": 1 if on else 0, "tags": ";".join(tags)})
 
     def find(self, hostname: str) -> Sandbox | None:
         return next((s for s in self.sandboxes() if s.hostname == hostname), None)
@@ -363,8 +383,13 @@ class Pve:
         self.stop(node, vmid)
         self._wait(node, self.api("DELETE", self._vm(node, vmid), {"purge": 1, "destroy-unreferenced-disks": 1}))
 
-    def snapshot(self, node: str, vmid: int, label: str):
-        self._wait(node, self.api("POST", self._vm(node, vmid, "/snapshot"), {"snapname": label}))
+    def snapshot(self, node: str, vmid: int, label: str, ram: bool = False):
+        """A snapshot of a running VM; it keeps running. With ram, the memory is
+        saved too, so a rollback resumes the VM as it was, processes and all."""
+        params = {"snapname": label}
+        if ram:
+            params["vmstate"] = 1
+        self._wait(node, self.api("POST", self._vm(node, vmid, "/snapshot"), params))
 
     def rollback(self, node: str, vmid: int, label: str):
         self._wait(node, self.api("POST", self._vm(node, vmid, f"/snapshot/{urllib.parse.quote(label, safe='')}/rollback")))

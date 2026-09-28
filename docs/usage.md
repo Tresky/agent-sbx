@@ -209,14 +209,36 @@ command warns each time. `sbx new` never does it for an agent sandbox. The
 sessions of Remote Control talk to Anthropic with that sign-in; a `claude` in
 a terminal of the sandbox keeps the sidecar's proxy.
 
+## After a host reboot
+
+A sandbox does not start with the host unless you mark it:
+
+```
+sbx autostart lab            start at boot, and resume its Claude Code sessions
+sbx autostart lab --status   what it would resume
+sbx autostart lab --off
+```
+
+Marking changes the VMs' configuration and installs two small programs in
+the sandbox; nothing running is restarted. At the next boot the gateway
+starts first, then the sandbox and its sidecar, and every Claude Code
+session that was running in it comes back with `claude --resume`: on Remote
+Control when the sandbox has the full claude.ai login, else in a terminal. A
+session that you ended is not resumed. The resumed sessions run in their own
+tmux server: `sbx ssh lab`, then `tmux -L sbx-resume ls`.
+
 ## Snapshots
 
 ```
 sbx snap lab             take a snapshot named "clean"
 sbx snap lab before-upgrade
+sbx snap lab before-upgrade --ram   with the memory: a rollback resumes it as it was
 sbx rollback lab         return to "clean"
 sbx rollback lab before-upgrade
 ```
+
+A snapshot covers the sandbox and its sidecar, with the same label, and
+neither stops for it.
 
 An agent sandbox gets a `clean` snapshot after its recipe, so a rollback
 returns it to a sandbox that is ready for work.
