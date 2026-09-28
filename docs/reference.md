@@ -22,7 +22,7 @@ path, a git URL, or a name that `sbx projects` lists.
 | Command | What it does |
 |---|---|
 | `sbx new <name> [options]` | makes a sandbox. The options are below. |
-| `sbx list` | every sandbox: name, profile, project, status, VM ID, expiry, address |
+| `sbx list` | every sandbox: name, profile, template, project, status, VM ID, expiry, start at boot, address |
 | `sbx ssh <name> [--sidecar] [-- command]` | a shell in the sandbox, or one command. `--sidecar`: the sandbox's sidecar instead (the sandbox's name, port 2222). |
 | `sbx snap <name> [label] [--ram]` | takes a snapshot of the sandbox and its sidecar, which keep running. The default label is `clean`. `--ram` saves the memory too, so a rollback resumes them as they were. |
 | `sbx rollback <name> [label]` | returns the sandbox and its sidecar to a snapshot. The default label is `clean`. |
@@ -31,8 +31,8 @@ path, a git URL, or a name that `sbx projects` lists.
 | `sbx autostart <name> --off` | no start at boot, no resume |
 | `sbx extend <name> --days N` | moves the expiry N days later, from today or from the current expiry, whichever is later |
 | `sbx extend <name> --never` | removes the expiry: `sbx gc` never removes the sandbox |
-| `sbx rm <name> [-y]` | destroys the sandbox and its snapshots |
-| `sbx gc [-y]` | destroys each expired sandbox, after a confirmation |
+| `sbx rm <name> [-y]` | destroys the sandbox, its sidecar and their snapshots, and withdraws its previews |
+| `sbx gc [-y]` | destroys each expired sandbox, each sidecar whose sandbox is gone, and each preview tunnel whose sandbox is gone, after a confirmation |
 | `sbx herdr <name> [--attach]` | adds the sandbox to the herdr sidebar. `--attach` opens one full herdr window on it. |
 | `sbx layout <name> [--replace] [--no-run]` | builds the project's `.sandbox/herdr.toml` panes in the sandbox. `--replace` closes the tab of the same name first. `--no-run` types each command and does not start it. |
 | `sbx gpu status` | which sandbox holds the GPU |
@@ -71,9 +71,9 @@ Options of `sbx new`:
 | `sbx git-token <project> [--host H] [--username U] [--stdin] [--no-check] [--remove]` | stores the project's git token in [the secret store](#the-secret-store), after a check that it covers each repository. `--no-check` skips the check. `--remove` forgets it. The project may be a git URL: nothing is cloned, and no checkout is needed on this Mac. A project named by URL then reads its `.sandbox/` with this token. |
 | `sbx claude-token` | runs `claude setup-token` and stores the Claude token |
 | `sbx claude-token --stdin` | reads a new Claude token from stdin |
-| `sbx claude-token --push [name ...]` | writes the stored token into running sandboxes, and into the named ones |
+| `sbx claude-token --push [name ...]` | writes the stored token into running sandboxes, and into the named ones (for an agent sandbox with the proxy: into its sidecar) |
 | `sbx claude-token --status` | shows whether a token is stored, and when it expires |
-| `sbx claude-token --remove` | forgets the token, and deletes it from each sandbox |
+| `sbx claude-token --remove` | forgets the token, and deletes it from each sandbox and sidecar |
 | `sbx remote-control <name> [--mode M] [--status] [--off] [--allow-agent]` | signs a personal sandbox in to claude.ai and runs its Remote Control server. `--allow-agent` does it in an agent sandbox too; see [security.md](security.md). |
 | `sbx cloudflare-token [--stdin] [--remove]` | stores the Cloudflare API token that `sbx publish` uses, and sets `cloudflare_token_command` |
 | `sbx publish <name> <port> [--policy P] [--host LABEL] [--plain]` | publishes a port of an agent sandbox at `https://<label>.<preview_zone>`, behind Cloudflare Access. The default label is `<name>-<port>`; the default policy is `me`. `--plain`: the server speaks plain http on `0.0.0.0`, though the sandbox has a certificate. See [Previews](usage.md#previews). |
@@ -142,7 +142,7 @@ layer 2: sbx stops with an error.
 | `SBX_TEMPLATE_VMID_MAX` | `template_vmid_max` | `9099` | the last ID that a template version can take. An ID in use is skipped. |
 | `SBX_VMID_MIN` | `vmid_min` | `9100` | the first sandbox ID |
 | `SBX_VMID_MAX` | `vmid_max` | `9199` | the last sandbox ID |
-| `SBX_VM_STORAGE` | `vm_storage` | `local-lvm` | the storage of the VM disks. It must make linked clones. |
+| `SBX_VM_STORAGE` | `vm_storage` | `local-lvm` | the storage of the VM disks, of a type that can make linked clones (LVM-thin, ZFS, a directory with qcow2). Proxmox chooses the kind of clone; on LVM-thin it made full copies. |
 | `SBX_SNIPPET_STORAGE` | | `local` | a file storage for the cloud-init snippet of the build |
 | `SBX_IMAGE_STORAGE_DIR` | | `/var/lib/vz/template/iso` | where the build keeps the Ubuntu image |
 | `SBX_POOL` | `pve_pool` | `sbx` | the Proxmox pool of the sandboxes. The token is scoped to it. |
@@ -210,9 +210,10 @@ component as `SBX_RUBY_VERSIONS`.
 | `[rust]` | `toolchains` | `["stable"]` | the rustup toolchains; the first is the default |
 | `[rust]` | `components` | `"clippy rustfmt"` | more rustup components |
 | `[python]` | `versions` | `["3.13"]` | the Pythons that uv caches |
+| `[mise]` | `tools` | `[]` | what `mise use --global` installs in the template, such as `["ruby@3.4.10", "node@24"]` |
 | `[odin]` | `version`, `wgpu_version`, `premake_version` | see `template/components/odin.sh` | the Odin, wgpu-native and premake releases |
 
-`rails`, `gis` and `media` take no settings.
+`rails`, `gis`, `media` and `sidecar` take no settings. `rails` needs `ruby` before it in the list.
 
 ### Project bindings (`~/.config/sbx/bindings/<project>.toml`)
 

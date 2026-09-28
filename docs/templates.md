@@ -1,18 +1,50 @@
 # Templates
 
-A sandbox is a linked clone of a template. You can have several templates,
+A sandbox is a copy of a template. You can have several templates,
 one for each kind of project, and each person builds only the ones that they
 use. A Rust developer never builds Ruby, and a Rails developer never builds
 Rust.
 
 For every command and key, read [reference.md](reference.md). For how a build
-works inside, read [architecture.md](architecture.md), "The template".
+works inside, read [architecture.md](architecture.md), "The templates".
+
+```mermaid
+flowchart LR
+    def["📄 definition<br/><small>templates/rails.toml<br/>components · apt · image_url<br/>[node] [mise] …</small>"]
+    fp{{"fingerprint<br/><small>definition + core + components</small>"}}
+    subgraph build["30-template-build.sh on the host"]
+        direction TB
+        img["cloud image<br/><small>Ubuntu 24.04 or<br/>Debian 13 genericcloud</small>"]
+        vm["build VM<br/><small>cloud-init + payload</small>"]
+        core["provision.sh: the core<br/><small>Docker · Node · Chrome<br/>Claude Code · herdr · mirror</small>"]
+        comps["components<br/><small>ruby · rails · go · rust<br/>python · mise · sidecar …</small>"]
+        seal["seal<br/><small>new machine id,<br/>no host keys, no logs</small>"]
+        img --> vm --> core --> comps --> seal
+    end
+    tpl[("template<br/><small>sbx-tpl-rails-date<br/>tag sbx-h-fingerprint</small>")]
+    sb["🤖👤 sandboxes<br/><small>sbx new clones it</small>"]
+    def --> fp --> build --> tpl --> sb
+    fp -. "differs from the tag:<br/>OUT OF DATE" .-> tpl
+
+    classDef infra fill:#e2e8f0,stroke:#334155,color:#0f172a
+    classDef mine fill:#dbeafe,stroke:#1d4ed8,color:#0f172a
+    classDef untrusted fill:#fef3c7,stroke:#b45309,color:#0f172a
+    class def,fp mine
+    class img,vm,core,comps,seal,tpl infra
+    class sb untrusted
+    style build fill:#f8fafc,stroke:#334155,color:#0f172a
+```
 
 ## What is in a template
 
-Every template has the **core**: the base tools, Docker, Node, Chrome (through
-`agent-browser`), Claude Code, herdr, and the port mirror. sbx itself needs
-these.
+Every template has the **core**: the base tools, git, Docker, Node, Chrome
+(through `agent-browser`, with Playwright's libraries), Claude Code, herdr, and
+the port mirror. sbx itself needs these. The one exception is a `bare`
+definition, which gets none of it: the sidecar.
+
+A template starts from Ubuntu 24.04, or from the cloud image that its
+definition names (`image_url`): the `debian` and `sidecar` definitions use
+Debian 13's genericcloud image, which has no drivers or firmware.
 
 A template adds **components**. A component is one shell file in
 `template/components/`:
@@ -28,6 +60,7 @@ A template adds **components**. A component is one shell file in
 | `gis` | GEOS, GDAL and PROJ |
 | `media` | ffmpeg |
 | `mise` | mise, with its shims on the PATH of every shell. `[mise] tools` installs tools in the template, such as `["python@3.13"]`. |
+| `sidecar` | the sidecar's firewall, credential proxy, expose API and `cloudflared`; for a `bare` definition only |
 
 `sbx template components` lists them, with your own.
 
@@ -57,7 +90,7 @@ The repository has these definitions in `templates/`:
 |---|---|
 | `minimal` | the core only |
 | `debian` | `mise`, on Debian 13 genericcloud instead of Ubuntu |
-| `sidecar` | `sidecar`, with `bare = true`: no core, on Debian 13 genericcloud (4 GB disk, 512 MB). The sidecar of each agent sandbox. `sbx setup` builds it. |
+| `sidecar` | `sidecar`, with `bare = true`: no core, on Debian 13 genericcloud (4 GB disk, 512 MB). The sidecar of each agent sandbox. `sbx setup` offers to build it. |
 | `rails` | `ruby`, `rails` |
 | `go` | `go` |
 | `rust` | `rust` |
@@ -82,7 +115,7 @@ go        shared      not built    -              0          Go
 - **STATE** is `current` when the built template matches its definition and
   its component files. After an edit to either, the state is `OUT OF DATE`.
 - **BUILT** is the ID of the newest version, and the number of older versions
-  that sandboxes still use.
+  that a linked clone still uses (none, where Proxmox makes full copies).
 - `*` marks `default_template`.
 
 `sbx template show <name>` shows one template in detail: its components, the
@@ -98,10 +131,11 @@ sbx template rebuild --changed       each one that is not current
 
 - A build takes 15 to 40 minutes, and asks for the host's root password one
   time.
-- Each build is a **new version**. Sandboxes keep the version that they were
-  cloned from; new sandboxes get the new version.
-- A version that no sandbox uses is removed after the next build of that
-  template, or by `sbx template prune`.
+- Each build is a **new version**; new sandboxes get it. A sandbox is a full
+  copy and does not need its template, so a build never touches one.
+- An older version is removed after the next build of that template, or by
+  `sbx template prune`. `sbx template rm <name>` removes every version of a
+  template.
 - If your SSH session drops during a build, run `sbx template finish <name>`.
 
 ## Choose the template of a sandbox

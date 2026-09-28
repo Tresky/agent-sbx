@@ -1,13 +1,13 @@
 # One-time setup
 
-This document sets up sbx on your own Proxmox host and your own Mac. Nothing
-connects to a different person's host or tailnet.
+This document sets up sbx on your own Proxmox host and your own Mac (or Linux
+machine). Nothing connects to a different person's host or tailnet.
 
 ## What you need
 
 - A Proxmox VE 8 or 9 host, with its root password. The host needs a Linux
-  bridge on your LAN and a storage that can make linked clones (LVM-thin, ZFS,
-  or a directory storage with qcow2).
+  bridge on your LAN and a storage for VM disks of a type that can make linked
+  clones (LVM-thin, ZFS, or a directory storage with qcow2).
 - A Mac with Python 3.11 or later, and the Tailscale app, signed in. A Linux
   machine works too: see [A Linux machine instead of a Mac](#a-linux-machine-instead-of-a-mac).
 - A Tailscale tailnet where you are an admin. You change its policy and its DNS.
@@ -15,6 +15,29 @@ connects to a different person's host or tailnet.
   `herdr` for the sidebar.
 
 ## The fast path: `sbx setup`
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 420}}}%%
+flowchart TB
+    start(["sbx setup --host &lt;address&gt;"])
+    host["<b>1–3 · the host</b><br/><small>root SSH (the password, once) · free bridges, subnets<br/>and ids → host/local.conf · copy the scripts</small>"]
+    bridges["<b>4 · the two bridges</b><br/><small>shows the change in /etc/network/interfaces,<br/>asks, keeps a backup</small>"]
+    policy["<b>5 · 🔒 Tailscale policy</b><br/><small>MERGE the fragment · no rule with * as a source</small>"]
+    gw["<b>6 · the gateway container</b><br/><small>dnsmasq · nftables guard · Tailscale login</small>"]
+    dns{"sbx-gw.sbx.internal<br/>resolves here?"}
+    rest["<b>7–9 · templates and this machine</b><br/><small>the templates you pick, then the sidecar · the API token<br/>→ keychain or ~/.config/sbx/secrets · ssh config · mkcert</small>"]
+    doctor(["10 · sbx doctor  →  then sbx doctor --isolation"])
+    start --> host --> bridges --> policy --> gw --> dns
+    dns -- "no: add the split-DNS nameserver;<br/>on Linux, accept routes" --> dns
+    dns -- yes --> rest --> doctor
+
+    classDef step fill:#e2e8f0,stroke:#334155,color:#0f172a
+    classDef ask fill:#fef3c7,stroke:#b45309,color:#0f172a
+    classDef endc fill:#dcfce7,stroke:#15803d,color:#0f172a
+    class host,gw,rest step
+    class bridges,policy,dns ask
+    class start,doctor endc
+```
 
 `sbx setup` does steps 0 to 7 below in order. It reads your host, proposes
 the values of `host/local.conf`, and stops at each manual step in the
@@ -144,7 +167,7 @@ authentication failures", add `-o PubkeyAuthentication=no` to each `ssh` and
 ## 1. Copy the scripts to the Proxmox host
 
 ```
-scp -r host gw template root@<pve-host>:/root/sbx/
+scp -r host gw template templates sbxlib sidecar root@<pve-host>:/root/sbx/
 ```
 
 ## 2. Tailnet policy
@@ -170,7 +193,9 @@ shows the change, asks before it applies the change, and keeps a backup.
 ssh -t root@<pve-host> bash /root/sbx/host/10-bridges.sh
 ```
 
-Check: `ip link show <agent-bridge>` and `ip link show <personal-bridge>` show the two bridges.
+Check: `ip link show <agent-bridge>` and `ip link show <personal-bridge>` show the two bridges, and
+`cat /sys/class/net/<agent-bridge>/bridge/vlan_filtering` prints `1`: each agent sandbox and its
+sidecar get a VLAN of their own on it.
 
 ## 4. The gateway
 
@@ -208,8 +233,9 @@ relay on the internet. Permit UDP port 41641 between the two subnets.
 ## 5. The templates
 
 Build one template for each kind of project that you work on. `templates/`
-has the shared definitions (`minimal`, `rails`, `go`, `rust`, `python`), and
-[templates.md](templates.md) explains how to make your own. For each one:
+has the shared definitions (`minimal`, `debian`, `rails`, `go`, `rust`,
+`python`), and [templates.md](templates.md) explains how to make your own.
+Build `sidecar` too: every agent sandbox needs one. For each one:
 
 ```
 ssh -t root@<pve-host> bash /root/sbx/host/30-template-build.sh <name>
@@ -239,8 +265,8 @@ sbx template rebuild <name>
 
 It adds the versions that your projects need (`sbx versions`), copies the
 scripts and the definitions to the host, asks for the root password once, and
-runs the build. Each build is a new version; the sandboxes of the old version
-keep it.
+runs the build. Each build is a new version; a sandbox that exists keeps
+running as it was.
 
 ## 6. The API token
 
@@ -252,7 +278,9 @@ The script makes the pool `sbx`, the user `sbx@pve`, four small roles, and the
 token. It then prints three things:
 
 1. A `security add-generic-password` command. Run it on your Mac. It puts the
-   token in the macOS keychain, so the secret is in no file.
+   token in the macOS keychain, so the secret is in no file. Off macOS, skip
+   it and run `sbx setup --mac-only` (step 7), which stores the token in
+   `~/.config/sbx/secrets/`.
 2. The `pve_api` and `pve_token_command` lines for `config.toml`.
 3. Two ways to verify the self-signed certificate of the host. Choose one.
    Save the CA as `~/.config/sbx/pve-root-ca.crt`, with a `.crt` name: it is a
@@ -290,8 +318,8 @@ sbx setup --mac-only
   `http://` only.
 - It runs `sbx doctor`.
 
-For `agent` sandboxes that clone a private repository, give each project its
-own token in `~/.config/sbx/bindings/<project>.toml`. [projects.md](projects.md),
+For `agent` sandboxes that clone a private repository, run
+`sbx git-token <checkout or git URL>` for each project. [projects.md](projects.md),
 "One git token per project", has the steps.
 
 Check: `sbx doctor` reports no failure.
