@@ -322,7 +322,8 @@ class Pve:
         """Returns the node the sandbox lives on. With `vlan`, the NIC carries
         that tag: the sandbox then shares a segment with its sidecar only."""
         cfg, node = self.cfg, template.node
-        # A template clones as a LINKED clone by default: seconds, not minutes.
+        # No `full`: Proxmox picks the kind of clone. On LVM-thin the reference
+        # host made full copies, which need no template afterwards.
         # `pool` puts the VM where the token's permissions apply.
         self._wait(node, self.api("POST", self._vm(node, template.vmid, "/clone"),
                                   {"newid": vmid, "name": hostname, "pool": cfg.pve_pool}))

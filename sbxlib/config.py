@@ -100,7 +100,7 @@ class Config:
     git_token_host: str = "github.com"
     gpu_mapping: str = ""              # name of a PCI Resource Mapping; empty = --gpu is refused
     # Claude Code Remote Control in a PERSONAL sandbox: "" = off, else the
-    # permission mode of the server's sessions. An agent sandbox never gets it:
+    # permission mode of the server's sessions. An agent sandbox gets it only through `sbx remote-control --allow-agent`:
     # a full claude.ai login can make API keys on the organization.
     remote_control_mode: str = "acceptEdits"
     ssh_key: str = ""                  # private key for the VMs; default <state>/id_ed25519

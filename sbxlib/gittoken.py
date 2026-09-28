@@ -1,5 +1,5 @@
 """`sbx git-token`: one git token per project, stored in the secret store
-(secretstore.py: the macOS keychain) and named from the project's bindings file.
+(secretstore.py: the macOS keychain, or files off macOS) and named from the project's bindings file.
 
 The token never appears on a command line of this tool, except in the one
 `security add-generic-password` call that stores it: that program takes the

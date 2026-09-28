@@ -273,18 +273,18 @@ GUIDE = """\
 sbx: throwaway Proxmox sandboxes for development
 
 WHAT IT IS
-  One command makes a VM on the Proxmox host in about 30 s, from one of your
-  templates. Each template has the core (Node, Docker, Chrome, Claude Code,
-  herdr) and the components that its definition names (Ruby, Go, Rust, ...).
+  One command makes a VM on the Proxmox host in a few minutes, from one of
+  your templates: the core (Node, Docker, Chrome, Claude Code, herdr) and the
+  components that its definition names (Ruby, Go, Rust, mise, ...).
   The VM gets a name at once, and every port on it is direct, with https on
   the same port:
 
       https://sbx-<name>.{domain}:<port>
 
 TWO PROFILES
-  agent      for an AI agent with full permissions. Internet only: no LAN, no
-             tailnet, no other sandbox. Secrets go in only when you name them.
-             A "clean" snapshot after setup. Expires after {ttl} days.
+  agent      for an AI agent with full permissions. Internet only, through its
+             own sidecar VM, which holds its git and Claude tokens. Secrets go
+             in only when you name them. A "clean" snapshot. Expires: {ttl} days.
   personal   for your own work. Internet and LAN. Your SSH agent for git,
              forwarded for the clones only. No expiry.
 
@@ -296,11 +296,14 @@ A SANDBOX, FROM START TO END
   sbx ssh lab                          a shell        (or: ssh sbx-lab)
   sbx herdr lab                        put it in your herdr sidebar (done by `new` too)
   sbx layout app --replace             the project's .sandbox/herdr.toml panes, again
-  sbx remote-control lab               Claude Code Remote Control (personal sandboxes only)
+  sbx remote-control lab               Claude Code Remote Control (agent: --allow-agent)
   sbx claude-token                     sign Claude Code in every sandbox in to your
                                        Claude subscription; again when the token expires
   sbx list                             every sandbox
-  sbx snap lab  /  sbx rollback lab    a snapshot, and back to it
+  sbx snap lab [--ram]  /  sbx rollback lab   a snapshot of it and its sidecar, and back
+  sbx publish lab 3000                 a preview of port 3000, behind Cloudflare Access
+  sbx extend lab --days 7              a later expiry (--never: none)
+  sbx autostart lab                    start at host boot, resume its Claude sessions
   sbx rm lab                           destroy it; `sbx gc` destroys expired ones
 
 A PROJECT
@@ -326,21 +329,20 @@ INSIDE A SANDBOX
 
 ON THE PROXMOX HOST
   Three things that are not sandboxes. `sbx setup` made them, and they stay.
-  {gw_ctid} {gw_host:<9}  a small container: the DHCP and DNS server for the
-                  sandboxes, their route to the internet, the firewall that
-                  keeps an agent sandbox off your LAN, and the Tailscale route
-                  that lets your Mac reach them. A sandbox's name comes from
-                  its DHCP request to this container, and from nothing else.
-  sbx-tpl-*       the templates, in the pool {template_pool}: one Ubuntu VM per
-                  definition and version. A sandbox is a linked clone of one,
-                  which is why `sbx new` takes seconds. They never run.
+  {gw_ctid} {gw_host:<9}  a small container: DHCP and DNS for the sandboxes (a name
+                  comes from a DHCP request, nothing else), their route out,
+                  the firewall, and the Tailscale route that reaches them.
+  sbx-tpl-*       the templates, in the pool {template_pool}: one VM per
+                  definition and version (Ubuntu 24.04, or Debian 13 for
+                  `debian` and `sidecar`). A sandbox is a copy of one. They
+                  never run.
   {agent_bridge}, {personal_bridge}  two bridges with no physical port: the agent subnet
                   ({agent_net}.0/24) and the personal subnet ({personal_net}.0/24).
                   The bridge a sandbox sits on IS its profile: the firewall
                   keys on it, and nothing inside a sandbox can change it.
 
 WHERE THINGS ARE
-  {state}/            config.toml, the sandbox key, bindings/, projects.toml
+  {state}/            config.toml, the sandbox key, bindings/, previews.toml, secrets/
   {docs}/
       usage.md         daily use: profiles, ports, Claude, snapshots
       projects.md      recipes, manifests, inputs, git tokens, pane layouts
@@ -1136,11 +1138,12 @@ def _provision_sidecar(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: i
 
 def _identity_hint(runner: Runner, host: str) -> str:
     """The ssh-add line for the key that the user's own config uses for `host`."""
+    add = "ssh-add --apple-use-keychain" if sys.platform == "darwin" else "ssh-add"
     done = runner.run(["ssh", "-G", host], check=False)
     for line in done.stdout.splitlines():
         if line.lower().startswith("identityfile "):
-            return f"ssh-add --apple-use-keychain {line.split(None, 1)[1]}"
-    return "ssh-add --apple-use-keychain ~/.ssh/<the key for that host>"
+            return f"{add} {line.split(None, 1)[1]}"
+    return f"{add} ~/.ssh/<the key for that host>"
 
 
 def _preflight_git(cfg: Config, runner: Runner, profile: str, project: Project) -> None:
@@ -1386,6 +1389,9 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
         # After the recipe, so a rollback returns to a VM that is ready for work.
         info("taking the 'clean' snapshot")
         pve.snapshot(node, vmid, "clean")
+        if sidecar:
+            # The pair, as `sbx snap` takes it: a rollback to clean returns both.
+            pve.snapshot(node, sc_vmid, "clean")
 
     if not args.no_herdr:
         _herdr_add(runner, hostname)

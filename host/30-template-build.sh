@@ -8,8 +8,9 @@
 # itself off when the provision succeeds and STAYS UP when it fails.
 #
 # Each build is a NEW version under a free id in the template range, named
-# sbx-tpl-<name>-<date>. The old versions stay for the sandboxes that are
-# linked clones of them; a version with no clones left is removed.
+# sbx-tpl-<name>-<date>. An old version stays while a linked clone uses it;
+# a version with no clones left is removed. A full copy, which Proxmox made on
+# LVM-thin, uses no version.
 #
 #   30-template-build.sh <name>                 build a new version
 #   30-template-build.sh --finish <name> [id]   attach to a build VM that is up:
