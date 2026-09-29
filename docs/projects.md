@@ -205,8 +205,9 @@ The project name is the last part of the repository URL without `.git`.
 other than GitHub, which the command does not check. `--no-check` stores it
 without asking the host. `--remove` forgets the token and the section.
 
-A sidecar gets the project's token once, from `sbx new`: a new token reaches
-the next sandbox, and a running one keeps the old one.
+A sidecar gets the project's token from `sbx new`. To give a running sandbox a
+new token, add `--push <name>` (repeatable): `sbx git-token myapp --push
+myapp` installs it there too.
 
 Without a `[git]` section, sbx uses `git_token_command` in `config.toml`. Without
 that, an agent sandbox can clone public repositories only.

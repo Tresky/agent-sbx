@@ -95,5 +95,6 @@ The sidecar's own sshd is on port 2222 (`sbx ssh <name> --sidecar`).
 - **A sidecar's code comes from its template.** A fix under `sidecar/` reaches
   a new sandbox after `sbx template rebuild sidecar`; a running sidecar keeps
   the code it was cloned with.
-- **A new git token reaches the next sandbox.** A sidecar gets the project's
-  token once, from `sbx new`.
+- **A new git token reaches a running sidecar only when pushed:**
+  `sbx git-token <project> --push <name>`. Otherwise a sidecar keeps the
+  token it got from `sbx new`.
