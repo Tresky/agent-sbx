@@ -6,6 +6,7 @@ import datetime as dt
 import getpass
 import os
 import posixpath
+import re
 import secrets
 import shlex
 import shutil
@@ -1187,8 +1188,27 @@ def _git_token(cfg: Config, runner: Runner, project: Project) -> tuple[str, str]
     return access.host, runner.run(access.token_command).stdout.strip()
 
 
+def _sidecar_env(cfg: Config, hostname: str, git_host: str, quarantine: bool = False) -> bytes:
+    return (f"SBX_SIDECAR_LINK={cfg.sidecar_link}\nSBX_AGENT_NET={cfg.agent_net}\n"
+            f"SBX_SANDBOX_HOSTNAME={hostname}\nSBX_SIDECAR_PORTS={cfg.sidecar_ports}\n"
+            f"SBX_CLAUDE_UPSTREAM=https://api.anthropic.com\nSBX_GIT_UPSTREAM=https://{git_host}\n"
+            + ("SBX_SIDECAR_QUARANTINE=1\n" if quarantine else "")).encode()
+
+
+def _refresh_sidecar_files(sc: Vm) -> None:
+    """The sidecar's scripts from THIS checkout, over the template's copies,
+    so a fix under sidecar/ reaches it without a template build."""
+    from .config import REPO_ROOT
+    src = REPO_ROOT / "sidecar"
+    sc.put((src / "sbx-sidecar-apply").read_bytes(), "/usr/local/bin/sbx-sidecar-apply", mode="0755", sudo=True)
+    sc.put((src / "nftables.conf.tmpl").read_bytes(), "/usr/local/lib/sbx/sidecar-nftables.tmpl", sudo=True,
+           mode="0644")
+    sc.put((src / "sidecar.py").read_bytes(), "/usr/local/lib/sbx/sidecar.py", mode="0644", sudo=True)
+
+
 def _provision_sidecar(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostname: str,
-                       secret: str, claude_token: str, git: tuple[str, str] | None) -> Vm:
+                       secret: str, claude_token: str, git: tuple[str, str] | None,
+                       quarantine: bool = False, refresh: bool = False) -> Vm:
     """Reach the new sidecar by its address on the sidecar network and give it
     the sandbox's policy, the secret and the real credentials, over SSH stdin.
     The sidecar then registers the sandbox's NAME, so the sandbox itself is
@@ -1207,10 +1227,9 @@ def _provision_sidecar(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: i
     sc.wait(120.0)
     sc.run("cloud-init status --wait >/dev/null 2>&1 || true")
     git_host, git_token = git or ("github.com", "")
-    env = (f"SBX_SIDECAR_LINK={cfg.sidecar_link}\nSBX_AGENT_NET={cfg.agent_net}\n"
-           f"SBX_SANDBOX_HOSTNAME={hostname}\nSBX_SIDECAR_PORTS={cfg.sidecar_ports}\n"
-           f"SBX_CLAUDE_UPSTREAM=https://api.anthropic.com\nSBX_GIT_UPSTREAM=https://{git_host}\n")
-    sc.put(env.encode(), "/etc/sbx/sidecar.env", mode="0644", sudo=True)
+    if refresh:
+        _refresh_sidecar_files(sc)
+    sc.put(_sidecar_env(cfg, hostname, git_host, quarantine), "/etc/sbx/sidecar.env", mode="0644", sudo=True)
     sc.put((secret + "\n").encode(), "/etc/sbx/sidecar/secret", sudo=True)
     sc.put(f"claude={claude_token}\ngithub={git_token}\n".encode(), "/etc/sbx/sidecar/tokens", sudo=True)
     sc.run("sudo sbx-sidecar-apply", capture=False)
@@ -1280,7 +1299,10 @@ def _git_auth(cfg: Config, runner: Runner, vm: Vm, profile: str, project: Projec
         host = access.host if access else "github.com"
         proxy = f"{cfg.sidecar_proxy_url}/github/"
         vm.put(f"http://sbx:{placeholder}@{cfg.sidecar_addr}:8080\n".encode(), ".git-credentials")
-        vm.run("git config --global credential.helper store && "
+        # --unset-all first: a sandbox that has them already (a fork of one)
+        # holds several values, and git refuses to overwrite those with one.
+        vm.run(f"git config --global --unset-all url.{q(proxy)}.insteadOf; "
+               "git config --global credential.helper store && "
                f"git config --global url.{q(proxy)}.insteadOf {q(f'https://{host}/')} && "
                f"git config --global --add url.{q(proxy)}.insteadOf {q(f'git@{host}:')} && "
                f"git config --global --add url.{q(proxy)}.insteadOf {q(f'ssh://git@{host}/')}")
@@ -1781,6 +1803,125 @@ def _confirm(question: str, yes: bool) -> bool:
         return False
 
 
+# `sbx fork`, in the copy, while its sidecar lets nothing out: stop every Claude
+# service and process, and delete the copied claude.ai login. With the
+# internet, the copy would refresh that login and sign the original out.
+FORK_CLEAN = r"""
+systemctl --user disable --now sbx-remote-control.service sbx-claude-resume.service sbx-claude-track.timer >/dev/null 2>&1 || true
+tmux -L sbx-resume kill-server 2>/dev/null || true
+tmux kill-server 2>/dev/null || true
+pkill -u "$(id -u)" -x claude 2>/dev/null || true
+sleep 1
+pkill -9 -u "$(id -u)" -x claude 2>/dev/null || true
+rm -f ~/.claude/.credentials.json ~/.local/state/sbx/claude-sessions.json ~/.local/state/sbx/claude-resume.log
+sudo sh -c 'rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup >/dev/null'
+test ! -e ~/.claude/.credentials.json && ! pgrep -u "$(id -u)" -x claude >/dev/null
+"""
+_FORK_KEEP_TAGS = ("sbx", "sbx-agent", "sbx-personal")
+
+
+def _fork_tags(src_tags, src_hostname: str, expires) -> str:
+    """The copy's tags: the profile, the template and the project of the
+    original; its own expiry; where it came from. Not the original's expiry,
+    autostart or lineage."""
+    kept = [t for t in src_tags if t in _FORK_KEEP_TAGS or t.startswith(("sbx-tpl-", "sbx-proj-"))]
+    kept += [f"sbx-fork-of-{src_hostname.removeprefix('sbx-')}"]
+    if expires:
+        kept.append(f"sbx-exp-{expires:%Y%m%d}")
+    return ";".join(kept)
+
+
+def cmd_fork(args, cfg: Config, runner: Runner, api=None) -> int:
+    """A second copy of a running agent sandbox, under a new name: its disk
+    as it is now (the database, the work, the history), a fresh sidecar on a
+    VLAN of its own, new credentials. The ORIGINAL IS ONLY READ: one snapshot,
+    a clone from it, and the removal of that snapshot. It keeps running."""
+    src_host, new_host = names.hostname(args.name), names.hostname(args.new_name)
+    pve = _pve(cfg, runner, api)
+    src = pve.require(src_host)
+    src_sc = pve.sidecars().get(src_host)
+    if src.profile != "agent" or src_sc is None:
+        raise InputError(f"{src_host} is not an agent sandbox with a sidecar; sbx fork copies those only")
+    if pve.find(new_host):
+        raise PveError(f"{new_host} already exists")
+    if not cfg.ssh_key_path.exists():
+        raise ConfigError("no sbx SSH key; run `sbx setup` first")
+    try:
+        sc_template = pve.template(cfg.sidecar_template)
+    except PveError as exc:
+        raise PveError(f"{exc}\n  The copy needs a new sidecar: sbx template rebuild {cfg.sidecar_template}") from None
+    project = Project(src.project, "", None, None, None) if src.project else None
+    claude = "" if args.no_claude else claudetoken.get(runner)
+    git = _git_token(cfg, runner, project) if project is not None else None
+
+    node = src.node
+    ttl = args.ttl if args.ttl is not None else cfg.agent_ttl_days
+    expires = dt.date.today() + dt.timedelta(days=ttl) if ttl else None
+    vmid = pve.next_vmid()
+    sc_vmid = pve.next_vmid(start=vmid + 1)
+    vlan = cfg.vlan_for(vmid)
+    pubkey = cfg.ssh_key_path.with_suffix(".pub").read_text()
+    secret = secrets.token_urlsafe(24)
+    snap = f"fork-{new_host}"[:40]
+
+    # 1. The original: a snapshot, taken while it runs.
+    info(f"snapshot '{snap}' of {src_host} (VM {src.vmid}); it keeps running")
+    pve.snapshot(node, src.vmid, snap)
+    # 2. The copy: a full clone of that snapshot, on a VLAN of its own.
+    info(f"copying {src_host} into VM {vmid} ({new_host}); this takes a few minutes")
+    pve.clone_from_snapshot(node, src.vmid, snap, vmid, new_host)
+    conf = pve.vm_config(node, vmid)
+    net0 = conf.get("net0", "")
+    if not re.search(r"\btag=\d+", net0):
+        raise PveError(f"the copy's net0 has no VLAN tag ({net0!r}); it is left stopped, as VM {vmid}")
+    params = {"net0": re.sub(r"\btag=\d+", f"tag={vlan}", net0), "onboot": 0,
+              "tags": _fork_tags(src.tags, src_host, expires)}
+    if args.cores:
+        params["cores"] = args.cores
+    if args.memory:
+        params["memory"] = args.memory
+    pve.configure(node, vmid, params)
+    # 3. A new sidecar, in quarantine: SSH in, nothing out.
+    info(f"cloning template {sc_template.name} into VM {sc_vmid} ({new_host}-sc, the sidecar; VLAN {vlan})")
+    pve.create_sidecar(sc_template, sc_vmid, new_host, vlan=vlan, pubkey=pubkey)
+    pve.start(node, sc_vmid)
+    pve.start(node, vmid)
+    known_hosts = str(state_dir() / "known_hosts")
+    for alias in (cfg.fqdn(new_host), sidecar_alias(cfg, new_host)):
+        runner.run(["ssh-keygen", "-R", alias, "-f", known_hosts], check=False)
+    info("waiting for the new sidecar (quarantine: the copy reaches nothing yet)")
+    sc = _provision_sidecar(cfg, runner, pve, node, sc_vmid, new_host, secret,
+                            claude if cfg.sidecar_claude == "proxy" else "", git, quarantine=True, refresh=True)
+    info("waiting for the copy")
+    vm = _connect(cfg, runner, pve, node, vmid, new_host, by_name_only=True)
+    vm.run("cloud-init status --wait >/dev/null 2>&1 || true")
+    # 4. Clean the copy before it reaches anything.
+    vm.run(FORK_CLEAN)
+    info("the copy's claude.ai login and Claude services are removed")
+    if claude and cfg.sidecar_claude == "proxy":
+        _install_claude_proxy(vm, secret)
+    if project is not None:
+        _git_auth(cfg, runner, vm, "agent", project, secret)
+    # 5. Out of quarantine.
+    sc.put(_sidecar_env(cfg, new_host, git[0] if git else "github.com"), "/etc/sbx/sidecar.env",
+           mode="0644", sudo=True)
+    sc.run("sudo sbx-sidecar-apply", capture=False)
+    _install_cert(cfg, runner, vm)
+    if not args.no_herdr:
+        _herdr_add(runner, new_host)
+    # 6. The original's snapshot is not needed by a full copy.
+    if not args.keep_snapshot:
+        pve.delete_snapshot(node, src.vmid, snap)
+    else:
+        info(f"kept the snapshot '{snap}' of {src_host}")
+    print(f"\n{new_host} is up: a copy of {src_host} (VM {vmid}"
+          + (f", expires {expires}" if expires else "") + ")")
+    print(f"  ssh    sbx ssh {args.new_name}")
+    print(f"  Claude Code in it has no claude.ai login. Remote Control: sbx remote-control {args.new_name} --allow-agent")
+    print("  a conversation of the original continues there as a branch: claude --resume <id>")
+    return 0
+
+
 def cmd_extend(args, cfg: Config, runner: Runner, api=None) -> int:
     pve = _pve(cfg, runner, api)
     box = pve.require(names.hostname(args.name))
@@ -2085,6 +2226,17 @@ def build_parser() -> argparse.ArgumentParser:
     how.add_argument("--off", action="store_true", help="no start at boot, no resume")
     how.add_argument("--status", action="store_true", help="whether it starts at boot, and the sessions it would resume")
     s.set_defaults(fn=cmd_autostart)
+
+    s = sub.add_parser("fork", help="a second copy of a running agent sandbox, under a new name; the original keeps running")
+    s.add_argument("name")
+    s.add_argument("new_name", metavar="NEW_NAME")
+    s.add_argument("--ttl", type=int, metavar="DAYS", help="the copy's expiry (0 = never; default: agent_ttl_days)")
+    s.add_argument("--cores", type=int, help="the copy's cores (default: the original's)")
+    s.add_argument("--memory", type=int, metavar="MB", help="the copy's memory (default: the original's)")
+    s.add_argument("--keep-snapshot", action="store_true", help="keep the snapshot of the original that the copy came from")
+    s.add_argument("--no-claude", action="store_true", help="no Claude token for the copy's sidecar")
+    s.add_argument("--no-herdr", action="store_true", help="do not add the copy to your herdr sidebar")
+    s.set_defaults(fn=cmd_fork)
 
     s = sub.add_parser("extend", help="move a sandbox's expiry later, or remove it")
     s.add_argument("name")

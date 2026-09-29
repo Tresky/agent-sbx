@@ -30,6 +30,7 @@ path, a git URL, or a name that `sbx projects` lists.
 | `sbx autostart <name>` | the sandbox and its sidecar start at host boot, and the Claude Code sessions live in it are resumed after one. Nothing running is restarted. See [After a host reboot](usage.md#after-a-host-reboot). |
 | `sbx autostart <name> --status` | whether it starts at boot, the sessions it would resume, and the last resume |
 | `sbx autostart <name> --off` | no start at boot, no resume |
+| `sbx fork <name> <new-name> [--ttl DAYS] [--cores N] [--memory MB] [--keep-snapshot] [--no-claude] [--no-herdr]` | a second copy of a running agent sandbox: its disk as it is now, a new sidecar on a VLAN of its own, new credentials, no claude.ai login. The original keeps running: sbx takes a snapshot of it, copies from that, and removes the snapshot (`--keep-snapshot` keeps it). |
 | `sbx extend <name> --days N` | moves the expiry N days later, from today or from the current expiry, whichever is later |
 | `sbx extend <name> --never` | removes the expiry: `sbx gc` never removes the sandbox |
 | `sbx rm <name> [-y]` | destroys the sandbox, its sidecar and their snapshots, and withdraws its previews |

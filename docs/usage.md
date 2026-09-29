@@ -321,6 +321,31 @@ session that you ended is not resumed. The resumed sessions run in their own
 tmux server: `sbx ssh lab`, then `tmux -L sbx-resume ls`.
 [architecture.md](architecture.md#claude-code) shows the boot, step by step.
 
+## Fork a sandbox
+
+```
+sbx fork app app2            a second copy of app, as it is now
+sbx fork app app2 --ttl 0    ... with no expiry
+```
+
+The copy has everything that is on the original's disk: the database and the
+Docker volumes, uncommitted work, the installed tools, Claude's conversation
+history. It gets its own name, a new sidecar on a VLAN of its own, and new
+credentials. The original keeps running: sbx takes a snapshot of it, copies
+from that, and removes the snapshot.
+
+What the copy does not get:
+
+- **Running processes.** A dev server, or a Claude session, must be started
+  again. A conversation of the original continues in the copy as a branch:
+  `claude --resume <id>`.
+- **The claude.ai login.** Two copies of one login sign each other out, so
+  the copy has none. Remote Control: `sbx remote-control app2 --allow-agent`.
+- **Previews and autostart.** `sbx publish` and `sbx autostart` for the copy.
+
+A fork is for agent sandboxes. [architecture.md](architecture.md#sbx-fork)
+explains the steps.
+
 ## Snapshots
 
 ```

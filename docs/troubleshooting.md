@@ -54,6 +54,8 @@ The tables below list the problems that `sbx doctor` does not explain.
 | `Every agent sandbox needs a sidecar` | the `sidecar` template is not built | `sbx template rebuild sidecar` |
 | git `Authentication failed` in an agent sandbox, and an empty `~/.git-credentials` | a sidecar from before the proxy's 401 named Basic auth: git asked empty-handed twice and deleted the placeholder. Or the token misses the repository, or changed after `sbx new` | a new token: `sbx git-token <project> --push <name>`, no new sandbox needed. An old sidecar: `sbx template rebuild sidecar`, then make the sandbox again. The sidecar's log: `sbx ssh <name> --sidecar -- sudo journalctl -u sbx-sidecar` (look for `-> 401`) |
 | `git push` of a large change fails in an agent sandbox | the proxy buffers, and a chunked upload does not pass | push in smaller pieces, or from your machine |
+| `sbx fork` stops with `the copy's net0 has no VLAN tag` | the original is not on a VLAN of its own (made with `agent_sidecar = false`) | the copy stays stopped; `sbx rm <new-name>` |
+| Remote Control in a fork asks to sign in | the copy has no claude.ai login, by design | `sbx remote-control <new-name> --allow-agent` |
 | `sbx rollback` warns `the sidecar ... stays as it is` | the sidecar has no snapshot of that label (a sandbox from before snapshots covered sidecars) | nothing to fix; take the next snapshot with `sbx snap` |
 
 ## Recipes
