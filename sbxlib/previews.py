@@ -181,6 +181,15 @@ class Previews:
     def _app_for(self, domain: str) -> dict | None:
         return next((a for a in self._apps() if a.get("domain") == domain), None)
 
+    def _apps_of_host(self, fqdn: str) -> list[dict]:
+        """Every Access application for this hostname: its own, and one made by
+        hand for some of its paths (a bypass of /mcp, for one). Its domain or a
+        destination is the hostname, or the hostname and a path."""
+        def names(app):
+            return [app.get("domain") or ""] + [d.get("uri") or "" for d in app.get("destinations") or []]
+        return [a for a in self._apps()
+                if any(n == fqdn or n.startswith(fqdn + "/") for n in names(a))]
+
     def policy_of(self, fqdn: str) -> str:
         app = self._app_for(fqdn)
         if not app:
@@ -212,6 +221,11 @@ class Previews:
         app = self._app_for(domain)
         body = self._app_body(WILDCARD_NAME, domain, pid)
         if app:
+            # Keep the policies that were added to it by hand (more people, in
+            # the dashboard), in their order; "me" only has to be among them.
+            kept = [p["id"] for p in sorted(app.get("policies") or [], key=lambda p: p.get("precedence", 0))]
+            ids = kept if pid in kept else [pid] + kept
+            body["policies"] = [{"id": i, "precedence": n} for n, i in enumerate(ids, 1)]
             self.api("PUT", f"{self.acct}/access/apps/{app['id']}", body)
         else:
             self.api("POST", f"{self.acct}/access/apps", body)
@@ -292,7 +306,10 @@ class Previews:
         self._drop_record(fqdn, t["id"])
         rules = [r for r in rules if r["hostname"] != fqdn]
         self._put_ingress(t["id"], rules)
-        if app := self._app_for(fqdn):
+        # Its own application, and one made by hand for some of its paths: a
+        # bypass must not outlive the name, or the next sandbox of that name
+        # would inherit it.
+        for app in self._apps_of_host(fqdn):
             self.api("DELETE", f"{self.acct}/access/apps/{app['id']}")
         return not rules
 
@@ -305,7 +322,7 @@ class Previews:
         for rule in self.ingress(t["id"]):
             fqdn = rule["hostname"]
             self._drop_record(fqdn, t["id"])
-            if app := self._app_for(fqdn):
+            for app in self._apps_of_host(fqdn):
                 self.api("DELETE", f"{self.acct}/access/apps/{app['id']}")
             gone.append(fqdn)
         self.delete_tunnel(t["id"])

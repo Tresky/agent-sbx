@@ -204,6 +204,20 @@ The first `sbx publish` makes one Access application for every hostname of
 the domain, with the policy `me`, before it makes any name. A hostname with
 another policy gets an application of its own. A policy names emails and
 email domains only: sbx has no way to publish past a sign-in.
+
+Policies that you add to the wildcard application in the dashboard stay: sbx
+only makes sure `sbx: me` is among them.
+
+**A server that machines must reach** (an MCP server that Claude calls, OAuth
+endpoints) cannot sign in to Access. Let those paths alone through, by hand:
+in Zero Trust, a self-hosted application for the same hostname with only
+those paths (for example `mcp`, `.well-known/oauth-protected-resource*`,
+`.well-known/oauth-authorization-server*`, `oauth/token`), and a policy with
+Action **Bypass**, Include **Everyone**. The more specific application wins
+for its paths; the rest of the hostname stays behind the sign-in. The app on
+those paths is then public, so it must check its own tokens, and the agent in
+the sandbox writes that code. `sbx publish --off` and `sbx rm` remove such an
+application with the hostname, so a bypass never outlives its preview.
 [security.md](security.md) explains the tunnel and its token.
 
 ## Work in a sandbox
