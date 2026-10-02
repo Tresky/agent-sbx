@@ -60,6 +60,7 @@ if ! pct status "$CT" >/dev/null 2>&1; then
     --net0 "name=lan0,bridge=$SBX_LAN_BRIDGE,$lan" \
     --net1 "name=sbxa0,bridge=$SBX_AGENT_BRIDGE,ip=${SBX_AGENT_NET}.1/24" \
     --net2 "name=sbxp0,bridge=$SBX_PERSONAL_BRIDGE,ip=${SBX_PERSONAL_NET}.1/24" \
+    --nameserver "$SBX_UPSTREAM_DNS" \
     --onboot 1 \
     --description "sbx gateway: DHCP+DNS for $SBX_DOMAIN, NAT, isolation rules, Tailscale subnet route"
 
@@ -76,6 +77,9 @@ fi
 # after it, unordered, and need its DHCP and DNS. Config only; a running
 # container keeps running.
 pct set "$CT" --onboot 1 --startup order=1
+# Without its own resolver the container copies the host's, which is often
+# Tailscale's 100.100.100.100: unreachable from here, so apt cannot resolve.
+pct set "$CT" --nameserver "$SBX_UPSTREAM_DNS"
 
 pct status "$CT" | grep -q running || pct start "$CT"
 # Wait for the LAN leg: setup.sh needs the internet for apt and Tailscale.
@@ -85,6 +89,14 @@ for _ in $(seq 1 30); do
 done
 pct exec "$CT" -- sh -c 'ip -4 route show default | grep -q lan0' \
   || die "the container got no default route on lan0. If $SBX_LAN_BRIDGE has no DHCP server, set SBX_GW_LAN_IP and SBX_GW_LAN_GW in host/local.conf, destroy container $CT, and run this script again"
+
+# `pct set --nameserver` applies at the next start; a running container gets
+# the same servers now. Then check names resolve, so a failure is quick and
+# clear, not a slow apt run.
+# shellcheck disable=SC2086  # one argument per server
+pct exec "$CT" -- sh -c 'printf "nameserver %s\n" "$@" > /etc/resolv.conf' sh $SBX_UPSTREAM_DNS
+pct exec "$CT" -- getent hosts deb.debian.org >/dev/null \
+  || die "the gateway cannot resolve names through $SBX_UPSTREAM_DNS. Check that the LAN lets it reach them on port 53, or set SBX_UPSTREAM_DNS in host/local.conf"
 
 log "rendering the gateway config"
 stage="$(mktemp -d)"
