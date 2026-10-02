@@ -361,7 +361,11 @@ Look at its console: qm terminal $ID   Then check: pct exec $SBX_GW_CTID -- jour
 read -r _ _ lease_ip lease_name _ <<<"$lease"
 log "DHCP works: $lease_ip, hostname in the request: '$lease_name'"
 answer="$(pct exec "$SBX_GW_CTID" -- dig +short "$lease_name.$SBX_DOMAIN" "@${SBX_AGENT_NET}.1" 2>/dev/null || true)"
-if [[ "$answer" == "$lease_ip" ]]; then
+if [[ "$lease_name" == "*" ]]; then
+  # dnsmasq writes * for a request with no hostname. The image's first request
+  # can have none; sbx-dhcp-hostname asks again with the name after cloud-init.
+  log "the first DHCP request had no hostname; the name follows after cloud-init"
+elif [[ "$answer" == "$lease_ip" ]]; then
   log "DNS works: $lease_name.$SBX_DOMAIN -> $answer"
 else
   warn "dnsmasq does not answer for $lease_name.$SBX_DOMAIN (got: '${answer:-nothing}'); the name mechanism needs a look"

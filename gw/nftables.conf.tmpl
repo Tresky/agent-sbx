@@ -21,6 +21,12 @@ table inet sbx_guard {
 
 	chain input {
 		type filter hook input priority -10; policy accept;
+		# A reply that conntrack calls invalid (out of its TCP window, as
+		# under load) skips the NAT, so it arrives here addressed to the
+		# gateway itself. The kernel then answers with a RST, and the
+		# sandbox's download dies with "Connection reset by peer". The
+		# counter shows whether this happens: nft list chain inet sbx_guard input
+		iifname "lan0" ct state invalid counter drop
 		iifname { "sbxa0", "sbxp0" } jump from_sandbox
 	}
 
@@ -39,6 +45,10 @@ table inet sbx_guard {
 		# The sandbox subnets carry no routed IPv6.
 		meta nfproto ipv6 iifname { "sbxa0", "sbxp0" } drop
 		meta nfproto ipv6 oifname { "sbxa0", "sbxp0" } drop
+
+		# An invalid packet is not translated; it must not leave with a
+		# sandbox's private address, or reach a sandbox out of its connection.
+		ct state invalid counter drop
 
 		# Replies to a connection that a tailnet device opened.
 		ct state established,related accept

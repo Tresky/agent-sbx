@@ -409,9 +409,14 @@ class Wizard:
             _pause("Do this now.")
 
         self.step(f"the gateway container {c.gw_ctid}")
-        if self.ssh(f"pct status {c.gw_ctid} 2>/dev/null | grep -q running").code == 0:
+        running = self.ssh(f"pct status {c.gw_ctid} 2>/dev/null | grep -q running").code == 0
+        # A run that failed inside gw/setup.sh leaves the container running
+        # without Tailscale; only the installed binary marks it as done.
+        if running and self.ssh(f"pct exec {c.gw_ctid} -- sh -c 'command -v tailscale' >/dev/null 2>&1").code == 0:
             info("the gateway is running; skipped (to refresh its config: ssh to the host and run host/20-gw-create.sh)")
         else:
+            if running:
+                info("the gateway is running, but its setup did not finish; running it again")
             self._host_script("20-gw-create.sh")
         if not logged_in:
             print("The next command prints a login URL. Open it and sign in to your tailnet.")
@@ -563,7 +568,9 @@ class Wizard:
                   f"2. DNS: turn on MagicDNS if it is off.\n"
                   f"3. DNS, Nameservers, Add nameserver, Custom: enter {want}, turn on\n"
                   f"   \"Restrict to domain\", and enter {c.domain}.\n"
-                  f"Make sure that Tailscale is connected on this Mac.")
+                  f"Make sure that Tailscale is connected on this Mac.\n"
+                  f"If all of this is done already, turn Tailscale off and on again on this Mac:\n"
+                  f"it gives macOS a new nameserver only when it connects.")
             if input("Press Enter to check again, or type s to skip: ").strip().lower().startswith("s"):
                 self.cli.warn("DNS is not ready; `sbx doctor` checks it again later")
                 return
