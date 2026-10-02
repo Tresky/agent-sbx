@@ -24,6 +24,7 @@ The tables below list the problems that `sbx doctor` does not explain.
 | `no active storage holds VM disks` | no storage can make linked clones | add an LVM-thin, ZFS or directory storage in Proxmox |
 | the template build stops with `PROVISION FAILED` | a step in `template/provision.sh` or in a component failed | the script prints the end of the log; run `bash /root/sbx/host/vm-diag.sh <vmid>` on the host for more. Fix the cause, then build again: the new build removes the failed VM |
 | downloads in a sandbox or a build die partway: `Connection reset by peer`, or apt's `Ign:` on a package | a gateway made before the fix answered out-of-window replies with a RST | refresh the gateway: `bash /root/sbx/host/20-gw-create.sh` on the host. `pct exec <ctid> -- nft list chain inet sbx_guard input` counts the packets it now drops |
+| the build log repeats `W: Tried to start delayed item ... but failed` | apt loops after one failed download; the network is fine | each apt run now stops after 30 minutes and is tried again, up to 3 times; to save the wait, stop the build and build again |
 | the template build prints nothing for many minutes | a compile is quiet for minutes | wait; the script warns after 15 quiet minutes and stops after 45 |
 | the SSH session dropped during the build | the build VM continues by itself | `sbx template finish <name>` |
 | `no component '<x>'`, or `needs <y> before it` | the definition names a component that does not exist, or lists them in the wrong order | `sbx template components` lists them; correct the definition |

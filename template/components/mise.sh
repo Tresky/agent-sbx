@@ -14,7 +14,7 @@
 
 step "mise"
 # The installer puts mise in ~/.local/bin, which ~/.zshenv puts on the PATH.
-as_user 'curl -fsSL --retry 5 --retry-delay 5 https://mise.run | MISE_INSTALL_PATH="$HOME/.local/bin/mise" sh'
+as_user_retry 'curl -fsSL --retry 5 --retry-delay 5 https://mise.run | MISE_INSTALL_PATH="$HOME/.local/bin/mise" sh'
 as_user 'mise --version'
 # The shims directory exists from the start: a shell puts it on its PATH only
 # if it exists, and the first tool of a sandbox would otherwise need a new shell.

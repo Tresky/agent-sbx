@@ -11,7 +11,7 @@ apt-get install -y -q --no-install-recommends python3-dev libbz2-dev libreadline
 
 step "python (uv): $SBX_PYTHON_VERSIONS"
 # uv installs itself into ~/.local/bin, which ~/.zshenv puts on the PATH.
-as_user 'curl -fsSL --retry 5 --retry-delay 5 https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh'
+as_user_retry 'curl -fsSL --retry 5 --retry-delay 5 https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh'
 # shellcheck disable=SC2086  # a space-separated list
 as_user "uv python install $SBX_PYTHON_VERSIONS"
 CHECK_TOOLS+=" uv"
