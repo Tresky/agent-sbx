@@ -217,6 +217,29 @@ class WizardTest(_WizardBase):
         steps = [c[-1].split("/host/")[1] for c in self.cmds if c[0] == "ssh" and "/root/sbx/host/" in c[-1]]
         self.assertEqual(steps, ["40-api-token.sh --acl-only"])
 
+    def test_a_running_gateway_without_tailscale_is_set_up_again(self):
+        # An earlier run failed inside gw/setup.sh: the container runs, but
+        # Tailscale is not installed, so `tailscale up` cannot work yet.
+        self.cmds = []
+        self.local.write_text("SBX_AGENT_NET=10.81.0\nSBX_PERSONAL_NET=10.82.0\n")
+        respond = self.respond
+
+        def responder(argv, data):
+            if argv[0] == "ssh" and "command -v tailscale" in argv[-1]:
+                self.cmds.append(argv)
+                return Result(1)
+            if argv[0] == "ssh" and "pct status" in argv[-1]:
+                self.cmds.append(argv)
+                return ""
+            return respond(argv, data)
+
+        answers = iter(["192.168.1.5", "", "", "", "rust", "", "", ""])
+        with mock.patch("builtins.input", lambda *_: next(answers)), mock.patch("builtins.print"):
+            hostsetup.cmd_setup(mock.Mock(host=None, mac_only=False), load(), Runner(responder=responder))
+        steps = [c[-1].split("/host/")[1] for c in self.cmds if c[0] == "ssh" and "/root/sbx/host/" in c[-1]]
+        self.assertIn("20-gw-create.sh", steps)
+        self.assertLess(steps.index("20-gw-create.sh"), steps.index("20-gw-create.sh --tailscale"))
+
 
 class ExistingInstallTest(_WizardBase):
     def test_an_existing_install_keeps_its_values(self):
