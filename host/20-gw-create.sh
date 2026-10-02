@@ -23,7 +23,9 @@ tailscale_up() {
     --advertise-routes="$ROUTES" \
     --advertise-tags="$SBX_TAILSCALE_TAG" \
     --accept-dns=false
-  pct exec "$CT" -- tailscale status | head -5
+  # Not `| head`: with pipefail, the SIGPIPE that head causes in a long
+  # status (more than 5 devices) fails the script after a good login.
+  pct exec "$CT" -- tailscale status | sed -n 1,5p
 }
 
 if [[ "${1:-}" == "--tailscale" ]]; then
