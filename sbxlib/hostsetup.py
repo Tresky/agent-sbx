@@ -568,7 +568,9 @@ class Wizard:
                   f"2. DNS: turn on MagicDNS if it is off.\n"
                   f"3. DNS, Nameservers, Add nameserver, Custom: enter {want}, turn on\n"
                   f"   \"Restrict to domain\", and enter {c.domain}.\n"
-                  f"Make sure that Tailscale is connected on this Mac.")
+                  f"Make sure that Tailscale is connected on this Mac.\n"
+                  f"If all of this is done already, turn Tailscale off and on again on this Mac:\n"
+                  f"it gives macOS a new nameserver only when it connects.")
             if input("Press Enter to check again, or type s to skip: ").strip().lower().startswith("s"):
                 self.cli.warn("DNS is not ready; `sbx doctor` checks it again later")
                 return

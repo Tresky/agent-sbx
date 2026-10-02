@@ -38,6 +38,7 @@ The tables below list the problems that `sbx doctor` does not explain.
 | Symptom | Cause | What to do |
 |---|---|---|
 | a sandbox name does not resolve | Tailscale is off on your Mac, or the split-DNS nameserver is missing | connect Tailscale; in the admin console, add the nameserver `<agent-net>.1`, restricted to your domain |
+| a name does not resolve right after you add the split-DNS nameserver; `dig @100.100.100.100` finds it | Tailscale on macOS updates the system's DNS only when it connects | turn Tailscale off and on again on your Mac |
 | a new sandbox's name does not resolve for about a minute | your Mac cached a negative answer (about 75 s) from a lookup before the sandbox existed | wait; sbx itself never asks too early |
 | `does not resolve on this Mac` during `sbx new` | the sandbox's name was late, and sbx used its address | the sandbox works; the name follows |
 | `tailscale ping` says `via DERP`, and everything is slow | your router blocks UDP between your Mac's subnet and the host's subnet | permit UDP port 41641 between the two subnets |
