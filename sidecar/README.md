@@ -82,14 +82,12 @@ The sidecar's own sshd is on port 2222 (`sbx ssh <name> --sidecar`).
 
 ## Limits
 
-- **The Claude lane buffers too.** Claude Code documents the base-URL path
-  for a Console API key. The proxy sends a subscription token as a bearer
-  with the OAuth beta header, which is what Claude Code itself sends; the
-  real API accepted it on 2026-09-26, so `proxy` is the default. A streamed
-  answer arrives whole, when it is complete.
-- **Uploads are buffered.** The proxy reads a request and a response whole
-  before it forwards them. A `git push` with a chunked body does not work
-  through it; a clone does.
+- **The proxy streams** requests and answers in 64 KB pieces, chunked ones
+  too, so a sidecar's 512 MB is enough for a clone or a push of any size.
+  (It buffered them once: a 300 MB pack of a large clone ran a sidecar out
+  of memory.) Claude Code documents the base-URL path for a Console API key;
+  the proxy sends a subscription token as a bearer with the OAuth beta
+  header, which the real API accepted on 2026-09-26.
 - **The forwarded ports are plain TCP** to the VM, which does its own TLS
   through the mirror, as before. The leaf key therefore still lives in the VM.
 - **A sidecar's code comes from its template.** A fix under `sidecar/` reaches

@@ -257,8 +257,8 @@ Mac trusts.
 - **A full claude.ai login in an agent sandbox** (`--allow-agent`) is in the
   VM, where the agent can read it, and it can make API keys on your
   organization.
-- **The proxy buffers.** It reads a request and an answer whole, so a
-  `git push` with a chunked body does not pass through it.
+- **The proxy streams.** It holds at most a 64 KB piece of a request or an
+  answer, so a large clone or push passes.
 - **`--with <name>` permits an input by its name.** A branch can change the
   destination or the source path of that name within the checkout. Read the
   manifest diff of an agent branch before you run `sbx new` from it. The table
