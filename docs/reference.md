@@ -214,6 +214,7 @@ component as `SBX_RUBY_VERSIONS`.
 | `[rust]` | `toolchains` | `["stable"]` | the rustup toolchains; the first is the default |
 | `[rust]` | `components` | `"clippy rustfmt"` | more rustup components |
 | `[python]` | `versions` | `["3.13"]` | the Pythons that uv caches |
+| `[postgres]` | `version`, `postgis` | `17`, `true` | the PostgreSQL major version from apt.postgresql.org, and whether PostGIS 3 comes with it |
 | `[mise]` | `tools` | `[]` | what `mise use --global` installs in the template, such as `["ruby@3.4.10", "node@24"]` |
 | `[odin]` | `version`, `wgpu_version`, `premake_version` | see `template/components/odin.sh` | the Odin, wgpu-native and premake releases |
 
