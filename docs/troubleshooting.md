@@ -59,6 +59,7 @@ The tables below list the problems that `sbx doctor` does not explain.
 | herdr hangs, or `could not add ... to herdr` | herdr waited for an answer | the sandbox works; run `sbx herdr <name>` again |
 | `Every agent sandbox needs a sidecar` | the `sidecar` template is not built | `sbx template rebuild sidecar` |
 | git `Authentication failed` in an agent sandbox, and an empty `~/.git-credentials` | a sidecar from before the proxy's 401 named Basic auth: git asked empty-handed twice and deleted the placeholder. Or the token misses the repository, or changed after `sbx new` | `sbx template rebuild sidecar`, or `sbx git-token <project>`; then make the sandbox again. The sidecar's log: `sbx ssh <name> --sidecar -- sudo journalctl -u sbx-sidecar` (look for `-> 401`) |
+| `warning: redirecting to https://gitlab.com/...` and then a failed clone or push in an agent sandbox | a sidecar template from before GitLab support passes GitLab's redirect (a URL without `.git`) on to git, which then goes past the proxy | `sbx template rebuild sidecar`, then make the sandbox again |
 | `git push` of a large change fails in an agent sandbox | the proxy buffers, and a chunked upload does not pass | push in smaller pieces, or from your machine |
 | `sbx rollback` warns `the sidecar ... stays as it is` | the sidecar has no snapshot of that label (a sandbox from before snapshots covered sidecars) | nothing to fix; take the next snapshot with `sbx snap` |
 

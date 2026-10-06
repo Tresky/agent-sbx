@@ -4,8 +4,9 @@
 The token never appears on a command line of this tool, except in the one
 `security add-generic-password` call that stores it: that program takes the
 value as an argument, and macOS shows arguments to processes of the same user
-for the moment the call lasts. The check against the git host sends the token
-through curl's own config on stdin, not through an argument.
+for the moment the call lasts. The check against the git host (GitHub or
+GitLab) sends the token through curl's own config on stdin, not through an
+argument.
 """
 from __future__ import annotations
 
@@ -39,33 +40,65 @@ def keychain_service(project: str) -> str:
     return f"sbx-git-{project}"
 
 
+def is_gitlab(host: str) -> bool:
+    """gitlab.com, or a self-managed GitLab named the usual way."""
+    return host == "gitlab.com" or host.startswith("gitlab.")
+
+
 @dataclass
 class Check:
     repo: str
-    status: str   # "ok", "no access", "bad token", "unknown", "not checked"
+    status: str   # "ok", "read only", "no access", "bad token", "unknown", "not checked"
 
 
-def check_token(runner: Runner, token: str, host: str, repos: list[str]) -> list[Check]:
-    """Ask the git host, for each repository, whether this token can read it.
+def _curl_code(runner: Runner, config: str) -> str:
+    # curl reads its config from stdin: the token is in no argument.
+    done = runner.run(["curl", "-sS", "-m", "15", "-o", "/dev/null", "-w", "%{http_code}", "-K", "-"],
+                      input=config.encode(), check=False)
+    return done.stdout.strip()
 
-    GitHub answers 200 for a covered repository, 404 for one outside the
+
+def _check_github(runner: Runner, token: str, path: str) -> str:
+    """GitHub answers 200 for a covered repository, 404 for one outside the
     token's scope (it hides the repository's existence), and 401 for a token
-    it does not know. Other hosts are not checked.
-    """
+    it does not know."""
+    code = _curl_code(runner, f'header = "Authorization: Bearer {token}"\n'
+                              f'header = "Accept: application/vnd.github+json"\n'
+                              f'url = "https://api.github.com/repos/{path}"\n')
+    return {"200": "ok", "404": "no access", "401": "bad token", "403": "no access"}.get(code, "unknown")
+
+
+def _check_gitlab(runner: Runner, token: str, host: str, path: str, username: str) -> str:
+    """Through git's own smart-HTTP handshake, not the REST API: a token made
+    for git alone (Code: Download and Push, or read_/write_repository) cannot
+    call the API. GitLab answers 401 for a token it does not know, 404 or 403
+    for a project outside the token, and 403 on the push handshake for a
+    token that may read only."""
+    def probe(service: str) -> str:
+        return _curl_code(runner, f'user = "{username}:{token}"\n'
+                                  f'url = "https://{host}/{path}.git/info/refs?service={service}"\n')
+    code = probe("git-upload-pack")
+    if code != "200":
+        return {"401": "bad token", "403": "no access", "404": "no access"}.get(code, "unknown")
+    return {"200": "ok", "401": "read only", "403": "read only", "404": "read only"}.get(
+        probe("git-receive-pack"), "unknown")
+
+
+def check_token(runner: Runner, token: str, host: str, repos: list[str],
+                username: str = "x-access-token") -> list[Check]:
+    """Ask the git host, for each repository, whether this token can read it
+    (and, on GitLab, push to it). Other hosts are not checked."""
     out = []
     for url in repos:
         parsed = repo_path(url)
-        if parsed is None or parsed[0] != host or host != "github.com":
-            out.append(Check(url, "not checked"))
-            continue
-        # curl reads its config from stdin: the token is in no argument.
-        config = (f'header = "Authorization: Bearer {token}"\n'
-                  f'header = "Accept: application/vnd.github+json"\n'
-                  f'url = "https://api.github.com/repos/{parsed[1]}"\n')
-        done = runner.run(["curl", "-sS", "-m", "15", "-o", "/dev/null", "-w", "%{http_code}", "-K", "-"],
-                          input=config.encode(), check=False)
-        code = done.stdout.strip()
-        status = {"200": "ok", "404": "no access", "401": "bad token", "403": "no access"}.get(code, "unknown")
+        if parsed is None or parsed[0] != host:
+            status = "not checked"
+        elif host == "github.com":
+            status = _check_github(runner, token, parsed[1])
+        elif is_gitlab(host):
+            status = _check_gitlab(runner, token, host, parsed[1], username)
+        else:
+            status = "not checked"
         out.append(Check(url, status))
     return out
 

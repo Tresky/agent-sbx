@@ -171,6 +171,7 @@ One command does the whole setup:
 ```
 sbx git-token ~/code/myapp
 sbx git-token https://github.com/me/myapp     no checkout needed
+sbx git-token git@gitlab.com:me/myapp.git     GitLab works the same way
 ```
 
 With a URL, the command checks the main repository only; `sbx new` checks the
@@ -180,13 +181,12 @@ machine.
 
 1. It prints the project name and the repositories that the token must cover:
    the origin, plus each `repo` input of the manifest.
-2. Make a fine-grained token on GitHub (**Settings**, **Developer settings**,
-   **Fine-grained tokens**). Under **Repository access**, choose **Only select
-   repositories**, and select those repositories. Give it **Contents: Read**,
-   or **Read and write** if the agent must push its branches. Set an expiry.
+2. Make a token that covers those repositories, and no others
+   ([GitHub](#a-github-token) or [GitLab](#a-gitlab-token) below).
 3. Paste the token at the hidden prompt.
-4. The command asks GitHub whether the token can read each repository. A token
-   that misses one stores nothing.
+4. The command asks the host whether the token can read each repository. A
+   token that misses one stores nothing. GitLab is also asked whether the
+   token may push; a token that may only read is stored, with a warning.
 5. It stores the token in the secret store as `sbx-git-<project>` (the
    keychain, or `~/.config/sbx/secrets/` off macOS), and writes the `[git]`
    section of the project's bindings file:
@@ -196,13 +196,15 @@ machine.
    [git]
    token_command = ["security", "find-generic-password", "-s", "sbx-git-myapp", "-w"]
    # off macOS: token_command = ["cat", "/home/you/.config/sbx/secrets/sbx-git-myapp"]
-   # host = "github.com"          # the default
+   # host = "github.com"          # the default; written for any other host
    # username = "x-access-token"  # the default; GitLab accepts any name with a token
    ```
 
 The project name is the last part of the repository URL without `.git`.
-`--stdin` reads the token from a pipe. `--host` and `--username` serve a host
-other than GitHub, which the command does not check. `--no-check` stores it
+The host is the host of the project's remote; `--host` overrides it.
+`--username` sets the name sent with the token. GitHub and GitLab are checked
+(a self-managed GitLab too, when its name starts with `gitlab.`); another
+host is not. `--stdin` reads the token from a pipe. `--no-check` stores it
 without asking the host. `--remove` forgets the token and the section.
 
 A sidecar gets the project's token once, from `sbx new`: a new token reaches
@@ -210,6 +212,38 @@ the next sandbox, and a running one keeps the old one.
 
 Without a `[git]` section, sbx uses `git_token_command` in `config.toml`. Without
 that, an agent sandbox can clone public repositories only.
+
+### A GitHub token
+
+**Settings**, **Developer settings**, **Fine-grained tokens**. Under
+**Repository access**, choose **Only select repositories**, and select the
+repositories. Give it **Contents: Read**, or **Read and write** if the agent
+must push its branches. Set an expiry.
+
+### A GitLab token
+
+Everything here works on a Free GitLab.com account. Open
+<https://gitlab.com/-/user_settings/personal_access_tokens> (on a
+self-managed GitLab, the same path on its host), choose **Add new token**,
+then:
+
+- **Fine-grained** (preferred). Choose **Group and project**, and select the
+  projects. Add the resource **Code** with **Download**, and **Push** if the
+  agent must push its branches. Set an expiry (at most a year on GitLab.com).
+- **Legacy**, if fine-grained tokens are missing on your instance. Give it
+  `read_repository`, and `write_repository` to push. It reaches every project
+  that your account can, so prefer the fine-grained one.
+
+A project access token would be the closest match to GitHub's, but GitLab.com
+sells it with Premium only; sbx does not need it. Neither token above can call
+GitLab's REST API, and sbx does not need that either: it checks through git's
+own handshake. To open a merge request from the sandbox without the API, use
+a push option:
+`git push -o merge_request.create -o merge_request.target=main origin HEAD`.
+
+A sidecar template built before GitLab support lets GitLab's redirect, from a
+URL without `.git`, lead git past the proxy. Rebuild it once with
+`sbx template rebuild sidecar`.
 
 ### A sandbox that runs already
 
@@ -224,7 +258,7 @@ sbx git-token ~/code/myapp --push lab
 
 With a token in the secret store already, it asks for none and installs
 that one. It writes `~/.git-credentials` in the sandbox, sets git's `store`
-credential helper, and rewrites `git@github.com:` and `ssh://git@github.com/`
+credential helper, and rewrites `git@<host>:` and `ssh://git@<host>/`
 remotes to HTTPS, so every git command in every shell uses the token. An
 agent sandbox with a sidecar gets no token: `--push` gives it to the sidecar,
 which adds it to each git request of the sandbox.
