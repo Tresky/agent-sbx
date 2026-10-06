@@ -134,10 +134,11 @@ esac
     def test_git_token_replaces_one_line_and_keeps_the_other(self):
         self.write_env()
         tokens = self.root / "etc/sbx/sidecar/tokens"
-        tokens.write_text("claude=sk-ant-oat01-keep\ngithub=old\n")
+        tokens.write_text("claude=sk-ant-oat01-keep\ngithub=old\ngit_user=oauth2\n")
         out = self.apply("--git-token", stdin="ghp_new\n")
         self.assertIn("git token updated", out)
-        self.assertEqual(sorted(tokens.read_text().splitlines()), ["claude=sk-ant-oat01-keep", "github=ghp_new"])
+        self.assertEqual(sorted(tokens.read_text().splitlines()),
+                         ["claude=sk-ant-oat01-keep", "git_user=oauth2", "github=ghp_new"])
         self.assertEqual(stat.S_IMODE(tokens.stat().st_mode), 0o600)
         self.assertIn("systemctl restart sbx-sidecar", self.calls.read_text())
 

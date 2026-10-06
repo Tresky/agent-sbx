@@ -285,7 +285,7 @@ class NewTest(unittest.TestCase):
         self.assertEqual(code, 0)
         to_sidecar = [d for h, d in writes if h == "dev@10.77.0.57"]
         to_vm = [d for h, d in writes if h == "dev@sbx-px.sbx.internal"]
-        self.assertIn(b"claude=sk-ant-oat01-real\ngithub=\n", to_sidecar)
+        self.assertIn(b"claude=sk-ant-oat01-real\ngithub=\ngit_user=x-access-token\n", to_sidecar)
         self.assertFalse([d for d in to_vm if b"sk-ant-oat01-real" in d], "the real token never enters the sandbox")
         env = next(d for d in to_vm if b"ANTHROPIC_BASE_URL" in d)
         self.assertIn(b"export ANTHROPIC_BASE_URL=http://10.79.0.1:8080\nexport ANTHROPIC_AUTH_TOKEN=", env)
@@ -381,10 +381,10 @@ class NewTest(unittest.TestCase):
         (home / "config.toml").write_text('git_token_command = ["print-token", "global"]\n')
         (home / "bindings").mkdir(exist_ok=True)
 
-        def run(with_binding):
+        def run(with_binding, extra=""):
             binding = home / "bindings" / "app.toml"
             if with_binding:
-                binding.write_text('[git]\ntoken_command = ["print-token", "app-only"]\n')
+                binding.write_text('[git]\ntoken_command = ["print-token", "app-only"]\n' + extra)
             elif binding.exists():
                 binding.unlink()
             events, payloads = [], []
@@ -410,10 +410,17 @@ class NewTest(unittest.TestCase):
             self.assertFalse([p for p in payloads if p and p.startswith(b"https://x-access-token:")])
             creds = [p for p in payloads if p and p.startswith(b"claude=")]
             self.assertEqual(len(creds), 1)
-            return creds[0]
+            [env] = [p for p in payloads if p and p.startswith(b"SBX_SIDECAR_LINK=")]
+            return creds[0], env
 
-        self.assertEqual(run(with_binding=True), b"claude=\ngithub=ghp_app-only\n")
-        self.assertEqual(run(with_binding=False), b"claude=\ngithub=ghp_global\n")
+        creds, env = run(with_binding=True)
+        self.assertEqual(creds, b"claude=\ngithub=ghp_app-only\ngit_user=x-access-token\n")
+        self.assertIn(b"SBX_GIT_UPSTREAM=https://github.com\n", env)
+        self.assertEqual(run(with_binding=False)[0], b"claude=\ngithub=ghp_global\ngit_user=x-access-token\n")
+        # A GitLab binding: the sidecar's git upstream and user name follow it.
+        creds, env = run(with_binding=True, extra='host = "gitlab.com"\nusername = "oauth2"\n')
+        self.assertEqual(creds, b"claude=\ngithub=ghp_app-only\ngit_user=oauth2\n")
+        self.assertIn(b"SBX_GIT_UPSTREAM=https://gitlab.com\n", env)
 
     def test_personal_with_an_empty_ssh_agent_makes_no_vm(self):
         # Controlled pair with test_personal_profile: the same command, and
