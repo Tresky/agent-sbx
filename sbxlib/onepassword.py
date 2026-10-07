@@ -9,6 +9,7 @@ dropped: never printed or logged.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 from dataclasses import dataclass
@@ -18,6 +19,9 @@ from .run import CommandError, Runner
 
 CATEGORY = "SSH Key"
 TITLE = "sbx"
+# The first op that knows the SSH Key category and --ssh-generate-key. An
+# older op fails with "Unknown item category SSH Key".
+MIN_VERSION = (2, 20, 0)
 
 
 class OpError(RuntimeError):
@@ -52,6 +56,22 @@ def signed_in(runner: Runner) -> bool:
 
 def available(runner: Runner) -> bool:
     return installed() and signed_in(runner)
+
+
+def version(runner: Runner) -> tuple[int, int, int] | None:
+    """The version that `op --version` prints (`2.30.0`, or `2.30.0-beta.01`).
+    None when op does not answer, or prints something else."""
+    got = runner.run(["op", "--version"], check=False)
+    m = re.match(r"\s*(\d+)\.(\d+)\.(\d+)", got.stdout) if got.code == 0 else None
+    return (int(m[1]), int(m[2]), int(m[3])) if m else None
+
+
+def too_old(runner: Runner) -> str:
+    """The version of op when it is older than MIN_VERSION, else empty. An
+    unreadable version is not too old: the op call that follows names the
+    problem."""
+    have = version(runner)
+    return ".".join(map(str, have)) if have and have < MIN_VERSION else ""
 
 
 def _run(runner: Runner, argv: list[str]) -> str:

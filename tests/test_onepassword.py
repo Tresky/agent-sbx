@@ -63,6 +63,21 @@ class OpCliTest(unittest.TestCase):
             self.assertTrue(op.available(runner_for(Result(0))))
             self.assertFalse(op.available(runner_for(Result(1))))
 
+    def test_version_reads_op_version(self):
+        runner = runner_for(Result(0, "2.30.0\n"))
+        self.assertEqual(op.version(runner), (2, 30, 0))
+        self.assertEqual(runner.calls, [["op", "--version"]])
+        self.assertEqual(op.version(runner_for(Result(0, "2.31.0-beta.01\n"))), (2, 31, 0))
+        self.assertIsNone(op.version(runner_for(Result(0, "nonsense\n"))))
+        self.assertIsNone(op.version(runner_for(Result(1, "2.30.0\n"))))
+
+    def test_too_old_is_below_the_first_op_with_ssh_key_items(self):
+        self.assertEqual(op.too_old(runner_for(Result(0, "2.6.1\n"))), "2.6.1")
+        self.assertEqual(op.too_old(runner_for(Result(0, "2.19.9\n"))), "2.19.9")
+        self.assertEqual(op.too_old(runner_for(Result(0, "2.20.0\n"))), "")
+        self.assertEqual(op.too_old(runner_for(Result(0, "3.0.0\n"))), "")
+        self.assertEqual(op.too_old(runner_for(Result(1))), "")
+
     def test_signed_in_runs_whoami(self):
         runner = runner_for(Result(0))
         self.assertTrue(op.signed_in(runner))

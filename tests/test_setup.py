@@ -334,6 +334,7 @@ class SandboxKeyTest(_WizardBase):
         self.agent_code = None  # force an exit code of ssh-add
         self.items = []        # SSH Key items in the fake vault
         self.whoami = 0
+        self.op_version = "2.30.0"
         self.created = []      # the item create argv
         self.keygen = []
         self.prompts, self.out = [], []
@@ -345,6 +346,8 @@ class SandboxKeyTest(_WizardBase):
             return Result(0, "\n".join(self.agent) + "\n") if self.agent else Result(1)
         if argv == ["op", "whoami"]:
             return Result(self.whoami)
+        if argv == ["op", "--version"]:
+            return self.op_version + "\n"
         if argv[:3] == ["op", "item", "list"]:
             return json.dumps(self.items)
         if argv[:2] == ["op", "read"]:
@@ -518,6 +521,12 @@ class SandboxKeyTest(_WizardBase):
         self.assertEqual((self.home / "id_ed25519.pub").read_text(), self.PUB + "\n")
         self.assertEqual(wizard.cfg.ssh_agent, str(self.sock))
         self.assertTrue(any("2. ssh-ed25519 sbx" in o for o in self.out))
+
+    def test_op_too_old_for_ssh_key_items_stops_and_says_to_update(self):
+        self.op_version = "2.6.1"
+        with self.assertRaisesRegex(hostsetup.SetupError, r"version 2\.6\.1.*need 2\.20\.0 or later.*op update"):
+            self.run_key(["y", str(self.sock)])
+        self.assertEqual(self.created, [])
 
     def test_op_that_is_not_signed_in_pauses_once_then_stops(self):
         self.whoami = 1

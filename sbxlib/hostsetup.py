@@ -580,10 +580,18 @@ class Wizard:
             raise SetupError(str(exc)) from None
 
     def _op_ready(self) -> bool:
-        """Whether op is installed and signed in. Not installed: False. Not
-        signed in: one pause to fix it, then stop."""
+        """Whether op is installed and signed in. Not installed: False. Too
+        old for SSH Key items: stop. Not signed in: one pause to fix it, then
+        stop."""
         if not onepassword.installed():
             return False
+        old = onepassword.too_old(self.runner)
+        if old:
+            need = ".".join(map(str, onepassword.MIN_VERSION))
+            raise SetupError(f"the 1Password CLI (`op`) is version {old}, and SSH Key items need {need} or "
+                             "later. Update it (`op update`, `brew upgrade --cask 1password-cli`, or "
+                             "https://developer.1password.com/docs/cli/get-started/), then run "
+                             "`sbx setup --local-only` again")
         if not onepassword.signed_in(self.runner):
             _pause("The 1Password CLI (`op`) is not signed in. Turn on 1Password, Settings, Developer, "
                    "Integrate with 1Password CLI, or run `op signin` in another terminal.")

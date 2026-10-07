@@ -15,7 +15,7 @@ to a first agent sandbox.
 - A Tailscale tailnet where you are an admin. You change its policy and its DNS.
 - Optional: `mkcert` (`brew install mkcert`) for https in each sandbox, and
   `herdr` for the sidebar.
-- Optional: 1Password and its CLI `op`, to keep the sandbox SSH key in
+- Optional: 1Password and its CLI `op` (2.20.0 or later), to keep the sandbox SSH key in
   1Password instead of a file ([step 7](#7-your-mac)). Install `op` from
   <https://developer.1password.com/docs/cli/get-started/>, and turn on
   1Password, Settings, Developer, "Integrate with 1Password CLI".
@@ -372,6 +372,9 @@ When there is no key in 1Password yet:
 - **`op` is not installed.** The setup says so and prints the install link. It
   offers to let you make the `sbx` item in the 1Password app instead, and then
   you pick the key from the list that the agent shows.
+- **`op` is older than 2.20.0.** An older `op` has no SSH Key items (`Unknown
+  item category SSH Key`), so the setup stops and asks you to update it:
+  `op update`, `brew upgrade --cask 1password-cli`, or the install link.
 - **`op` is not signed in.** Turn on 1Password, Settings, Developer,
   "Integrate with 1Password CLI", or run `op signin`.
 
