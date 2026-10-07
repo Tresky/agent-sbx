@@ -334,6 +334,7 @@ class SandboxKeyTest(_WizardBase):
         self.agent_code = None  # force an exit code of ssh-add
         self.items = []        # SSH Key items in the fake vault
         self.whoami = 0
+        self.signin = []       # whoami codes after each op signin; empty: it changes nothing
         self.op_version = "2.30.0"
         self.created = []      # the item create argv
         self.keygen = []
@@ -345,6 +346,10 @@ class SandboxKeyTest(_WizardBase):
                 return Result(self.agent_code)
             return Result(0, "\n".join(self.agent) + "\n") if self.agent else Result(1)
         if argv == ["op", "whoami"]:
+            return Result(self.whoami)
+        if argv == ["op", "signin"]:
+            if self.signin:
+                self.whoami = self.signin.pop(0)
             return Result(self.whoami)
         if argv == ["op", "--version"]:
             return self.op_version + "\n"
@@ -528,7 +533,23 @@ class SandboxKeyTest(_WizardBase):
             self.run_key(["y", str(self.sock)])
         self.assertEqual(self.created, [])
 
-    def test_op_that_is_not_signed_in_pauses_once_then_stops(self):
+    def test_op_that_is_not_signed_in_signs_in_here(self):
+        self.whoami = 1
+        self.signin = [0]
+        self.items = [{"id": "i1", "title": "sbx", "vault": {"id": "v1"}}]
+        self.agent = [self.PUB]
+        self.run_key(["y", str(self.sock)])
+        self.assertFalse(any("Integrate with 1Password CLI" in p for p in self.prompts))
+
+    def test_a_failed_signin_pauses_once_then_signs_in_again(self):
+        self.whoami = 1
+        self.signin = [1, 0]
+        self.items = [{"id": "i1", "title": "sbx", "vault": {"id": "v1"}}]
+        self.agent = [self.PUB]
+        self.run_key(["y", str(self.sock), ""])
+        self.assertTrue(any("Integrate with 1Password CLI" in p for p in self.prompts))
+
+    def test_op_that_cannot_sign_in_pauses_once_then_stops(self):
         self.whoami = 1
         with self.assertRaisesRegex(hostsetup.SetupError, "sign in"):
             self.run_key(["y", str(self.sock), ""])

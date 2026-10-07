@@ -9,6 +9,7 @@ dropped: never printed or logged.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sys
@@ -52,6 +53,19 @@ def installed() -> bool:
 
 def signed_in(runner: Runner) -> bool:
     return runner.run(["op", "whoami"], check=False).code == 0
+
+
+def sign_in(runner: Runner) -> bool:
+    """Run `op signin` on this terminal, so that the op calls of this process
+    are signed in. With the app integration, the app asks to authorize this
+    terminal. Without it, op asks for the password on the terminal and prints
+    `export OP_SESSION_<account>="<token>"`; the token goes into the
+    environment of this process (which the later op calls inherit), and is
+    never printed. A signin in another terminal does not reach this process."""
+    got = runner.run(["op", "signin"], capture="stdout", check=False)
+    for name, token in re.findall(r'export (OP_SESSION_\w+)="([^"]*)"', got.stdout):
+        os.environ[name] = token
+    return got.code == 0 and signed_in(runner)
 
 
 def available(runner: Runner) -> bool:

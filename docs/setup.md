@@ -375,8 +375,11 @@ When there is no key in 1Password yet:
 - **`op` is older than 2.20.0.** An older `op` has no SSH Key items (`Unknown
   item category SSH Key`), so the setup stops and asks you to update it:
   `op update`, `brew upgrade --cask 1password-cli`, or the install link.
-- **`op` is not signed in.** Turn on 1Password, Settings, Developer,
-  "Integrate with 1Password CLI", or run `op signin`.
+- **`op` is not signed in.** The setup runs `op signin` in its own terminal
+  (a signin in another terminal does not reach it): authorize the terminal in
+  the 1Password app, or type the account password. If that fails, turn on
+  1Password, Settings, Developer, "Integrate with 1Password CLI", or add the
+  account with `op account add`.
 
 The 1Password SSH agent serves only the Private (or Personal) vault by
 default. If the key is in another vault, list the item in

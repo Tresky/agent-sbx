@@ -1,6 +1,7 @@
 """The `op` CLI and the SSH agent listing: the argv of each call and the
 parsing of what comes back. Nothing here runs op or ssh-add."""
 import json
+import os
 import unittest
 from unittest import mock
 
@@ -82,6 +83,22 @@ class OpCliTest(unittest.TestCase):
         runner = runner_for(Result(0))
         self.assertTrue(op.signed_in(runner))
         self.assertEqual(runner.calls, [["op", "whoami"]])
+
+    def test_sign_in_keeps_the_session_token_in_this_process(self):
+        calls = []
+
+        def respond(argv, data):
+            calls.append(argv)
+            return Result(0, 'export OP_SESSION_abc123="tok"\n# This command is meant to be used with eval\n') \
+                if argv == ["op", "signin"] else Result(0)
+        with mock.patch.dict("os.environ", {}, clear=False):
+            self.assertTrue(op.sign_in(Runner(responder=respond)))
+            self.assertEqual(os.environ["OP_SESSION_abc123"], "tok")
+        self.assertEqual(calls, [["op", "signin"], ["op", "whoami"]])
+
+    def test_sign_in_with_the_app_integration_prints_no_token(self):
+        self.assertTrue(op.sign_in(runner_for(Result(0))))
+        self.assertFalse(op.sign_in(runner_for(Result(1))))
 
     def test_create_reads_only_the_ids_and_never_asks_to_reveal(self):
         out = json.dumps({"id": "item1", "title": "sbx", "vault": {"id": "vault1", "name": "Private"},

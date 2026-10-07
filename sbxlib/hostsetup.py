@@ -581,8 +581,8 @@ class Wizard:
 
     def _op_ready(self) -> bool:
         """Whether op is installed and signed in. Not installed: False. Too
-        old for SSH Key items: stop. Not signed in: one pause to fix it, then
-        stop."""
+        old for SSH Key items: stop. Not signed in: run `op signin` here, then
+        one pause to fix it and one more try, then stop."""
         if not onepassword.installed():
             return False
         old = onepassword.too_old(self.runner)
@@ -593,10 +593,14 @@ class Wizard:
                              "https://developer.1password.com/docs/cli/get-started/), then run "
                              "`sbx setup --local-only` again")
         if not onepassword.signed_in(self.runner):
-            _pause("The 1Password CLI (`op`) is not signed in. Turn on 1Password, Settings, Developer, "
-                   "Integrate with 1Password CLI, or run `op signin` in another terminal.")
-            if not onepassword.signed_in(self.runner):
-                raise SetupError("`op whoami` still fails; sign in to the 1Password CLI, then run `sbx setup` again")
+            # A signin in another terminal does not reach this process, so op signs in here.
+            self.cli.info("The 1Password CLI (`op`) is not signed in. Running `op signin`")
+            if not onepassword.sign_in(self.runner):
+                _pause("`op signin` failed. Turn on 1Password, Settings, Developer, "
+                       "Integrate with 1Password CLI, or add the account with `op account add`.")
+                if not onepassword.sign_in(self.runner):
+                    raise SetupError("`op signin` still fails; sign in to the 1Password CLI, "
+                                     "then run `sbx setup` again")
         return True
 
     def _write_pub(self, line: str) -> None:
