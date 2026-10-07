@@ -37,7 +37,7 @@ from .inputs import PLACEHOLDER, REPO, SEND, InputError
 from .manifest import MANIFEST_PATH, Manifest, ManifestError
 from .pve import HttpApi, Pve, PveError, TemplateVm
 from .run import CommandError, Runner
-from .vm import SIDECAR_SSH_PORT, Vm, VmError, dns_has, resolves, sidecar_alias
+from .vm import SIDECAR_SSH_PORT, Vm, VmError, dns_has, resolves, sidecar_alias, ssh_value
 
 SSH_INCLUDE = "Include ~/.config/sbx/ssh_config"
 
@@ -181,7 +181,8 @@ def _pve(cfg: Config, runner: Runner, api) -> Pve:
 # --- commands ---------------------------------------------------------------
 
 def _prepare_mac(cfg: Config, runner: Runner) -> None:
-    """The state directory, config.toml, the sandbox key and the SSH block.
+    """The state directory, config.toml and the SSH block. It makes no key:
+    `sbx setup` does that (Wizard._sandbox_key), and may keep it in 1Password.
     `sbx setup` runs it; it is safe to run again."""
     home = state_dir()
     home.mkdir(parents=True, exist_ok=True)
@@ -201,16 +202,11 @@ def _prepare_mac(cfg: Config, runner: Runner) -> None:
             '# A git token for agent sandboxes of EVERY project. Prefer one token per\n'
             '# project in bindings/<project>.toml, [git]; see docs/projects.md.\n'
             '# git_token_command = ["security", "find-generic-password", "-s", "sbx-git-token", "-w"]\n'
+            '# The sandbox key lives in an SSH agent (1Password), not in a file here:\n'
+            '# ssh_agent = "~/.1password/agent.sock"\n'
             '# The domain, the bridges, the subnets and the IDs live in host/local.conf,\n'
             '# which the host scripts read too.\n')
         info(f"wrote {conf}")
-
-    key = cfg.ssh_key_path
-    if not key.exists():
-        # A dedicated key: the wildcard SSH block can then say IdentitiesOnly,
-        # and no personal key is ever authorised inside a sandbox.
-        runner.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "sbx", "-f", str(key)])
-        info(f"made the key pair {key}")
 
     block = home / "ssh_config"
     block.write_text(
@@ -219,7 +215,11 @@ def _prepare_mac(cfg: Config, runner: Runner) -> None:
         "Host sbx-*\n"
         f"  HostName %h.{cfg.domain}\n"
         f"  User {cfg.vm_user}\n"
-        f"  IdentityFile {key}\n"
+        # A dedicated key: IdentitiesOnly then offers it alone, and no
+        # personal key is ever authorised inside a sandbox. With an agent the
+        # IdentityFile is the .pub: ssh picks the agent's key that matches it.
+        f"  IdentityFile {ssh_value(cfg.ssh_identity_path)}\n"
+        + (f"  IdentityAgent {ssh_value(cfg.ssh_agent_path)}\n" if cfg.ssh_agent else "") +
         "  IdentitiesOnly yes\n"
         f"  UserKnownHostsFile {home / 'known_hosts'}\n"
         # No HostKeyAlias: ssh does not expand %h there, so every sandbox would
@@ -1401,7 +1401,7 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
         raise InputError("--with and --without need --project")
     if args.remote_control_mode and profile != remotecontrol.ALLOWED_PROFILE:
         raise InputError(f"--remote-control-mode: Remote Control is not available in an {profile} sandbox")
-    if not cfg.ssh_key_path.exists():
+    if not cfg.ssh_identity_path.exists():
         raise ConfigError("no sbx SSH key; run `sbx setup` first")
     if args.gpu and not cfg.gpu_mapping:
         raise ConfigError("gpu_mapping is not set in config.toml")
@@ -1443,7 +1443,7 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
     expires = dt.date.today() + dt.timedelta(days=ttl) if ttl else None
     vmid = pve.next_vmid()
     sc_vmid = pve.next_vmid(start=vmid + 1) if sidecar else 0
-    pubkey = cfg.ssh_key_path.with_suffix(".pub").read_text()
+    pubkey = cfg.ssh_pubkey_path.read_text()
     known_hosts = str(state_dir() / "known_hosts")
     # The per-sandbox secret: the sandbox presents it to its sidecar, and to
     # nothing else. It goes to both over SSH stdin and appears in no command.
@@ -1702,7 +1702,7 @@ def cmd_herdr(args, cfg: Config, runner: Runner, api=None) -> int:
     hostname = names.hostname(args.name)
     config = Path("~/.ssh/config").expanduser()
     if not config.exists() or SSH_INCLUDE not in config.read_text():
-        raise ConfigError("herdr connects through your SSH config; run `sbx setup --mac-only` and add the Include line")
+        raise ConfigError("herdr connects through your SSH config; run `sbx setup --local-only` and add the Include line")
     if args.attach:
         # One full window on the sandbox alone, the way `herdr --remote` works.
         os.execvp("herdr", ["herdr", "--remote", hostname])
@@ -1910,10 +1910,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("guide", help="the basic usage of sbx on one screen (also: sbx with no command)")
     s.set_defaults(fn=cmd_guide)
 
-    s = sub.add_parser("setup", help="the one-time setup of a Proxmox host and this Mac, step by step")
+    s = sub.add_parser("setup", help="the one-time setup of a Proxmox host and this machine, step by step")
     s.add_argument("--host", help="the address of the Proxmox host")
-    s.add_argument("--mac-only", action="store_true",
-                   help="set up this Mac only, for a host that `sbx setup` set up already")
+    s.add_argument("--local-only", "--mac-only", dest="local_only", action="store_true",
+                   help="set up this machine only, for a host that `sbx setup` set up already "
+                        "(--mac-only is the old name)")
     s.set_defaults(fn=hostsetup.cmd_setup)
 
     s = sub.add_parser("doctor", help="check the setup: the config, the API token, DNS, the tailnet path")

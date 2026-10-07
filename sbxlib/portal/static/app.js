@@ -1715,8 +1715,8 @@ async function pageChecks(main) {
     card("Setup", h("div", { class: "stack" },
       h("div", { class: "small" }, "The setup asks for the host's root password and stops at steps in the Tailscale admin console, so it runs in Terminal. It is safe to run again."),
       h("div", { class: "row" }, btn("sbx setup", () => inTerminal(["setup"]), { icon: "terminal" }),
-        btn("sbx setup --mac-only", () => inTerminal(["setup", "--mac-only"]), { icon: "terminal" })),
-      h("div", { class: "small muted" }, "--mac-only sets up this Mac for a host that is set up already, and does not change the host.")))));
+        btn("sbx setup --local-only", () => inTerminal(["setup", "--local-only"]), { icon: "terminal" })),
+      h("div", { class: "small muted" }, "--local-only sets up this machine for a host that is set up already, and does not change the host.")))));
   await run();
 }
 

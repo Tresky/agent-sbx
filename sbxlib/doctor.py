@@ -14,6 +14,7 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import onepassword
 from .config import Config, local_conf_path, state_dir
 from .run import Runner
 from .vm import Vm
@@ -32,6 +33,31 @@ def _tailscale() -> str | None:
     return shutil.which("tailscale") or (TAILSCALE_APP if Path(TAILSCALE_APP).exists() else None)
 
 
+def _key_checks(cfg: Config, runner: Runner) -> list[Check]:
+    name = "sandbox SSH key"
+    if not cfg.ssh_agent:
+        return [Check("ok", name, str(cfg.ssh_key_path)) if cfg.ssh_key_path.exists()
+                else Check("FAIL", name, "missing. Run `sbx setup --local-only`")]
+    sock, pub = cfg.ssh_agent_path, cfg.ssh_pubkey_path
+    if not sock.exists():
+        return [Check("FAIL", name, f"{sock} does not exist: 1Password is not running, or its SSH agent is off "
+                                    "(Settings, Developer, Use the SSH agent)")]
+    if not pub.exists():
+        return [Check("FAIL", name, f"{pub} is missing. Run `sbx setup --local-only`")]
+    try:
+        listed = onepassword.lists_key(onepassword.agent_keys(runner, sock), pub.read_text())
+    except onepassword.OpError as exc:
+        return [Check("FAIL", name, str(exc))]
+    if not listed:
+        return [Check("FAIL", name, f"the agent at {sock} does not list {pub.name}. Unlock 1Password, and make "
+                                    "sure its SSH agent serves the item (agent.toml). Else run `sbx setup --local-only`")]
+    out = [Check("ok", name, f"{pub.name} in the agent at {sock}")]
+    if cfg.ssh_key_path.exists():
+        out.append(Check("WARN", "sandbox SSH key file", f"{cfg.ssh_key_path} is still on this machine, "
+                                                         "and 1Password holds the key. Remove it"))
+    return out
+
+
 def mac_checks(cfg: Config, runner: Runner) -> list[Check]:
     from . import cli
     out = []
@@ -44,11 +70,10 @@ def mac_checks(cfg: Config, runner: Runner) -> list[Check]:
         missing.append("pve_ca_file or pve_fingerprint")
     out.append(Check("FAIL", "config.toml", "not set: " + ", ".join(missing) + ". Run `sbx setup`") if missing
                else Check("ok", "config.toml", str(conf)))
-    out.append(Check("ok", "sandbox SSH key", str(cfg.ssh_key_path)) if cfg.ssh_key_path.exists()
-               else Check("FAIL", "sandbox SSH key", "missing. Run `sbx setup --mac-only`"))
+    out += _key_checks(cfg, runner)
     out.append(Check("ok", "~/.ssh/config Include") if cli._has_ssh_include()
                else Check("WARN", "~/.ssh/config Include", "missing: `ssh sbx-<name>` and herdr do not work. "
-                                                          "Run `sbx setup --mac-only`"))
+                                                          "Run `sbx setup --local-only`"))
     if shutil.which("mkcert") is None:
         out.append(Check("WARN", "mkcert", "not installed: sandboxes serve http:// only. `brew install mkcert`"))
     elif not cli._mkcert_root(runner):

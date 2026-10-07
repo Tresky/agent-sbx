@@ -104,6 +104,9 @@ class Config:
     # a full claude.ai login can make API keys on the organization.
     remote_control_mode: str = "acceptEdits"
     ssh_key: str = ""                  # private key for the VMs; default <state>/id_ed25519
+    # Socket of an SSH agent that holds the key (1Password's). Set: the private
+    # key is not on this machine, only <ssh_key>.pub, and ssh asks the agent.
+    ssh_agent: str = ""
     # `sbx publish`: previews behind Cloudflare Access (sbxlib/previews.py).
     # The zone is a domain of its own, not your main one: an agent serves what
     # it wants there. The token command prints a Cloudflare API token.
@@ -115,6 +118,21 @@ class Config:
     @property
     def ssh_key_path(self) -> Path:
         return Path(self.ssh_key).expanduser() if self.ssh_key else state_dir() / "id_ed25519"
+
+    @property
+    def ssh_agent_path(self) -> Path | None:
+        return Path(self.ssh_agent).expanduser() if self.ssh_agent else None
+
+    @property
+    def ssh_pubkey_path(self) -> Path:
+        # The suffix is appended: with_suffix would turn foo.key into foo.pub.
+        key = self.ssh_key_path
+        return key if key.suffix == ".pub" else key.with_name(key.name + ".pub")
+
+    @property
+    def ssh_identity_path(self) -> Path:
+        """What `ssh -i` names: ssh matches the public half against the agent."""
+        return self.ssh_pubkey_path if self.ssh_agent else self.ssh_key_path
 
     def bridge_for(self, profile: str) -> str:
         return {"agent": self.agent_bridge, "personal": self.personal_bridge}[profile]

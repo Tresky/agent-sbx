@@ -290,7 +290,7 @@ component to `template/components/`, and commit them. Everyone then has the
 template after a pull, with its fixes, and a review of each change.
 
 A second Mac that uses your host gets your local definitions and components
-from the host, with `sbx setup --mac-only`.
+from the host, with `sbx setup --local-only`.
 
 ## Change the core
 

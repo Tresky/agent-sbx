@@ -176,6 +176,27 @@ class NewTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.clones(events), ["/nodes/pve/qemu/9005/clone", "/nodes/pve/qemu/9002/clone"])
 
+    def test_a_key_in_an_agent_needs_only_the_pub_on_disk(self):
+        (self.tmp / "cfg" / "id_ed25519").unlink()
+        (self.tmp / "cfg" / "config.toml").write_text(f'ssh_agent = "{self.tmp}/agent.sock"\n')
+        self.more_resources = [self.RUST]
+        code, events, _ = self.run_new("lab", "--template", "rust")
+        self.assertEqual(code, 0)
+        ssh = [e[1] for e in events if e[0] == "cmd" and e[1].startswith("ssh ")]
+        self.assertTrue(ssh)
+        self.assertTrue(all(f"IdentityAgent={self.tmp}/agent.sock" in c and "id_ed25519.pub" in c for c in ssh), ssh)
+        # cloud-init gets the same public key as before.
+        config = next(e[3] for e in events if e[0] == "api" and e[1] == "PUT" and e[2] == "/nodes/pve/qemu/9101/config")
+        self.assertIn("AAAA", str(config.get("sshkeys", "")))
+
+    def test_no_key_at_all_makes_no_vm(self):
+        (self.tmp / "cfg" / "id_ed25519").unlink()
+        (self.tmp / "cfg" / "id_ed25519.pub").unlink()
+        self.more_resources = [self.RUST]
+        code, events, _ = self.run_new("lab", "--template", "rust")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.clones(events), [])
+
     def test_agent_without_a_decision_makes_no_vm(self):
         code, events, _ = self.run_new("myapp", "--project", str(self.app))
         self.assertEqual(code, 1)
