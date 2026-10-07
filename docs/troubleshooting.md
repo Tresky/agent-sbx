@@ -14,6 +14,8 @@ The tables below list the problems that `sbx doctor` does not explain.
 
 | Symptom | Cause | What to do |
 |---|---|---|
+| `Permission denied (publickey)` from `sbx ssh` or `ssh sbx-<name>`, with `ssh_agent` set | 1Password is locked or not running; the item is not in the agent (it serves only the Private or Personal vault unless `~/.config/1Password/ssh/agent.toml` lists it); or the `.pub` on disk is not the key that the sandbox trusts | unlock 1Password; check that `SSH_AUTH_SOCK=<ssh_agent> ssh-add -L` lists the key and that it equals `<ssh_key>.pub`; `sbx doctor` checks this. After a new key in `sbx setup`, sandboxes made before it trust the old key until you rebuild them |
+| `sbx new`, `sbx ssh` or a portal job hangs, with `ssh_agent` set | 1Password waits for you to approve the use of the key, and the prompt is behind another window | approve it in 1Password; run the command again if it timed out |
 | `Host key verification failed` or `Permission denied` from ssh | an agent or a script ran the command; SSH has no terminal to ask for the password | run `sbx setup` (or the ssh command) in your own Terminal window |
 | `Too many authentication failures` | ssh offers each of your keys before the password | sbx adds `-o PubkeyAuthentication=no`; add it to your own `ssh` and `scp` commands too |
 | Tailscale refuses the gateway's tag | the tailnet policy does not name the tag yet | merge the policy fragment first; `sbx setup` shows it |
