@@ -1555,8 +1555,8 @@ function addProjectDialog() {
 
 async function pageProject(main, [name]) {
   const p = await GET(`/api/projects/${enc(name)}`);
-  const token = h("input", { type: "password", autocomplete: "off", placeholder: "github_pat_…" });
-  const host = h("input", { placeholder: "github.com" });
+  const token = h("input", { type: "password", autocomplete: "off", placeholder: "github_pat_… or glpat-…" });
+  const host = h("input", { placeholder: "the origin's host" });
   const user = h("input", { placeholder: "x-access-token" });
   const noCheck = h("input", { type: "checkbox" });
   // A sandbox that runs already has no git credential until the token is pushed.

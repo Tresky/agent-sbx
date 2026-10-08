@@ -163,14 +163,14 @@ sequenceDiagram
         participant p as 🛡️ proxy :8080
     end
     box rgba(100,116,139,0.12) internet
-        participant gh as GitHub
+        participant gh as git host
     end
     Note over git: ~/.git-credentials holds<br/>sbx:<placeholder>@sidecar only
     git->>p: GET /github/org/repo/info/refs (no credential)
     p-->>git: 401 + WWW-Authenticate: Basic
     git->>p: GET … with basic auth sbx:<placeholder>
     alt the placeholder is this sandbox's
-        p->>gh: GET /org/repo/info/refs<br/>basic auth x-access-token:<real token>
+        p->>gh: GET /org/repo/info/refs<br/>basic auth <user>:<real token>
         gh-->>p: 200 refs
         p-->>git: 200 refs
     else anything else
@@ -537,7 +537,9 @@ sequenceDiagram
 9. **Git access.** For `personal`, the SSH agent is forwarded for the clones.
    For `agent`, the placeholder goes into `~/.git-credentials` for the
    sidecar's proxy, and every URL of the git host is rewritten to
-   `http://<sidecar>:8080/github/`; the sidecar adds the token. Without a
+   `http://<sidecar>:8080/github/`; the sidecar adds the token and the
+   bound user name, and sends the request to the bound host (GitHub, GitLab;
+   the `/github/` prefix is only a name). Without a
    sidecar, the token itself goes into `~/.git-credentials`, and git uses
    HTTPS for the host even for a URL in the SSH form.
 10. **Clone the project** into `~/code/<project>`, with each `repo` input.
@@ -900,6 +902,7 @@ Each of these cost real time. Keep them in mind when you change the code.
 | `set \| grep '^SBX_'` to save variables | a multi-line variable of another name has lines that start with `SBX_`; they pass the filter and overwrite the real values when the file is sourced | `declare -p` for each name from `compgen -v SBX_` |
 | the VM id as a VLAN tag | `bridge vlan add ... vid 9150` says "Invalid VLAN ID": a VLAN id stops at 4094 | `Config.vlan_for`: the sandbox's place in the id range, from 2 |
 | `a && b && c` as the last command of a loop, under `set -e` and pipefail | when the last item does not match, the failed chain becomes the loop's status, and the script stops | an `if` statement; `\|\| true` after a `grep` that may find nothing |
+| GitLab's 301 from `/<repo>/info/refs` to `https://gitlab.com/<repo>.git/info/refs` | git follows the absolute URL past the proxy, and the sandbox's firewall stops it | the proxy rewrites a `Location` on the git host to a path under `/github/` |
 | a 401 that names no auth scheme | git asks again with no credential, gets a second 401, and deletes the stored placeholder from `~/.git-credentials` | `WWW-Authenticate: Basic` on the proxy's 401 |
 | `HTTPServer.server_bind` with no resolver in reach | asks DNS for its own name before it listens; the port refuses connections until the lookups time out | skip the lookup (`sidecar.py`), or wait for the socket, not a fixed time |
 | "open" mode's DNAT of 1024-32767 | takes the sidecar's own 2222 and 8081 to the VM | return those two ports before any DNAT |
