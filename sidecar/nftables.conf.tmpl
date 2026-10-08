@@ -51,6 +51,9 @@ table inet sbx_sidecar {
 		# Toward the sandbox: only what prerouting translated (22, the
 		# approved ports, the open range).
 		iifname "@SBX_SIDECAR_NET_IF@" oifname "@SBX_SIDECAR_AGENT_IF@" ct status dnat accept
+		# `sbx fork`: until the copy is cleaned, nothing leaves the sandbox
+		# (not even DNS), so a copied claude.ai login cannot refresh.
+		@SBX_SIDECAR_QUARANTINE_RULE@
 		# Names come from the gateway's dnsmasq, as today.
 		iifname "@SBX_SIDECAR_AGENT_IF@" oifname "@SBX_SIDECAR_NET_IF@" ip daddr @SBX_AGENT_NET@.1 udp dport 53 accept
 		iifname "@SBX_SIDECAR_AGENT_IF@" oifname "@SBX_SIDECAR_NET_IF@" ip daddr @SBX_AGENT_NET@.1 tcp dport 53 accept

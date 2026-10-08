@@ -46,6 +46,7 @@ RESERVED = {2222, 8081}
 # only sees a placeholder and does not know. Unverified with the real API.
 OAUTH_BETA = "oauth-2025-04-20"
 NFT_SET = ("ip", "sbx_sidecar_nat", "approved")
+CHUNK = 64 * 1024  # the proxy streams in pieces of this size; it never holds a whole body
 
 
 def log(msg: str) -> None:
@@ -171,7 +172,6 @@ class Proxy(Quiet):
             # and deletes the placeholder from ~/.git-credentials.
             return self.reply(401, {"error": "unknown sandbox credential"},
                               {"WWW-Authenticate": 'Basic realm="sbx sidecar"'})
-        body = self.body()
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
         git = self.path.startswith("/github/")
         if git:
@@ -186,25 +186,91 @@ class Proxy(Quiet):
         cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
         conn = cls(u.hostname, u.port, timeout=300)
         headers["Host"] = u.netloc
+        # Both ways are STREAMED, in CHUNK pieces: a sidecar has little memory,
+        # and a git clone or push of a large repository is hundreds of MB.
+        body, chunked = self.request_body()
+        if chunked:
+            headers["Transfer-Encoding"] = "chunked"
+        elif body is not None:
+            headers["Content-Length"] = self.headers["Content-Length"]
         try:
-            conn.request(self.command, path, body=body or None, headers=headers)
-            resp = conn.getresponse()
-            data = resp.read()
-        except OSError as exc:
-            log(f"proxy {self.command} {path} -> 502 ({exc})")
-            return self.reply(502, {"error": f"upstream: {exc}"})
+            try:
+                conn.request(self.command, path, body=body, headers=headers, encode_chunked=chunked)
+                resp = conn.getresponse()
+            except OSError as exc:
+                log(f"proxy {self.command} {path} -> 502 ({exc})")
+                return self.reply(502, {"error": f"upstream: {exc}"})
+            sent = self.relay(resp, upstream if git else None)
         finally:
             conn.close()
-        log(f"proxy {self.command} {path} -> {resp.status} ({len(data)} bytes)")
+        log(f"proxy {self.command} {path} -> {resp.status} ({sent} bytes)")
+
+    def request_body(self):
+        """(an iterator of the request body's pieces, or None; whether it is chunked)."""
+        if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+            return self._chunks(), True
+        length = int(self.headers.get("Content-Length") or 0)
+        if not length:
+            return None, False
+
+        def pieces(left=length):
+            while left:
+                data = self.rfile.read(min(CHUNK, left))
+                if not data:
+                    raise OSError("the sandbox closed the request early")
+                left -= len(data)
+                yield data
+        return pieces(), False
+
+    def _chunks(self):
+        """The pieces of a chunked request body (git push sends one)."""
+        while True:
+            size = int(self.rfile.readline().split(b";")[0].strip() or b"0", 16)
+            if size == 0:
+                while self.rfile.readline() not in (b"\r\n", b"\n", b""):
+                    pass  # trailers
+                return
+            left = size
+            while left:
+                data = self.rfile.read(min(CHUNK, left))
+                if not data:
+                    raise OSError("the sandbox closed the request early")
+                left -= len(data)
+                yield data
+            self.rfile.readline()  # the CRLF after each chunk
+
+    def relay(self, resp, git_upstream: str | None = None) -> int:
+        """The upstream's answer to the sandbox, piece by piece. Returns the bytes.
+        With git_upstream, a redirect to that host comes back into the proxy."""
+        git, upstream = git_upstream is not None, git_upstream
         self.send_response(resp.status)
         for k, v in resp.getheaders():
-            if k.lower() not in ("transfer-encoding", "connection", "content-length"):
+            if k.lower() not in ("transfer-encoding", "connection", "content-length", "keep-alive"):
                 if git and k.lower() == "location":
                     v = local_location(v, upstream, "/github")
                 self.send_header(k, v)
-        self.send_header("Content-Length", str(len(data)))
+        no_body = self.command == "HEAD" or resp.status in (204, 304) or 100 <= resp.status < 200
+        length = resp.getheader("Content-Length")
+        if no_body:
+            if length is not None:
+                self.send_header("Content-Length", length)
+            self.end_headers()
+            return 0
+        if length is not None:
+            self.send_header("Content-Length", length)
+        else:
+            self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
-        self.wfile.write(data)
+        sent = 0
+        while data := resp.read(CHUNK):
+            sent += len(data)
+            if length is None:
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+            else:
+                self.wfile.write(data)
+        if length is None:
+            self.wfile.write(b"0\r\n\r\n")
+        return sent
 
     do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = handle_any
 

@@ -139,7 +139,9 @@ class DefinitionTest(Repo):
         self.define("mine", 'description = "it\'s mine"\ncomponents = ["ruby"]\n[ruby]\nversions = ["3.4.1", "3.3.6"]\n')
         script = f'eval "$(python3 {self.root}/sbxlib/templates.py env mine)"; ' \
                  'echo "$SBX_RUBY_VERSIONS|$SBX_COMPONENTS|${#SBX_TEMPLATE_HASH}"'
-        done = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        # This copy's root is its checkout: its local definitions must count.
+        env = {k: v for k, v in os.environ.items() if k != "SBX_IGNORE_LOCAL_TEMPLATES"}
+        done = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
         self.assertEqual(done.stdout.strip(), "3.4.1 3.3.6|ruby|12", done.stderr)
         done = subprocess.run(["python3", f"{self.root}/sbxlib/templates.py", "env", "nope"],
                               capture_output=True, text=True)

@@ -196,8 +196,9 @@ host with an existing gateway keeps its values.
 - A new key in `host/defaults.conf` that the CLI reads also needs a field in
   `sbxlib/config.py` and an entry in `_ENV_MAP`. A test keeps the two defaults
   equal.
-- The tests ignore the user's `host/local.conf` (`tests/__init__.py` sets
-  `SBX_LOCAL_CONF`), so they give the same result on every setup.
+- The tests ignore the user's `host/local.conf` and their own templates and
+  components (`tests/__init__.py` sets `SBX_LOCAL_CONF` and
+  `SBX_IGNORE_LOCAL_TEMPLATES`), so they give the same result on every setup.
 - A change to a command, an option, or a setting also changes
   `docs/reference.md`. `tests/test_docs.py` fails until it does.
 - Each topic has one home in `docs/`. Link to it; do not copy it.

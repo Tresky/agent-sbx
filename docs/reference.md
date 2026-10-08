@@ -30,6 +30,7 @@ path, a git URL, or a name that `sbx projects` lists.
 | `sbx autostart <name>` | the sandbox and its sidecar start at host boot, and the Claude Code sessions live in it are resumed after one. Nothing running is restarted. See [After a host reboot](usage.md#after-a-host-reboot). |
 | `sbx autostart <name> --status` | whether it starts at boot, the sessions it would resume, and the last resume |
 | `sbx autostart <name> --off` | no start at boot, no resume |
+| `sbx fork <name> <new-name> [--ttl DAYS] [--cores N] [--memory MB] [--keep-snapshot] [--no-claude] [--no-herdr]` | a second copy of a running agent sandbox: its disk as it is now, a new sidecar on a VLAN of its own, new credentials, no claude.ai login. The original keeps running: sbx takes a snapshot of it, copies from that, and removes the snapshot (`--keep-snapshot` keeps it). |
 | `sbx extend <name> --days N` | moves the expiry N days later, from today or from the current expiry, whichever is later |
 | `sbx extend <name> --never` | removes the expiry: `sbx gc` never removes the sandbox |
 | `sbx rm <name> [-y]` | destroys the sandbox, its sidecar and their snapshots, and withdraws its previews |
@@ -214,6 +215,8 @@ component as `SBX_RUBY_VERSIONS`.
 | `[rust]` | `toolchains` | `["stable"]` | the rustup toolchains; the first is the default |
 | `[rust]` | `components` | `"clippy rustfmt"` | more rustup components |
 | `[python]` | `versions` | `["3.13"]` | the Pythons that uv caches |
+| `[android]` | `platform`, `build_tools`, `emulator`, `image` | `35`, `35.0.0`, `false`, `google_apis;x86_64` | the SDK platform and build tools; the emulator, its system image and a `Medium_Phone` device |
+| `[postgres]` | `version`, `postgis` | `18`, `true` | the PostgreSQL major version from apt.postgresql.org, and whether PostGIS 3 comes with it |
 | `[mise]` | `tools` | `[]` | what `mise use --global` installs in the template, such as `["ruby@3.4.10", "node@24"]` |
 | `[odin]` | `version`, `wgpu_version`, `premake_version` | see `template/components/odin.sh` | the Odin, wgpu-native and premake releases |
 

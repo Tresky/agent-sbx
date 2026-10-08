@@ -66,6 +66,12 @@ net_if="$(ip -4 route show default | awk '{print $5; exit}')"
 net_addr="$(ip -o -4 addr show dev "$net_if" | awk '{print $4; exit}' | cut -d/ -f1)"
 
 export SBX_SIDECAR_AGENT_IF="$agent_if" SBX_SIDECAR_NET_IF="$net_if" SBX_SIDECAR_VM="$SBX_SIDECAR_LINK.2"
+# Quarantine (`sbx fork`): SSH in still works, by DNAT; nothing goes out.
+if [[ "${SBX_SIDECAR_QUARANTINE:-0}" == 1 ]]; then
+  export SBX_SIDECAR_QUARANTINE_RULE="iifname \"$agent_if\" drop"
+else
+  export SBX_SIDECAR_QUARANTINE_RULE="# not in quarantine"
+fi
 if [[ "${SBX_SIDECAR_PORTS:-open}" == open ]]; then
   export SBX_SIDECAR_OPEN_RULE="iifname \"$net_if\" tcp dport 1024-32767 dnat to $SBX_SIDECAR_LINK.2"
 else
@@ -100,4 +106,4 @@ printf 'SBX_SIDECAR_NET_ADDR=%s\n' "$net_addr" > "$RUN_DIR/sidecar.env"
 touch "$DIR/secret" "$DIR/tokens"
 chmod 0600 "$DIR/secret" "$DIR/tokens"
 systemctl restart sbx-sidecar
-echo "sidecar applied: wire $agent_if ($SBX_SIDECAR_LINK.1), network $net_if ($net_addr), ports ${SBX_SIDECAR_PORTS:-open}"
+echo "sidecar applied: wire $agent_if ($SBX_SIDECAR_LINK.1), network $net_if ($net_addr), ports ${SBX_SIDECAR_PORTS:-open}$([[ "${SBX_SIDECAR_QUARANTINE:-0}" == 1 ]] && echo ", QUARANTINE")"

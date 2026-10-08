@@ -204,6 +204,20 @@ The first `sbx publish` makes one Access application for every hostname of
 the domain, with the policy `me`, before it makes any name. A hostname with
 another policy gets an application of its own. A policy names emails and
 email domains only: sbx has no way to publish past a sign-in.
+
+Policies that you add to the wildcard application in the dashboard stay: sbx
+only makes sure `sbx: me` is among them.
+
+**A server that machines must reach** (an MCP server that Claude calls, OAuth
+endpoints) cannot sign in to Access. Let those paths alone through, by hand:
+in Zero Trust, a self-hosted application for the same hostname with only
+those paths (for example `mcp`, `.well-known/oauth-protected-resource*`,
+`.well-known/oauth-authorization-server*`, `oauth/token`), and a policy with
+Action **Bypass**, Include **Everyone**. The more specific application wins
+for its paths; the rest of the hostname stays behind the sign-in. The app on
+those paths is then public, so it must check its own tokens, and the agent in
+the sandbox writes that code. `sbx publish --off` and `sbx rm` remove such an
+application with the hostname, so a bypass never outlives its preview.
 [security.md](security.md) explains the tunnel and its token.
 
 ## Work in a sandbox
@@ -306,6 +320,31 @@ Control when the sandbox has the full claude.ai login, else in a terminal. A
 session that you ended is not resumed. The resumed sessions run in their own
 tmux server: `sbx ssh lab`, then `tmux -L sbx-resume ls`.
 [architecture.md](architecture.md#claude-code) shows the boot, step by step.
+
+## Fork a sandbox
+
+```
+sbx fork app app2            a second copy of app, as it is now
+sbx fork app app2 --ttl 0    ... with no expiry
+```
+
+The copy has everything that is on the original's disk: the database and the
+Docker volumes, uncommitted work, the installed tools, Claude's conversation
+history. It gets its own name, a new sidecar on a VLAN of its own, and new
+credentials. The original keeps running: sbx takes a snapshot of it, copies
+from that, and removes the snapshot.
+
+What the copy does not get:
+
+- **Running processes.** A dev server, or a Claude session, must be started
+  again. A conversation of the original continues in the copy as a branch:
+  `claude --resume <id>`.
+- **The claude.ai login.** Two copies of one login sign each other out, so
+  the copy has none. Remote Control: `sbx remote-control app2 --allow-agent`.
+- **Previews and autostart.** `sbx publish` and `sbx autostart` for the copy.
+
+A fork is for agent sandboxes. [architecture.md](architecture.md#sbx-fork)
+explains the steps.
 
 ## Snapshots
 

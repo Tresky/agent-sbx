@@ -709,6 +709,36 @@ sequenceDiagram
     Note over res: A session you ended was dropped from the list<br/>within a minute, so it is not resumed.
 ```
 
+## sbx fork
+
+`sbx fork <name> <new-name>` (`cmd_fork`) copies a running agent sandbox. The
+original is only read: a snapshot of it (with the guest agent's file-system
+freeze, so a database in the copy recovers as after a power cut), a FULL
+clone from that snapshot, and the removal of that snapshot. A test holds the
+command to exactly those three calls on the original.
+
+- **A fresh sidecar, not a copy.** The sidecar holds nothing worth copying,
+  and a copy would share its machine id, and with it its DHCP lease. The new
+  one is cloned from the `sidecar` template on a new VLAN, with a new
+  placeholder secret, and gets the current `sidecar/` files from the
+  checkout.
+- **The copy is cleaned in quarantine.** It boots with the original's full
+  claude.ai login on its disk and its Claude services enabled. With the
+  internet, it would refresh that login and sign the original out. So the new
+  sidecar starts in quarantine (`SBX_SIDECAR_QUARANTINE=1`: a drop of
+  everything from the sandbox, while port 22 still comes in by DNAT). Over
+  SSH, sbx disables Remote Control, the resume and the tracker, stops every
+  `claude`, deletes `~/.claude/.credentials.json` and the session list, and
+  makes a new machine id. Then it writes the new placeholder into the Claude
+  and git settings and lifts the quarantine.
+- **cloud-init does the rest.** The new name gives the clone a new
+  cloud-init instance, which sets the hostname and makes new SSH host keys.
+  Proxmox gives the clone new MAC addresses.
+
+The copy's tags keep the profile, the template and the project, add
+`sbx-fork-of-<name>` and the copy's own expiry, and drop the original's
+autostart; `onboot` is 0.
+
 ## Previews behind Cloudflare Access
 
 `sbx publish` (`sbxlib/previews.py`) puts a port of an agent sandbox at
