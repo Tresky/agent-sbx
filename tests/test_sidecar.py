@@ -44,14 +44,21 @@ class FakeSock:
 
 
 class FakeResponse:
-    def __init__(self, status: int, body: bytes, extra=()):
-        self.status, self._body, self._extra = status, body, list(extra)
+    def __init__(self, status: int, body: bytes, length: bool = False, extra=()):
+        self.status, self._body, self._length, self._extra = status, body, length, list(extra)
 
-    def read(self):
-        return self._body
+    def read(self, n=None):
+        n = len(self._body) if n is None else n
+        out, self._body = self._body[:n], self._body[n:]
+        return out
 
     def getheaders(self):
         return [("Content-Type", "application/json"), ("Transfer-Encoding", "chunked")] + self._extra
+
+    def getheader(self, name, default=None):
+        if name.lower() == "content-length" and self._length:
+            return str(len(self._body))
+        return default
 
 
 class FakeUpstream:
@@ -63,12 +70,18 @@ class FakeUpstream:
     def __init__(self, host, port=None, timeout=None):
         self.host, self.port = host, port
 
-    def request(self, method, path, body=None, headers=None):
-        FakeUpstream.calls.append({"host": self.host, "port": self.port, "method": method,
-                                   "path": path, "body": body, "headers": dict(headers or {})})
+    response_body = b'{"ok": true}'
+    response_length = False
+
+    def request(self, method, path, body=None, headers=None, encode_chunked=False):
+        if body is not None and not isinstance(body, (bytes, str)):
+            body = b"".join(body)          # the proxy streams it; the fake gathers it
+        FakeUpstream.calls.append({"host": self.host, "port": self.port, "method": method, "path": path,
+                                   "body": body, "headers": dict(headers or {}), "chunked": encode_chunked})
 
     def getresponse(self):
-        return FakeResponse(FakeUpstream.status, b'{"ok": true}', FakeUpstream.headers)
+        return FakeResponse(FakeUpstream.status, FakeUpstream.response_body, FakeUpstream.response_length,
+                            FakeUpstream.headers)
 
     def close(self):
         pass
@@ -88,7 +101,19 @@ def request(handler_cls, side: str, method: str, path: str, headers: dict | None
     status_line, *header_lines = head.decode().split("\r\n")
     status = int(status_line.split()[1])
     out_headers = {k.lower(): v for k, v in (h.split(": ", 1) for h in header_lines)}
+    if out_headers.get("transfer-encoding") == "chunked":
+        out_body = dechunk(out_body)
     return status, out_headers, out_body
+
+
+def dechunk(raw: bytes) -> bytes:
+    out, rest = b"", raw
+    while True:
+        size_line, _, rest = rest.partition(b"\r\n")
+        size = int(size_line, 16)
+        if size == 0:
+            return out
+        out, rest = out + rest[:size], rest[size + 2:]
 
 
 class Base(unittest.TestCase):
@@ -105,6 +130,8 @@ class Base(unittest.TestCase):
         sidecar.CFG = sidecar.Config(self.args)
         sidecar.REQUESTS = sidecar.Requests()
         FakeUpstream.calls = []
+        FakeUpstream.response_body = b'{"ok": true}'
+        FakeUpstream.response_length = False
         FakeUpstream.status = 200
         FakeUpstream.headers = []
         self._real = (sidecar.http.client.HTTPConnection, sidecar.open_port, sidecar.close_port)
@@ -206,11 +233,50 @@ class ProxyTest(Base):
 
     def test_upstream_status_and_hop_headers(self):
         FakeUpstream.status = 429
-        status, headers, _ = request(sidecar.Proxy, "agent", "GET", "/v1/models",
-                                     {"Authorization": f"Bearer {SECRET}"})
+        FakeUpstream.response_length = True
+        status, headers, body = request(sidecar.Proxy, "agent", "GET", "/v1/models",
+                                        {"Authorization": f"Bearer {SECRET}"})
         self.assertEqual(status, 429)
+        # The upstream's length goes through; its own transfer coding does not.
         self.assertNotIn("transfer-encoding", headers)
         self.assertEqual(headers["content-length"], str(len(b'{"ok": true}')))
+        self.assertEqual(body, b'{"ok": true}')
+
+    def test_a_large_answer_is_streamed_in_pieces(self):
+        # A git clone of a large repository: the proxy must never hold it whole.
+        # It was killed for lack of memory, at 300 MB of a pack, in a 512 MB sidecar.
+        FakeUpstream.response_body = bytes(range(256)) * (5 * sidecar.CHUNK // 256 + 7)
+        writes = []
+        real = sidecar.Proxy.relay
+
+        def counting(handler, resp, *rest):
+            w = handler.wfile.write
+            handler.wfile.write = lambda b: writes.append(len(b)) or w(b)
+            return real(handler, resp, *rest)
+        sidecar.Proxy.relay = counting
+        try:
+            status, headers, body = request(sidecar.Proxy, "agent", "GET", "/github/o/r.git/info/refs",
+                                            {"Authorization": f"Bearer {SECRET}"})
+        finally:
+            sidecar.Proxy.relay = real
+        self.assertEqual(status, 200)
+        self.assertEqual(body, FakeUpstream.response_body)
+        self.assertEqual(headers.get("transfer-encoding"), "chunked")
+        self.assertGreaterEqual(len(writes), 6)
+        self.assertLessEqual(max(writes), sidecar.CHUNK + 32)
+
+    def test_a_chunked_upload_is_streamed_upstream(self):
+        # git push sends a large pack as a chunked request.
+        payload = b"x" * (3 * sidecar.CHUNK + 5)
+        chunked = b"".join(b"%x\r\n%s\r\n" % (len(p), p)
+                           for p in (payload[:70000], payload[70000:])) + b"0\r\n\r\n"
+        status, _, _ = request(sidecar.Proxy, "agent", "POST", "/github/o/r.git/git-receive-pack",
+                               {"Authorization": f"Bearer {SECRET}", "Transfer-Encoding": "chunked"}, chunked)
+        self.assertEqual(status, 200)
+        [call] = FakeUpstream.calls
+        self.assertEqual(call["body"], payload)
+        self.assertTrue(call["chunked"])
+        self.assertEqual(call["headers"].get("Transfer-Encoding"), "chunked")
 
 
 class ExposeTest(Base):

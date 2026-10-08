@@ -60,6 +60,8 @@ A template adds **components**. A component is one shell file in
 | `gis` | GEOS, GDAL and PROJ |
 | `media` | ffmpeg |
 | `mise` | mise, with its shims on the PATH of every shell. `[mise] tools` installs tools in the template, such as `["python@3.13"]`. |
+| `postgres` | PostgreSQL from the PostgreSQL project's apt repository, with PostGIS; the sandbox user is a superuser of the local cluster |
+| `android` | a JDK, the Android SDK (command-line tools, platform-tools, a platform, build tools), and with `emulator = true` the emulator and a device, run with KVM |
 | `sidecar` | the sidecar's firewall, credential proxy, expose API and `cloudflared`; for a `bare` definition only |
 
 `sbx template components` lists them, with your own.

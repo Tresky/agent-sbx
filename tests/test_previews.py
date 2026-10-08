@@ -169,6 +169,29 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(len(self.cf.apps), 1, "the team application went with it")
         self.assertTrue(self.pv.withdraw("sbx-lab", "lab-4000.sbx-previews.example"))
 
+    def test_publish_keeps_the_policies_added_to_the_wildcard_by_hand(self):
+        self.publish()
+        (wild,) = self.cf.apps.values()
+        self.cf.policies["hand"] = {"id": "hand", "name": "tyler"}
+        wild["policies"].append({"id": "hand", "name": "tyler", "precedence": 2})
+        self.publish(fqdn="lab-4000.sbx-previews.example")
+        self.assertEqual([p["name"] for p in wild["policies"]], ["sbx: me", "tyler"])
+
+    def test_a_path_application_made_by_hand_goes_with_the_hostname(self):
+        self.publish()
+        self.publish(fqdn="lab-4000.sbx-previews.example")
+        self.cf.policies["bp"] = {"id": "bp", "name": "bypass"}
+        self.cf.apps["byp"] = {"id": "byp", "domain": "lab-3000.sbx-previews.example/mcp",
+                               "destinations": [{"uri": "lab-3000.sbx-previews.example/mcp"},
+                                                {"uri": "lab-3000.sbx-previews.example/oauth/token"}],
+                               "policies": [{"id": "bp", "name": "bypass"}]}
+        # Another hostname that only starts the same is not touched.
+        self.cf.apps["other"] = {"id": "other", "domain": "lab-3000.sbx-previews.example.evil/mcp", "policies": []}
+        self.pv.withdraw("sbx-lab", "lab-3000.sbx-previews.example")
+        self.assertNotIn("byp", self.cf.apps)
+        self.assertIn("other", self.cf.apps)
+        self.assertIn("*.sbx-previews.example", [a["domain"] for a in self.cf.apps.values()])
+
     def test_remove_all_leaves_nothing_of_the_sandbox(self):
         self.publish(policy="team")
         self.publish(fqdn="other-1.sbx-previews.example", host="sbx-other")

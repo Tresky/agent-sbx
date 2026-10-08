@@ -243,6 +243,7 @@ class PortalTest(unittest.TestCase):
         status, body, _ = self.request("PUT", "/api/settings", {"values": {"cores": None}})
         self.assertNotIn("cores", (self.home / "config.toml").read_text())
 
+    @mock.patch.dict(os.environ, {"SBX_IGNORE_LOCAL_TEMPLATES": ""})   # the plan names the real folder
     def test_an_import_writes_only_what_was_reviewed(self):
         bundle = ('[sbx_template]\nformat = 1\nname = "portaltest"\n'
                   "definition = '''\ndescription = \"t\"\ncomponents = []\n'''\n")

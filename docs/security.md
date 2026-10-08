@@ -105,7 +105,10 @@ The sidecar holds what the sandbox must not:
   Cloudflare and only the Mac sets them, with an API token that never leaves
   the Mac: a compromised sidecar cannot add a hostname or change a target.
   Every hostname sits behind Cloudflare Access; the wildcard application for
-  the whole domain exists before the first name does.
+  the whole domain exists before the first name does. A Bypass for some paths
+  (for a machine-to-machine client) is made by hand; those paths are then as
+  safe as the agent's own code on them. sbx removes such an application with
+  its hostname.
 - **The port policy.** Port 22 of the sidecar's address is the sandbox's, by
   DNAT. With `sidecar_ports = "open"` every port from 1024 to 32767 is too, so
   the mirror's ports are direct as before. With `"ask"` a port opens only
@@ -259,8 +262,8 @@ Mac trusts.
 - **A full claude.ai login in an agent sandbox** (`--allow-agent`) is in the
   VM, where the agent can read it, and it can make API keys on your
   organization.
-- **The proxy buffers.** It reads a request and an answer whole, so a
-  `git push` with a chunked body does not pass through it.
+- **The proxy streams.** It holds at most a 64 KB piece of a request or an
+  answer, so a large clone or push passes.
 - **`--with <name>` permits an input by its name.** A branch can change the
   destination or the source path of that name within the checkout. Read the
   manifest diff of an agent branch before you run `sbx new` from it. The table

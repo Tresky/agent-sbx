@@ -101,6 +101,7 @@ ns gw nft -f "$GW_RULES" || { echo "gateway rules failed to load"; exit 2; }
 # the interfaces it would find, in "ask" mode.
 export SBX_SIDECAR_LINK=10.79.0 SBX_SIDECAR_AGENT_IF=agent0 SBX_SIDECAR_NET_IF=net0
 export SBX_SIDECAR_OPEN_RULE="# ports open by approval only (sidecar_ports = ask)"
+export SBX_SIDECAR_QUARANTINE_RULE="# not in quarantine"
 export SBX_SIDECAR_VM=10.79.0.2; render "$SIDECAR_TMPL" > /tmp/sideA.conf
 export SBX_SIDECAR_VM=10.79.0.6; render "$SIDECAR_TMPL" > /tmp/sideB.conf
 ns sideA nft -f /tmp/sideA.conf || { echo "sidecar rules failed to load"; exit 2; }
@@ -218,6 +219,15 @@ report "tailnet device -> port 4400, no approval" "$(code ts http://10.77.0.57:4
 report "tailnet device -> 8081 is still the expose API" "$(code ts http://10.77.0.57:8081/requests)" 200
 report "tailnet device -> 2222 is still the sidecar's" "$(code ts http://10.77.0.57:2222/)" 200
 ns sideA nft -f /tmp/sideA.conf || { echo "sidecar rules failed to reload"; exit 2; }
+
+echo "== quarantine (sbx fork): SSH in still reaches the sandbox, nothing goes out"
+SBX_SIDECAR_VM=10.79.0.2 SBX_SIDECAR_QUARANTINE_RULE='iifname "agent0" drop' render "$SIDECAR_TMPL" > /tmp/sideA-q.conf
+ns sideA nft -f /tmp/sideA-q.conf || { echo "quarantine rules failed to load"; exit 2; }
+expect     fail "quarantine: agent A -> internet"                      agentA 203.0.113.10
+expect_tcp fail "quarantine: agent A -> DNS at the gateway"            agentA 10.77.0.1 53
+report "quarantine: tailnet device -> sandbox A port 22" "$(code ts http://10.77.0.57:22/)" 200
+ns sideA nft -f /tmp/sideA.conf || { echo "sidecar rules failed to reload"; exit 2; }
+expect     pass "after quarantine: agent A -> internet"                agentA 203.0.113.10
 
 echo "== control 1: sidecar rules deleted (the gateway's own layer still holds)"
 for s in sideA sideB; do ns "$s" nft delete table inet sbx_sidecar; done
