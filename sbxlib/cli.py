@@ -38,7 +38,7 @@ from .inputs import PLACEHOLDER, REPO, SEND, InputError
 from .manifest import MANIFEST_PATH, Manifest, ManifestError
 from .pve import HttpApi, Pve, PveError, TemplateVm
 from .run import CommandError, Runner
-from .vm import SIDECAR_SSH_PORT, Vm, VmError, dns_has, resolves, sidecar_alias
+from .vm import SIDECAR_SSH_PORT, Vm, VmError, dns_has, resolves, sidecar_alias, ssh_value
 
 SSH_INCLUDE = "Include ~/.config/sbx/ssh_config"
 
@@ -182,7 +182,8 @@ def _pve(cfg: Config, runner: Runner, api) -> Pve:
 # --- commands ---------------------------------------------------------------
 
 def _prepare_mac(cfg: Config, runner: Runner) -> None:
-    """The state directory, config.toml, the sandbox key and the SSH block.
+    """The state directory, config.toml and the SSH block. It makes no key:
+    `sbx setup` does that (Wizard._sandbox_key), and may keep it in 1Password.
     `sbx setup` runs it; it is safe to run again."""
     home = state_dir()
     home.mkdir(parents=True, exist_ok=True)
@@ -202,16 +203,11 @@ def _prepare_mac(cfg: Config, runner: Runner) -> None:
             '# A git token for agent sandboxes of EVERY project. Prefer one token per\n'
             '# project in bindings/<project>.toml, [git]; see docs/projects.md.\n'
             '# git_token_command = ["security", "find-generic-password", "-s", "sbx-git-token", "-w"]\n'
+            '# The sandbox key lives in an SSH agent (1Password), not in a file here:\n'
+            '# ssh_agent = "~/.1password/agent.sock"\n'
             '# The domain, the bridges, the subnets and the IDs live in host/local.conf,\n'
             '# which the host scripts read too.\n')
         info(f"wrote {conf}")
-
-    key = cfg.ssh_key_path
-    if not key.exists():
-        # A dedicated key: the wildcard SSH block can then say IdentitiesOnly,
-        # and no personal key is ever authorised inside a sandbox.
-        runner.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "sbx", "-f", str(key)])
-        info(f"made the key pair {key}")
 
     block = home / "ssh_config"
     block.write_text(
@@ -220,7 +216,11 @@ def _prepare_mac(cfg: Config, runner: Runner) -> None:
         "Host sbx-*\n"
         f"  HostName %h.{cfg.domain}\n"
         f"  User {cfg.vm_user}\n"
-        f"  IdentityFile {key}\n"
+        # A dedicated key: IdentitiesOnly then offers it alone, and no
+        # personal key is ever authorised inside a sandbox. With an agent the
+        # IdentityFile is the .pub: ssh picks the agent's key that matches it.
+        f"  IdentityFile {ssh_value(cfg.ssh_identity_path)}\n"
+        + (f"  IdentityAgent {ssh_value(cfg.ssh_agent_path)}\n" if cfg.ssh_agent else "") +
         "  IdentitiesOnly yes\n"
         f"  UserKnownHostsFile {home / 'known_hosts'}\n"
         # No HostKeyAlias: ssh does not expand %h there, so every sandbox would
@@ -776,6 +776,12 @@ def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
     # `--push` alone, with a token in the secret store already, installs that
     # one: the usual case is a sandbox that exists and needs the token now.
     token = gittoken.stored(runner, project.name) if args.push and not args.stdin else ""
+    bound = inputs_mod.load_bindings(binding).git
+    # The host: what the user said, else what the stored token was bound to,
+    # else the host of the project's own remote.
+    origin = gittoken.repo_path(repos[0])
+    host = args.host or (bound.host if token and bound else None) or (origin[0] if origin else "github.com")
+    username = args.username or (bound.username if token and bound else None) or "x-access-token"
     if token:
         info(f"using the token stored for {project.name}; `sbx git-token {args.project} --remove` first to replace it")
     else:
@@ -783,9 +789,15 @@ def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
         print("the token must cover: " + ", ".join(repos))
         if project.checkout is None:
             print("  (from the URL alone: a repository that the recipe adds is checked by `sbx new`)")
-        if args.host == "github.com":
+        if host == "github.com":
             print("make it at github.com > Settings > Developer settings > Fine-grained tokens:")
             print("  Only select repositories (the ones above); Contents: Read, or Read and write to push")
+        elif gittoken.is_gitlab(host):
+            # Both kinds work on the Free tier. A project access token would
+            # be the closest match, but GitLab.com sells it with Premium only.
+            print(f"make it at https://{host}/-/user_settings/personal_access_tokens:")
+            print("  Fine-grained: Group and project, the projects above; Code: Download, and Push to push")
+            print("  (or a legacy token with read_repository and write_repository: it reaches every project of yours)")
 
         if args.stdin:
             token = sys.stdin.readline().strip()
@@ -797,7 +809,7 @@ def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
             raise InputError("the token is empty or has whitespace in it")
 
         if not args.no_check:
-            checks = gittoken.check_token(runner, token, args.host, repos)
+            checks = gittoken.check_token(runner, token, host, repos, username)
             for c in checks:
                 print(f"  {c.status:<12} {c.repo}")
             if any(c.status == "bad token" for c in checks):
@@ -805,9 +817,11 @@ def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
             if any(c.status == "no access" for c in checks):
                 raise InputError("the token does not cover every repository above; nothing stored. "
                                  "Add the missing ones to its repository access, or pass --no-check")
+            if any(c.status == "read only" for c in checks):
+                warn("the token can read but not push where it says `read only`; an agent's push will fail there")
 
         service = gittoken.store(runner, project.name, token)
-        gittoken.write_binding(binding, project.name, args.host, args.username)
+        gittoken.write_binding(binding, project.name, host, username)
         info(f"stored in {secretstore.where()} as {service}")
         info(f"wrote [git] in {binding}")
 
@@ -826,8 +840,8 @@ def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
                 sc.run("sudo sbx-sidecar-apply --git-token", input=(token + "\n").encode())
                 info(f"{box.hostname}: its sidecar adds the token to git requests now")
             else:
-                _install_git_token(Vm(cfg, runner, box.hostname), args.username, args.host, token)
-                info(f"{box.hostname}: git uses the token for {args.host} now, in every shell")
+                _install_git_token(Vm(cfg, runner, box.hostname), username, host, token)
+                info(f"{box.hostname}: git uses the token for {host} now, in every shell")
     else:
         print(f"an agent sandbox of {project.name} now clones with this token: sbx new <name> --project {args.project}")
         print(f"a sandbox that runs already gets it with: sbx git-token {args.project} --push <name>")
@@ -1179,13 +1193,13 @@ def _install_claude_proxy(vm: Vm, placeholder: str) -> None:
     vm.run(claudetoken.SKIP_ONBOARDING)
 
 
-def _git_token(cfg: Config, runner: Runner, project: Project) -> tuple[str, str] | None:
-    """(host, token) for an agent sandbox of this project, or None when there
-    is no token and only public repositories can be cloned."""
+def _git_token(cfg: Config, runner: Runner, project: Project) -> tuple[str, str, str] | None:
+    """(host, user name, token) for an agent sandbox of this project, or None
+    when there is no token and only public repositories can be cloned."""
     access = _git_access(cfg, _bindings(project))
     if access is None:
         return None
-    return access.host, runner.run(access.token_command).stdout.strip()
+    return access.host, access.username, runner.run(access.token_command).stdout.strip()
 
 
 def _sidecar_env(cfg: Config, hostname: str, git_host: str, quarantine: bool = False) -> bytes:
@@ -1207,7 +1221,7 @@ def _refresh_sidecar_files(sc: Vm) -> None:
 
 
 def _provision_sidecar(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: int, hostname: str,
-                       secret: str, claude_token: str, git: tuple[str, str] | None,
+                       secret: str, claude_token: str, git: tuple[str, str, str] | None,
                        quarantine: bool = False, refresh: bool = False) -> Vm:
     """Reach the new sidecar by its address on the sidecar network and give it
     the sandbox's policy, the secret and the real credentials, over SSH stdin.
@@ -1226,12 +1240,15 @@ def _provision_sidecar(cfg: Config, runner: Runner, pve: Pve, node: str, vmid: i
     sc = Vm(cfg, runner, f"{hostname}-sc", address, port=SIDECAR_SSH_PORT, alias=sidecar_alias(cfg, hostname))
     sc.wait(120.0)
     sc.run("cloud-init status --wait >/dev/null 2>&1 || true")
-    git_host, git_token = git or ("github.com", "")
+    git_host, git_user, git_token = git or ("github.com", "x-access-token", "")
     if refresh:
         _refresh_sidecar_files(sc)
     sc.put(_sidecar_env(cfg, hostname, git_host, quarantine), "/etc/sbx/sidecar.env", mode="0644", sudo=True)
     sc.put((secret + "\n").encode(), "/etc/sbx/sidecar/secret", sudo=True)
-    sc.put(f"claude={claude_token}\ngithub={git_token}\n".encode(), "/etc/sbx/sidecar/tokens", sudo=True)
+    # `github=` is the git token for git_host, GitHub or not: the key is the
+    # name that sidecar.py and sbx-sidecar-apply have always read.
+    sc.put(f"claude={claude_token}\ngithub={git_token}\ngit_user={git_user}\n".encode(),
+           "/etc/sbx/sidecar/tokens", sudo=True)
     sc.run("sudo sbx-sidecar-apply", capture=False)
     return sc
 
@@ -1262,13 +1279,18 @@ def _preflight_git(cfg: Config, runner: Runner, profile: str, project: Project) 
         if runner.run(["ssh-add", "-l"], check=False).code != 0:
             raise InputError("a personal sandbox clones with your forwarded SSH agent, and the agent holds no key.\n"
                              f"  Add the key first:  {_identity_hint(runner, host)}")
-        if "github.com" in hosts:
+        # What each host says to a key it accepts. Both are in the template's
+        # known_hosts; another host is left to the clone.
+        greetings = {"github.com": ("GitHub", "successfully authenticated"),
+                     "gitlab.com": ("GitLab", "Welcome to GitLab")}
+        for known in [h for h in greetings if h in hosts]:
+            label, greeting = greetings[known]
             # What the sandbox will see: the agent alone, no config, no files.
             probe = runner.run(["ssh", "-F", "/dev/null", "-o", "IdentitiesOnly=no", "-o", "BatchMode=yes",
-                                "-o", "ConnectTimeout=8", "-T", "git@github.com"], check=False)
-            if "successfully authenticated" not in probe.stdout + probe.stderr:
-                raise InputError("GitHub accepts no key in your SSH agent, and the sandbox sees only the agent.\n"
-                                 f"  Add the key first:  {_identity_hint(runner, 'github.com')}")
+                                "-o", "ConnectTimeout=8", "-T", f"git@{known}"], check=False)
+            if greeting not in probe.stdout + probe.stderr:
+                raise InputError(f"{label} accepts no key in your SSH agent, and the sandbox sees only the agent.\n"
+                                 f"  Add the key first:  {_identity_hint(runner, known)}")
         return
     access = _git_access(cfg, _bindings(project))
     if access is None:
@@ -1278,10 +1300,14 @@ def _preflight_git(cfg: Config, runner: Runner, profile: str, project: Project) 
     token = runner.run(access.token_command).stdout.strip()
     if not token:
         raise InputError(f"{access.source}: the token command printed nothing")
-    bad = [c for c in gittoken.check_token(runner, token, access.host, repos) if c.status in ("no access", "bad token")]
+    checks = gittoken.check_token(runner, token, access.host, repos, access.username)
+    bad = [c for c in checks if c.status in ("no access", "bad token")]
     if bad:
         raise InputError(f"the git token for {project.name} cannot read: " + ", ".join(c.repo for c in bad)
                          + f"\n  Make one that covers every repository, then: sbx git-token {project.name}")
+    read_only = [c.repo for c in checks if c.status == "read only"]
+    if read_only:
+        warn(f"the git token for {project.name} can read but not push: " + ", ".join(read_only))
 
 
 def _git_auth(cfg: Config, runner: Runner, vm: Vm, profile: str, project: Project, placeholder: str = "") -> bool:
@@ -1397,7 +1423,7 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
         raise InputError("--with and --without need --project")
     if args.remote_control_mode and profile != remotecontrol.ALLOWED_PROFILE:
         raise InputError(f"--remote-control-mode: Remote Control is not available in an {profile} sandbox")
-    if not cfg.ssh_key_path.exists():
+    if not cfg.ssh_identity_path.exists():
         raise ConfigError("no sbx SSH key; run `sbx setup` first")
     if args.gpu and not cfg.gpu_mapping:
         raise ConfigError("gpu_mapping is not set in config.toml")
@@ -1439,7 +1465,7 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
     expires = dt.date.today() + dt.timedelta(days=ttl) if ttl else None
     vmid = pve.next_vmid()
     sc_vmid = pve.next_vmid(start=vmid + 1) if sidecar else 0
-    pubkey = cfg.ssh_key_path.with_suffix(".pub").read_text()
+    pubkey = cfg.ssh_pubkey_path.read_text()
     known_hosts = str(state_dir() / "known_hosts")
     # The per-sandbox secret: the sandbox presents it to its sidecar, and to
     # nothing else. It goes to both over SSH stdin and appears in no command.
@@ -1698,7 +1724,7 @@ def cmd_herdr(args, cfg: Config, runner: Runner, api=None) -> int:
     hostname = names.hostname(args.name)
     config = Path("~/.ssh/config").expanduser()
     if not config.exists() or SSH_INCLUDE not in config.read_text():
-        raise ConfigError("herdr connects through your SSH config; run `sbx setup --mac-only` and add the Include line")
+        raise ConfigError("herdr connects through your SSH config; run `sbx setup --local-only` and add the Include line")
     if args.attach:
         # One full window on the sandbox alone, the way `herdr --remote` works.
         os.execvp("herdr", ["herdr", "--remote", hostname])
@@ -2025,10 +2051,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("guide", help="the basic usage of sbx on one screen (also: sbx with no command)")
     s.set_defaults(fn=cmd_guide)
 
-    s = sub.add_parser("setup", help="the one-time setup of a Proxmox host and this Mac, step by step")
+    s = sub.add_parser("setup", help="the one-time setup of a Proxmox host and this machine, step by step")
     s.add_argument("--host", help="the address of the Proxmox host")
-    s.add_argument("--mac-only", action="store_true",
-                   help="set up this Mac only, for a host that `sbx setup` set up already")
+    s.add_argument("--local-only", "--mac-only", dest="local_only", action="store_true",
+                   help="set up this machine only, for a host that `sbx setup` set up already "
+                        "(--mac-only is the old name)")
     s.set_defaults(fn=hostsetup.cmd_setup)
 
     s = sub.add_parser("doctor", help="check the setup: the config, the API token, DNS, the tailnet path")
@@ -2109,8 +2136,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("git-token", help="store a project's git token (keychain, or a private file) and bind it")
     project_opts(s, required=True)
-    s.add_argument("--host", default="github.com", help="the git host the token is for")
-    s.add_argument("--username", default="x-access-token", help="the user name sent with the token")
+    s.add_argument("--host", help="the git host the token is for (default: the host of the project's remote)")
+    s.add_argument("--username", help="the user name sent with the token (default: x-access-token, "
+                                      "which GitHub ignores and GitLab accepts)")
     s.add_argument("--stdin", action="store_true", help="read the token from stdin instead of a hidden prompt")
     s.add_argument("--no-check", action="store_true", help="store without asking the git host about it")
     s.add_argument("--remove", action="store_true", help="forget the token and the binding")

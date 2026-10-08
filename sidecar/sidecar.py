@@ -57,7 +57,9 @@ class Config:
     def __init__(self, args):
         self.agent_addr, self.vm_addr, self.net_addr = args.agent_addr, args.vm_addr, args.net_addr
         self.secret = open(args.secret_file).read().strip()
-        self.tokens = {"claude": "", "github": ""}
+        # `github` is the git token for whatever host --github-upstream names
+        # (GitHub, GitLab, ...); `git_user` is the user name sent with it.
+        self.tokens = {"claude": "", "github": "", "git_user": ""}
         for line in open(args.tokens_file):
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
@@ -138,9 +140,23 @@ def claude_auth(token: str, headers: dict) -> None:
         headers["anthropic-beta"] = ",".join(betas)
 
 
-def git_auth(token: str, headers: dict) -> None:
-    """What git over HTTPS sends to GitHub: the token as the password."""
-    headers["Authorization"] = "Basic " + base64.b64encode(f"x-access-token:{token}".encode()).decode()
+def git_auth(token: str, headers: dict, user: str = "") -> None:
+    """What git over HTTPS sends to its host: the token as the password.
+    GitHub ignores the user name; GitLab wants any non-blank one."""
+    login = f"{user or 'x-access-token'}:{token}"
+    headers["Authorization"] = "Basic " + base64.b64encode(login.encode()).decode()
+
+
+def local_location(location: str, upstream: str, prefix: str) -> str:
+    """A redirect from the git host back into the proxy. GitLab answers
+    /<repo>/info/refs with a 301 to https://gitlab.com/<repo>.git/info/refs;
+    git follows it and makes every later request there, past the proxy, where
+    the sandbox's firewall stops it. A path-only Location keeps git here."""
+    u = urllib.parse.urlsplit(upstream)
+    origin = f"{u.scheme}://{u.netloc}"
+    if location == origin or location.startswith(origin + "/"):
+        return prefix + location[len(origin):]
+    return location
 
 
 class Proxy(Quiet):
@@ -157,10 +173,11 @@ class Proxy(Quiet):
             return self.reply(401, {"error": "unknown sandbox credential"},
                               {"WWW-Authenticate": 'Basic realm="sbx sidecar"'})
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
-        if self.path.startswith("/github/"):
+        git = self.path.startswith("/github/")
+        if git:
             upstream, token, path = CFG.github_upstream, CFG.tokens["github"], self.path[len("/github"):]
             if token:
-                git_auth(token, headers)
+                git_auth(token, headers, CFG.tokens["git_user"])
         else:
             upstream, token, path = CFG.claude_upstream, CFG.tokens["claude"], self.path
             if token:
@@ -183,7 +200,7 @@ class Proxy(Quiet):
             except OSError as exc:
                 log(f"proxy {self.command} {path} -> 502 ({exc})")
                 return self.reply(502, {"error": f"upstream: {exc}"})
-            sent = self.relay(resp)
+            sent = self.relay(resp, upstream if git else None)
         finally:
             conn.close()
         log(f"proxy {self.command} {path} -> {resp.status} ({sent} bytes)")
@@ -222,11 +239,15 @@ class Proxy(Quiet):
                 yield data
             self.rfile.readline()  # the CRLF after each chunk
 
-    def relay(self, resp) -> int:
-        """The upstream's answer to the sandbox, piece by piece. Returns the bytes."""
+    def relay(self, resp, git_upstream: str | None = None) -> int:
+        """The upstream's answer to the sandbox, piece by piece. Returns the bytes.
+        With git_upstream, a redirect to that host comes back into the proxy."""
+        git, upstream = git_upstream is not None, git_upstream
         self.send_response(resp.status)
         for k, v in resp.getheaders():
             if k.lower() not in ("transfer-encoding", "connection", "content-length", "keep-alive"):
+                if git and k.lower() == "location":
+                    v = local_location(v, upstream, "/github")
                 self.send_header(k, v)
         no_body = self.command == "HEAD" or resp.status in (204, 304) or 100 <= resp.status < 200
         length = resp.getheader("Content-Length")
@@ -400,7 +421,7 @@ def main(argv=None) -> int:
     ap.add_argument("--vm-addr", required=True, help="the sandbox VM's address on that wire")
     ap.add_argument("--net-addr", required=True, help="this sidecar's address on the sidecar network")
     ap.add_argument("--secret-file", required=True, help="the per-sandbox secret the VM presents")
-    ap.add_argument("--tokens-file", required=True, help="lines claude=... and github=...: the real credentials")
+    ap.add_argument("--tokens-file", required=True, help="lines claude=..., github=... and git_user=...: the real credentials")
     ap.add_argument("--claude-upstream", default="https://api.anthropic.com")
     ap.add_argument("--github-upstream", default="https://github.com")
     ap.add_argument("--net-expose-port", type=int, default=8081,

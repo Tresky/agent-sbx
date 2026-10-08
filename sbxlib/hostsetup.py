@@ -1,4 +1,4 @@
-"""`sbx setup`: the one-time setup of a new Proxmox host and this Mac, in order.
+"""`sbx setup`: the one-time setup of a new Proxmox host and this machine, in order.
 
 The wizard asks for the host, reads the host (host/discover.sh), proposes the
 values of host/local.conf, then runs each step of docs/setup.md. Each step
@@ -20,7 +20,7 @@ from pathlib import Path
 from .config import DEFAULTS_ENV, REPO_ROOT, Config, ConfigError, load, local_conf_path, parse_env_file, state_dir
 from .templates import load_all
 from .run import Runner
-from . import secretstore
+from . import onepassword, secretstore
 
 PVE_TOKEN_SERVICE = "sbx-pve-token"
 # The routes of this machine, which the proposed subnets must miss.
@@ -277,13 +277,13 @@ class Wizard:
         self.n = 0
         host = self._connect()
         disc = self._discover()
-        if self.args.mac_only:
+        if self.args.local_only:
             self._fetch_values(disc)
         else:
             self._host_steps(disc)
         self.step("the API token for this Mac")
         self._token(disc, host)
-        self._mac_steps()
+        self._local_steps()
 
         self.step("the checks")
         from . import doctor
@@ -323,11 +323,11 @@ class Wizard:
         return disc
 
     def _fetch_values(self, disc: dict) -> None:
-        """--mac-only: the host holds the values that its setup used, in the
-        copy of host/local.conf under /root/sbx. This Mac takes the same."""
+        """--local-only: the host holds the values that its setup used, in the
+        copy of host/local.conf under /root/sbx. This machine takes the same."""
         self.step("the values of this setup, from the host")
         if self.ssh("test -d /root/sbx/host").code != 0:
-            raise SetupError("the host has no /root/sbx/host, so it is not set up. Run `sbx setup` without --mac-only")
+            raise SetupError("the host has no /root/sbx/host, so it is not set up. Run `sbx setup` without --local-only")
         # No local.conf on the host: that setup used the shared defaults only.
         got = self.ssh("cat /root/sbx/host/local.conf")
         remote = got.stdout if got.code == 0 else ""
@@ -348,7 +348,7 @@ class Wizard:
         self.cfg = load()
         if not any(g["vmid"] == self.cfg.gw_ctid for g in disc.get("guests", [])):
             raise SetupError(f"the gateway {self.cfg.gw_ctid} does not exist on the host; "
-                             "run `sbx setup` without --mac-only")
+                             "run `sbx setup` without --local-only")
         self._tailscale_dns()
 
     def _host_steps(self, disc: dict) -> None:
@@ -409,9 +409,14 @@ class Wizard:
             _pause("Do this now.")
 
         self.step(f"the gateway container {c.gw_ctid}")
-        if self.ssh(f"pct status {c.gw_ctid} 2>/dev/null | grep -q running").code == 0:
+        running = self.ssh(f"pct status {c.gw_ctid} 2>/dev/null | grep -q running").code == 0
+        # A run that failed inside gw/setup.sh leaves the container running
+        # without Tailscale; only the installed binary marks it as done.
+        if running and self.ssh(f"pct exec {c.gw_ctid} -- sh -c 'command -v tailscale' >/dev/null 2>&1").code == 0:
             info("the gateway is running; skipped (to refresh its config: ssh to the host and run host/20-gw-create.sh)")
         else:
+            if running:
+                info("the gateway is running, but its setup did not finish; running it again")
             self._host_script("20-gw-create.sh")
         if not logged_in:
             print("The next command prints a login URL. Open it and sign in to your tailnet.")
@@ -482,8 +487,8 @@ class Wizard:
                           f"`sbx template rebuild {c.sidecar_template}`, or set agent_sidecar = false")
 
     def _fetch_local_templates(self) -> None:
-        """--mac-only: the host has the local definitions and components that
-        its setup built; this Mac takes the ones that it does not have."""
+        """--local-only: the host has the local definitions and components that
+        its setup built; this machine takes the ones that it does not have."""
         import base64
         import io
         import tarfile
@@ -510,8 +515,10 @@ class Wizard:
         if differ:
             self.cli.warn("these differ from the host's copy, and this Mac keeps its own: " + ", ".join(differ))
 
-    def _mac_steps(self) -> None:
-        self.step("this Mac")
+    def _local_steps(self) -> None:
+        self.step("this machine")
+        # Before the SSH block, which names the key or the agent.
+        self._sandbox_key()
         # Again, now with this setup's domain in the SSH block.
         self.cli._prepare_mac(self.cfg, self.runner)
         if self.cli._has_ssh_include():
@@ -524,6 +531,201 @@ class Wizard:
         elif not self.cli._mkcert_root(self.runner):
             if _yes("Run `mkcert -install` now? It asks for your Mac password one time."):
                 self.runner.run(["mkcert", "-install"], capture=False, check=False)
+
+    # --- the sandbox key ------------------------------------------------------
+
+    def _sandbox_key(self) -> None:
+        """The key that every sandbox trusts: a file here, or an item in
+        1Password that its SSH agent serves. Asked on every setup, so
+        --local-only too. sbx reads public keys only."""
+        conf = state_dir() / "config.toml"
+        cfg = self.cfg
+        if not _yes("Keep the sandbox SSH key in 1Password and use its SSH agent, "
+                    "instead of a key file on this machine?", default=bool(cfg.ssh_agent)):
+            priv, pub = cfg.ssh_key_path, cfg.ssh_pubkey_path
+            if not priv.exists():
+                if pub.exists():
+                    raise SetupError(
+                        f"only {pub} exists, so the private key is in 1Password. A new key would lock you out of "
+                        f"the sandboxes that trust it. Export the private key from 1Password to {priv} "
+                        "(chmod 600), then run `sbx setup --local-only` again. Or answer yes to use 1Password.")
+                # A dedicated key: the wildcard SSH block can then say IdentitiesOnly,
+                # and no personal key is ever authorised inside a sandbox.
+                self.runner.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "sbx", "-f", str(priv)])
+                self.cli.info(f"made the key pair {priv}")
+            if cfg.ssh_agent:
+                set_toml_keys(conf, {"ssh_agent": ""})
+                self.cfg = load()
+            return
+        typed = _ask("Path of the 1Password SSH agent socket", cfg.ssh_agent or onepassword.default_socket())
+        sock = Path(typed).expanduser()
+        self._wait_for(sock, "Turn on 1Password, Settings, Developer, Use the SSH agent.")
+        replaced = self._keep_in_agent(sock)
+        set_toml_keys(conf, {"ssh_agent": typed})
+        self.cfg = load()
+        priv, pub = self.cfg.ssh_key_path, self.cfg.ssh_pubkey_path
+        if priv.exists() and not replaced and onepassword.lists_key(self._agent_keys(sock), pub.read_text()):
+            if _yes(f"1Password holds the key now. Remove {priv}?", default=False):
+                priv.unlink()
+        elif priv.exists() and replaced:
+            self.cli.warn(f"{priv} is the OLD key and stays, since sandboxes made with it still trust it. "
+                          "Remove it when they are gone")
+
+    def _wait_for(self, sock: Path, how: str) -> None:
+        if sock.exists():
+            return
+        _pause(f"{sock} does not exist. {how}")
+        if not sock.exists():
+            raise SetupError(f"{sock} still does not exist: 1Password is not running, or its SSH agent is off")
+
+    def _agent_keys(self, sock: Path) -> list[str]:
+        try:
+            return onepassword.agent_keys(self.runner, sock)
+        except onepassword.OpError as exc:
+            raise SetupError(str(exc)) from None
+
+    def _op_ready(self) -> bool:
+        """Whether op is installed and signed in. Not installed: False. Too
+        old for SSH Key items: stop. Not signed in: run `op signin` here, then
+        one pause to fix it and one more try, then stop."""
+        if not onepassword.installed():
+            return False
+        old = onepassword.too_old(self.runner)
+        if old:
+            need = ".".join(map(str, onepassword.MIN_VERSION))
+            raise SetupError(f"the 1Password CLI (`op`) is version {old}, and SSH Key items need {need} or "
+                             "later. Update it (`op update`, `brew upgrade --cask 1password-cli`, or "
+                             "https://developer.1password.com/docs/cli/get-started/), then run "
+                             "`sbx setup --local-only` again")
+        if not onepassword.signed_in(self.runner):
+            # A signin in another terminal does not reach this process, so op signs in here.
+            self.cli.info("The 1Password CLI (`op`) is not signed in. Running `op signin`")
+            if not onepassword.sign_in(self.runner):
+                _pause("`op signin` failed. Turn on 1Password, Settings, Developer, "
+                       "Integrate with 1Password CLI, or add the account with `op account add`.")
+                if not onepassword.sign_in(self.runner):
+                    raise SetupError("`op signin` still fails; sign in to the 1Password CLI, "
+                                     "then run `sbx setup` again")
+        return True
+
+    def _write_pub(self, line: str) -> None:
+        pub = self.cfg.ssh_pubkey_path
+        pub.parent.mkdir(parents=True, exist_ok=True)
+        pub.write_text(line.strip() + "\n")
+        pub.chmod(0o644)
+
+    def _op(self, call, *args):
+        try:
+            return call(self.runner, *args)
+        except onepassword.OpError as exc:
+            raise SetupError(str(exc)) from None
+
+    def _keep_in_agent(self, sock: Path) -> bool:
+        """Make sure that the agent serves the sandbox key, and that the .pub
+        on this machine is its public half. True when the key is not the public
+        half of the key file on this machine (a new key)."""
+        pub = self.cfg.ssh_pubkey_path
+        priv = self.cfg.ssh_key_path
+        have = pub.read_text() if pub.exists() else ""
+        listed = self._agent_keys(sock)  # also the check that the agent answers
+        if have and onepassword.lists_key(listed, have):
+            return False
+        # An item that an earlier setup made, or that the user made: take its public half.
+        if self._op_ready():
+            ref = self._op(onepassword.find_ssh_key, onepassword.TITLE)
+            if ref:
+                line = self._op(onepassword.public_key, ref)
+                if have and not onepassword.same_key(have, line) and not _yes(
+                        f"1Password has an item titled {onepassword.TITLE} whose key differs from {pub}. "
+                        "Sandboxes made with the old key lose SSH access. Use the 1Password key?", default=False):
+                    raise SetupError(f"stopped; {pub} does not match the 1Password item")
+                self._write_pub(line)
+                self._confirm_listed(sock, line)
+                return priv.exists() and not (have and onepassword.same_key(have, line))
+        if have and not priv.exists():
+            # The key is in 1Password already (only the .pub is here). A new
+            # key would lock out the sandboxes that trust it.
+            self._confirm_listed(sock, have)
+            return False
+        if not onepassword.installed():
+            print("The 1Password CLI (`op`) is not installed, so sbx cannot make or import the key for you. "
+                  "Install it from https://developer.1password.com/docs/cli/get-started/ and run "
+                  "`sbx setup --local-only` again, or make the SSH Key item in the 1Password app now.")
+            if not _yes("Make it in the app now?"):
+                raise SetupError("1Password has no sbx key; install `op`, or make the key in the app")
+            return self._key_in_app(sock, have)
+        if priv.exists() and have:
+            choice = _ask("1Password has no sbx key. [i]mport the key file on this machine (current sandboxes "
+                          "keep working), or make a [n]ew key (current sandboxes lose SSH access)?", "i")
+            if choice.lower().startswith("i"):
+                # op cannot import an existing private key, so the app does it.
+                return self._key_in_app(sock, have)
+            self._warn_running()
+        elif priv.exists():
+            self._warn_running()
+        vault = _ask("1Password vault for the key (empty: your Private vault)", "")
+        ref = self._op(onepassword.create_ssh_key, onepassword.TITLE, vault)
+        line = self._op(onepassword.public_key, ref)
+        self._write_pub(line)
+        self._confirm_listed(sock, line)
+        return priv.exists()
+
+    def _key_in_app(self, sock: Path, have: str) -> bool:
+        """The user makes the item in the 1Password app. With a key file on
+        this machine it is an import: the .pub is known, so the agent list
+        is checked against it. Else the user picks the key from the list."""
+        priv = self.cfg.ssh_key_path
+        if have and priv.exists():
+            _pause(f"In the 1Password app: New Item, SSH Key, Add Private Key, Import {priv}. "
+                   f"Title it {onepassword.TITLE}.")
+            self._confirm_listed(sock, have)
+            return False
+        _pause(f"In the 1Password app: New Item, SSH Key, Add Private Key, Generate New Key (ed25519). "
+               f"Title it {onepassword.TITLE}.")
+        self._write_pub(self._pick_key(sock))
+        return priv.exists()
+
+    _NOT_LISTED = ("1Password's SSH agent serves only the Private (or Personal) vault by default. "
+                   "Move the item there, or list it in ~/.config/1Password/ssh/agent.toml. "
+                   "Make sure that 1Password is unlocked.")
+
+    def _confirm_listed(self, sock: Path, line: str) -> None:
+        for attempt in (0, 1):
+            if onepassword.lists_key(self._agent_keys(sock), line):
+                return
+            if attempt == 0:
+                _pause(f"The agent at {sock} does not list the key yet. {self._NOT_LISTED}")
+        raise SetupError(f"the agent at {sock} does not list the sandbox key. {self._NOT_LISTED}")
+
+    def _pick_key(self, sock: Path) -> str:
+        for attempt in (0, 1):
+            keys = self._agent_keys(sock)
+            if keys:
+                break
+            if attempt == 0:
+                _pause(f"The agent at {sock} lists no key. {self._NOT_LISTED}")
+        else:
+            raise SetupError(f"the agent at {sock} lists no key. {self._NOT_LISTED}")
+        for i, key in enumerate(keys, 1):
+            fields = key.split(None, 2)
+            print(f"  {i}. {fields[0]} {fields[2] if len(fields) > 2 else '(no comment)'}")
+        # 1Password puts the item title in the comment.
+        default = next((str(i) for i, k in enumerate(keys, 1) if k.split(None, 2)[2:] == [onepassword.TITLE]),
+                       "1" if len(keys) == 1 else "")
+        got = _ask("Number of the sandbox key", default)
+        if not got.isdigit() or not 1 <= int(got) <= len(keys):
+            raise SetupError(f"{got!r} is not the number of a key")
+        return keys[int(got) - 1]
+
+    def _warn_running(self) -> None:
+        try:
+            names = [b.hostname for b in self.cli._pve(self.cfg, self.runner, self.api).sandboxes()]
+        except Exception:  # best effort: the list is only for the warning
+            names = []
+        self.cli.warn("a new key replaces the old one: " + (
+            f"these sandboxes keep trusting the OLD key and lose SSH access: {', '.join(names)}. "
+            if names else "the sandboxes that exist trust the OLD key and lose SSH access. ") +
+            "Rebuild them to use the new key.")
 
     def _confirm_values(self, choices: list[Choice], disc, mac_nets, current) -> dict[str, str]:
         while True:
@@ -563,7 +765,9 @@ class Wizard:
                   f"2. DNS: turn on MagicDNS if it is off.\n"
                   f"3. DNS, Nameservers, Add nameserver, Custom: enter {want}, turn on\n"
                   f"   \"Restrict to domain\", and enter {c.domain}.\n"
-                  f"Make sure that Tailscale is connected on this Mac.")
+                  f"Make sure that Tailscale is connected on this Mac.\n"
+                  f"If all of this is done already, turn Tailscale off and on again on this Mac:\n"
+                  f"it gives macOS a new nameserver only when it connects.")
             if input("Press Enter to check again, or type s to skip: ").strip().lower().startswith("s"):
                 self.cli.warn("DNS is not ready; `sbx doctor` checks it again later")
                 return

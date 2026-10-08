@@ -14,8 +14,8 @@ path, a git URL, or a name that `sbx projects` lists.
 | Command | What it does |
 |---|---|
 | `sbx guide` | the basic usage on one screen. `sbx` with no command does the same. |
-| `sbx setup [--host H] [--mac-only]` | the one-time setup of a Proxmox host and this Mac, step by step. It is safe to run again. `--mac-only` sets up one more Mac for a host that is set up already, and does not change the host. |
-| `sbx doctor [--isolation]` | the setup checks. `--isolation` also makes one sandbox in each profile, proves what each can reach, and removes them (about two minutes). |
+| `sbx setup [--host H] [--local-only]` | the one-time setup of a Proxmox host and this Mac, step by step. It asks whether to keep the sandbox key in 1Password ([setup.md](setup.md#the-sandbox-key)). It is safe to run again. `--local-only` (the old name `--mac-only` still works) sets up one more Mac for a host that is set up already, and does not change the host. |
+| `sbx doctor [--isolation]` | the setup checks. With `ssh_agent` set, it checks the agent socket, the `.pub`, and that the agent lists the key, and it warns when the private key file is still on disk. `--isolation` also makes one sandbox in each profile, proves what each can reach, and removes them (about two minutes). |
 | `sbx web [--port N] [--no-open]` | starts the management portal, a web page on this Mac only, and opens it. The default port is 8765. `--no-open` prints the link and does not open the browser. If the portal runs already, the command opens it. [usage.md](usage.md#the-portal) explains it. |
 
 ### Sandboxes
@@ -70,7 +70,7 @@ Options of `sbx new`:
 | `sbx project add <project>` | records a checkout, so `--project <name>` works by name |
 | `sbx project rm <name>` | forgets a project. Its token and its bindings stay. |
 | `sbx inputs <project> [--branch B] [--from PATH]` | shows what the recipe asks for, and where each value comes from. It makes nothing. |
-| `sbx git-token <project> [--host H] [--username U] [--stdin] [--no-check] [--remove] [--push NAME]` | stores the project's git token in [the secret store](#the-secret-store), after a check that it covers each repository. `--no-check` skips the check. `--remove` forgets it. The project may be a git URL: nothing is cloned, and no checkout is needed on this Mac. A project named by URL then reads its `.sandbox/` with this token. `--push NAME` also installs the token into that running sandbox, either profile (repeatable): for an agent sandbox with a sidecar, into its sidecar. With a token in the secret store already, it asks for none and installs that one. |
+| `sbx git-token <project> [--host H] [--username U] [--stdin] [--no-check] [--remove] [--push NAME]` | stores the project's git token in [the secret store](#the-secret-store), after a check that it covers each repository (GitHub and GitLab). `--host` defaults to the host of the project's remote, `--username` to `x-access-token`. `--no-check` skips the check. `--remove` forgets it. The project may be a git URL: nothing is cloned, and no checkout is needed on this Mac. A project named by URL then reads its `.sandbox/` with this token. `--push NAME` also installs the token into that running sandbox, either profile (repeatable): for an agent sandbox with a sidecar, into its sidecar. With a token in the secret store already, it asks for none and installs that one. |
 | `sbx claude-token` | runs `claude setup-token` and stores the Claude token |
 | `sbx claude-token --stdin` | reads a new Claude token from stdin |
 | `sbx claude-token --push [name ...]` | writes the stored token into running sandboxes, and into the named ones (for an agent sandbox with the proxy: into its sidecar) |
@@ -174,7 +174,8 @@ layer 2: sbx stops with an error.
 | `git_token_command` | | a command that prints a git token for EVERY project. Prefer one token per project. |
 | `git_token_host` | `github.com` | the host of that token |
 | `remote_control_mode` | `acceptEdits` | the permission mode of Remote Control sessions. `""` turns the server off. |
-| `ssh_key` | `~/.config/sbx/id_ed25519` | the private key for the sandboxes |
+| `ssh_key` | `~/.config/sbx/id_ed25519` | the key for the sandboxes. With `ssh_agent`, only its `.pub` is read, and no private file is needed. |
+| `ssh_agent` | | the path of a 1Password SSH agent socket. Empty: off, and sbx uses the key file. Set: sbx runs ssh with `IdentityAgent=<socket>` and the `.pub` as `IdentityFile`, and a personal sandbox with forwarding gets `ForwardAgent=$SSH_AUTH_SOCK`. `sbx setup` sets it ([setup.md](setup.md#the-sandbox-key)). Mac and Linux machine only. |
 | `agent_sidecar` | `true` | every agent sandbox gets a sidecar: a small trusted VM on the sandbox's own VLAN that holds its credentials and its port policy. `false`: an agent sandbox sits on the agent bridge alone, as before sidecars. |
 | `sidecar_ports` | `open` | what a sidecar forwards to its sandbox. `open`: port 22 and every port from 1024 to 32767. `ask`: port 22, and a port only after the sandbox asked and you approved. An approval lasts until a denial, across reboots. |
 | `preview_zone` | | the domain of the previews, a zone on your Cloudflare account. Use one of its own, not your main domain. |
@@ -238,7 +239,7 @@ the pane layout (`.sandbox/herdr.toml`).
 | File | What it is |
 |---|---|
 | `config.toml` | the Mac settings |
-| `id_ed25519`, `id_ed25519.pub` | the key pair for the sandboxes only. None of your own keys goes into a sandbox. |
+| `id_ed25519`, `id_ed25519.pub` | the key pair for the sandboxes only. None of your own keys goes into a sandbox. With `ssh_agent`, only the `.pub` is on disk; the private key is in 1Password. |
 | `ssh_config` | the `Host sbx-*` block that `~/.ssh/config` includes |
 | `known_hosts` | one entry for each sandbox |
 | `pve-root-ca.crt` | the host's CA, when `pve_ca_file` names it |
@@ -319,7 +320,7 @@ take it for a sandbox. Its VM is named `<sandbox>-sc`.
 |---|---|
 | `/etc/sbx/sidecar.env` | the sandbox's policy: the wire, the sandbox's name, `sidecar_ports`, the upstreams. `sbx new` writes it. |
 | `/etc/sbx/sidecar/secret` | the per-sandbox placeholder that the sandbox presents |
-| `/etc/sbx/sidecar/tokens` | `claude=` and `github=`: the real credentials |
+| `/etc/sbx/sidecar/tokens` | `claude=`, `github=` (the git token, for any host) and `git_user=`: the real credentials |
 | `/etc/sbx/sidecar/approved` | the ports approved in `ask` mode, one per line. The sidecar opens them again when it starts, so an approval survives a reboot and a policy change. |
 | `/etc/nftables.conf` | the firewall, rendered from `sidecar/nftables.conf.tmpl` by `sbx-sidecar-apply` |
 | `/usr/local/bin/sbx-sidecar-apply` | renders the firewall, registers the sandbox's name, restarts the service. `--claude-token` reads a new token from stdin; `--tunnel-token` the tunnel's connector token (empty: stop the tunnel). |
@@ -341,4 +342,4 @@ take it for a sandbox. Its VM is named `<sandbox>-sc`.
 | Path | What it is |
 |---|---|
 | `/root/sbx/` | the copy of `host/`, `gw/`, `template/`, `templates/`, `sidecar/` and `sbxlib/` that the setup and the builds run |
-| `/root/sbx/host/local.conf` | the values of this setup. `sbx setup --mac-only` reads it. |
+| `/root/sbx/host/local.conf` | the values of this setup. `sbx setup --local-only` reads it. |

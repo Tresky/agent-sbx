@@ -38,6 +38,41 @@ as_user() { sudo -u "$U" -H zsh -c "$1"; }
 
 export DEBIAN_FRONTEND=noninteractive
 
+# apt can loop forever after one failed download ("Tried to start delayed item
+# ... but failed") while the network and the mirror are fine; a fresh run gets
+# through. So each run has a time limit and is retried. The components are
+# sourced, so their apt-get calls go through this too.
+cat > /etc/apt/apt.conf.d/80-sbx-retries <<'EOF'
+Acquire::Retries "3";
+EOF
+apt-get() {
+  local try
+  for try in 1 2 3; do
+    timeout 30m apt-get "$@" && return 0
+    echo "apt-get $* failed or hung (try $try of 3)" >&2
+    dpkg --configure -a || true
+    sleep 10
+  done
+  return 1
+}
+
+# An installer script (mise, claude, herdr, nvm, ...) downloads its binary with
+# its own curl, which our --retry does not cover: one "Connection reset by
+# peer" stops the build, and a stalled download hangs it with no output. The
+# installers can run again, so each try has a time limit and the whole command
+# is tried again. 3 tries of 10 minutes end before the host's 45-minute stall
+# limit. npm and nvm fetch from the network too: one ETIMEDOUT from the npm
+# registry stopped a build, so they go through this as well.
+as_user_retry() {
+  local try
+  for try in 1 2 3; do
+    timeout 10m sudo -u "$U" -H zsh -c "$1" && return 0
+    echo "failed or hung (try $try of 3): $1" >&2
+    sleep 10
+  done
+  return 1
+}
+
 if [[ "$BARE" == 1 ]]; then
   step "template ${SBX_TEMPLATE_NAME:-?}: bare, then ${SBX_COMPONENTS:-no components}"
 else
@@ -162,25 +197,25 @@ systemctl enable caddy sbx-mirror sbx-dhcp-hostname
 
 SBX_NODE_VERSIONS="${SBX_NODE_VERSIONS:-lts/*}"
 step "node (nvm): $SBX_NODE_VERSIONS"
-as_user 'curl -fsSL --retry 5 --retry-delay 5 https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | PROFILE=/dev/null bash'
+as_user_retry 'curl -fsSL --retry 5 --retry-delay 5 https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | PROFILE=/dev/null bash'
 first=1
 for v in $SBX_NODE_VERSIONS; do
-  as_user "nvm install '$v'"
+  as_user_retry "nvm install '$v'"
   if [[ $first -eq 1 ]]; then as_user "nvm alias default '$v'"; first=0; fi
 done
-as_user 'npm install -g yarn pnpm'
+as_user_retry 'npm install -g yarn pnpm'
 
 step "headless browser"
 # The system libraries come from Playwright's own list, which tracks what the
 # bundled Chromium links. It calls sudo itself.
-as_user 'npx -y playwright@latest install-deps chromium'
-as_user 'npm install -g agent-browser && agent-browser install'
+as_user_retry 'npx -y playwright@latest install-deps chromium'
+as_user_retry 'npm install -g agent-browser && agent-browser install'
 
 step "claude code and herdr"
-as_user 'curl -fsSL --retry 5 --retry-delay 5 https://claude.ai/install.sh | bash'
+as_user_retry 'curl -fsSL --retry 5 --retry-delay 5 https://claude.ai/install.sh | bash'
 # `herdr --remote <ssh-alias>` on the Mac prefers a herdr already on the
 # remote PATH and starts the server side itself; no service is needed.
-as_user 'curl -fsSL --retry 5 --retry-delay 5 https://herdr.dev/install.sh | sh'
+as_user_retry 'curl -fsSL --retry 5 --retry-delay 5 https://herdr.dev/install.sh | sh'
 
 fi  # the core
 

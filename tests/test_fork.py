@@ -58,7 +58,7 @@ class ForkTest(unittest.TestCase):
              mock.patch("sbxlib.cli._provision_sidecar", side_effect=provision), \
              mock.patch("sbxlib.cli._connect", return_value=vm), \
              mock.patch("sbxlib.cli._install_cert", return_value=False), \
-             mock.patch("sbxlib.cli._git_token", return_value=("github.com", "ghp_real")), \
+             mock.patch("sbxlib.cli._git_token", return_value=("github.com", "x-access-token", "ghp_real")), \
              mock.patch("sbxlib.cli._git_auth", side_effect=lambda *a, **k: self.log.append(("git_auth", a[5]))), \
              mock.patch("sbxlib.cli.claudetoken.get", return_value="sk-ant-oat01-real"):
             return cli.cmd_fork(args, cli.load_config(), Runner(responder=lambda a, d: ""))

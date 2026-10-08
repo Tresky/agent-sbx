@@ -11,7 +11,7 @@
 
 step "rust (rustup): $SBX_RUST_TOOLCHAINS"
 first="${SBX_RUST_TOOLCHAINS%% *}"
-as_user "curl -fsSL --retry 5 --retry-delay 5 https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain '$first'"
+as_user_retry "curl -fsSL --retry 5 --retry-delay 5 https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain '$first'"
 for tc in $SBX_RUST_TOOLCHAINS; do
   as_user "rustup toolchain install '$tc' --profile minimal"
   for c in $SBX_RUST_COMPONENTS; do

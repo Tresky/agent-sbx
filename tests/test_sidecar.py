@@ -44,8 +44,8 @@ class FakeSock:
 
 
 class FakeResponse:
-    def __init__(self, status: int, body: bytes, length: bool = False):
-        self.status, self._body, self._length = status, body, length
+    def __init__(self, status: int, body: bytes, length: bool = False, extra=()):
+        self.status, self._body, self._length, self._extra = status, body, length, list(extra)
 
     def read(self, n=None):
         n = len(self._body) if n is None else n
@@ -53,7 +53,7 @@ class FakeResponse:
         return out
 
     def getheaders(self):
-        return [("Content-Type", "application/json"), ("Transfer-Encoding", "chunked")]
+        return [("Content-Type", "application/json"), ("Transfer-Encoding", "chunked")] + self._extra
 
     def getheader(self, name, default=None):
         if name.lower() == "content-length" and self._length:
@@ -65,6 +65,7 @@ class FakeUpstream:
     """Stands in for http.client.HTTPConnection. Records the one request."""
     calls: list[dict] = []
     status = 200
+    headers: list[tuple[str, str]] = []
 
     def __init__(self, host, port=None, timeout=None):
         self.host, self.port = host, port
@@ -79,7 +80,8 @@ class FakeUpstream:
                                    "body": body, "headers": dict(headers or {}), "chunked": encode_chunked})
 
     def getresponse(self):
-        return FakeResponse(FakeUpstream.status, FakeUpstream.response_body, FakeUpstream.response_length)
+        return FakeResponse(FakeUpstream.status, FakeUpstream.response_body, FakeUpstream.response_length,
+                            FakeUpstream.headers)
 
     def close(self):
         pass
@@ -131,6 +133,7 @@ class Base(unittest.TestCase):
         FakeUpstream.response_body = b'{"ok": true}'
         FakeUpstream.response_length = False
         FakeUpstream.status = 200
+        FakeUpstream.headers = []
         self._real = (sidecar.http.client.HTTPConnection, sidecar.open_port, sidecar.close_port)
         sidecar.http.client.HTTPConnection = FakeUpstream
         self.nft: list[tuple[str, int]] = []
@@ -190,6 +193,32 @@ class ProxyTest(Base):
         [call] = FakeUpstream.calls
         self.assertNotIn("Authorization", call["headers"])
 
+    def test_the_bound_user_name_goes_with_the_git_token(self):
+        # GitLab wants a non-blank user name; the binding's is sent as it is.
+        self.set_tokens("claude=\ngithub=glpat-REAL\ngit_user=oauth2\n")
+        request(sidecar.Proxy, "agent", "GET", "/github/g/p.git/info/refs", {"x-api-key": SECRET})
+        [call] = FakeUpstream.calls
+        self.assertEqual(call["headers"]["Authorization"],
+                         "Basic " + base64.b64encode(b"oauth2:glpat-REAL").decode())
+
+    def test_a_git_host_redirect_stays_inside_the_proxy(self):
+        """GitLab sends /g/p/info/refs to /g/p.git/info/refs with an absolute
+        301. Passed on as it is, git would go to the host itself, past the
+        proxy, and the sandbox's firewall would stop it."""
+        FakeUpstream.status = 301
+        FakeUpstream.headers = [("Location", "http://203.0.113.10:9001/g/p.git/info/refs?service=git-upload-pack")]
+        status, headers, _ = request(sidecar.Proxy, "agent", "GET", "/github/g/p/info/refs?service=git-upload-pack",
+                                     {"x-api-key": SECRET})
+        self.assertEqual(status, 301)
+        self.assertEqual(headers["location"], "/github/g/p.git/info/refs?service=git-upload-pack")
+        # Controlled pair: a redirect to another host is left alone, and so is
+        # a Location on the Claude side.
+        for loc, path in (("https://cdn.example.com/x", "/github/g/p.git/x"),
+                          ("http://203.0.113.10:9001/y", "/v1/models")):
+            FakeUpstream.headers = [("Location", loc)]
+            _, headers, _ = request(sidecar.Proxy, "agent", "GET", path, {"x-api-key": SECRET})
+            self.assertEqual(headers["location"], loc)
+
     def test_wrong_or_missing_placeholder_is_refused_before_any_upstream_call(self):
         wrong_basic = base64.b64encode(b"sbx:wrong").decode()
         for headers in ({"Authorization": "Bearer wrong"}, {"x-api-key": "wrong"},
@@ -220,10 +249,10 @@ class ProxyTest(Base):
         writes = []
         real = sidecar.Proxy.relay
 
-        def counting(handler, resp):
+        def counting(handler, resp, *rest):
             w = handler.wfile.write
             handler.wfile.write = lambda b: writes.append(len(b)) or w(b)
-            return real(handler, resp)
+            return real(handler, resp, *rest)
         sidecar.Proxy.relay = counting
         try:
             status, headers, body = request(sidecar.Proxy, "agent", "GET", "/github/o/r.git/info/refs",
@@ -358,7 +387,7 @@ class ConfigTest(Base):
     def test_missing_tokens_are_empty_not_errors(self):
         Path(self.args.tokens_file).write_text("# nothing yet\n")
         cfg = sidecar.Config(self.args)
-        self.assertEqual(cfg.tokens, {"claude": "", "github": ""})
+        self.assertEqual(cfg.tokens, {"claude": "", "github": "", "git_user": ""})
 
 
 if __name__ == "__main__":

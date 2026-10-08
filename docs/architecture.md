@@ -163,14 +163,14 @@ sequenceDiagram
         participant p as 🛡️ proxy :8080
     end
     box rgba(100,116,139,0.12) internet
-        participant gh as GitHub
+        participant gh as git host
     end
     Note over git: ~/.git-credentials holds<br/>sbx:<placeholder>@sidecar only
     git->>p: GET /github/org/repo/info/refs (no credential)
     p-->>git: 401 + WWW-Authenticate: Basic
     git->>p: GET … with basic auth sbx:<placeholder>
     alt the placeholder is this sandbox's
-        p->>gh: GET /org/repo/info/refs<br/>basic auth x-access-token:<real token>
+        p->>gh: GET /org/repo/info/refs<br/>basic auth <user>:<real token>
         gh-->>p: 200 refs
         p-->>git: 200 refs
     else anything else
@@ -451,7 +451,7 @@ fails when the token has a right on any other path.
    and applies the ACLs again.
 6. It sets up the Mac and runs `sbx doctor`.
 
-`--mac-only` skips steps 2 to 4: it copies `/root/sbx/host/local.conf`, and the
+`--local-only` skips steps 2 to 4: it copies `/root/sbx/host/local.conf`, and the
 local template definitions and components that this Mac lacks, from the host
 instead, so the second Mac and the host agree.
 
@@ -537,7 +537,9 @@ sequenceDiagram
 9. **Git access.** For `personal`, the SSH agent is forwarded for the clones.
    For `agent`, the placeholder goes into `~/.git-credentials` for the
    sidecar's proxy, and every URL of the git host is rewritten to
-   `http://<sidecar>:8080/github/`; the sidecar adds the token. Without a
+   `http://<sidecar>:8080/github/`; the sidecar adds the token and the
+   bound user name, and sends the request to the bound host (GitHub, GitLab;
+   the `/github/` prefix is only a name). Without a
    sidecar, the token itself goes into `~/.git-credentials`, and git uses
    HTTPS for the host even for a URL in the SSH form.
 10. **Clone the project** into `~/code/<project>`, with each `repo` input.
@@ -560,6 +562,22 @@ host; most of it is the two clones and the sidecar's first boot.
 with every option explicit, because that block also matches the full name and
 would append the domain twice. `known_hosts` is keyed by the full name, and
 the CLI's `HostKeyAlias` is the same, so `sbx rm` removes the one entry.
+
+With `ssh_agent` set (the key is in 1Password), the private key is not a
+file. OpenSSH picks an agent key by its public half when `IdentitiesOnly yes`
+is set and `IdentityFile` names a `.pub`. So the block, and the CLI's argv,
+use `IdentityFile <ssh_key>.pub` plus `IdentityAgent <socket>`. The CLI must
+say `IdentityAgent` itself: `-F /dev/null` hides the user's own ssh config,
+and without it only `$SSH_AUTH_SOCK` counts.
+
+`IdentityAgent` also changes what `ForwardAgent=yes` forwards, because ssh
+points `SSH_AUTH_SOCK` at the `IdentityAgent`. A personal sandbox would then
+get 1Password, not the agent that the git preflight checked. So with
+`ssh_agent` set and forwarding on, the CLI passes
+`ForwardAgent=<$SSH_AUTH_SOCK>`, an explicit path (OpenSSH 8.2 or later), and
+falls back to `yes` when the variable is unset. The cloud-init `sshkeys`
+parameter gets the same `.pub` as before, so a VM does not know which way the
+Mac holds the key.
 
 ## herdr and the pane layout
 
@@ -930,6 +948,7 @@ Each of these cost real time. Keep them in mind when you change the code.
 | `set \| grep '^SBX_'` to save variables | a multi-line variable of another name has lines that start with `SBX_`; they pass the filter and overwrite the real values when the file is sourced | `declare -p` for each name from `compgen -v SBX_` |
 | the VM id as a VLAN tag | `bridge vlan add ... vid 9150` says "Invalid VLAN ID": a VLAN id stops at 4094 | `Config.vlan_for`: the sandbox's place in the id range, from 2 |
 | `a && b && c` as the last command of a loop, under `set -e` and pipefail | when the last item does not match, the failed chain becomes the loop's status, and the script stops | an `if` statement; `\|\| true` after a `grep` that may find nothing |
+| GitLab's 301 from `/<repo>/info/refs` to `https://gitlab.com/<repo>.git/info/refs` | git follows the absolute URL past the proxy, and the sandbox's firewall stops it | the proxy rewrites a `Location` on the git host to a path under `/github/` |
 | a 401 that names no auth scheme | git asks again with no credential, gets a second 401, and deletes the stored placeholder from `~/.git-credentials` | `WWW-Authenticate: Basic` on the proxy's 401 |
 | `HTTPServer.server_bind` with no resolver in reach | asks DNS for its own name before it listens; the port refuses connections until the lookups time out | skip the lookup (`sidecar.py`), or wait for the socket, not a fixed time |
 | "open" mode's DNAT of 1024-32767 | takes the sidecar's own 2222 and 8081 to the VM | return those two ports before any DNAT |
@@ -952,7 +971,7 @@ dependencies):
 - `sbx git-token` and `sbx claude-token`: the token reaches its consumer on
   stdin only, and a bad token stores nothing;
 - `sbx setup`: the values proposed for a new host, an existing host that keeps
-  its values, the order of the host steps, `--mac-only`, and the per-Mac token;
+  its values, the order of the host steps, `--local-only`, and the per-Mac token;
 - `sbx doctor`: the token scope;
 - the template definitions: every shipped preset loads, the settings become
   build variables, a local file wins, each mistake is refused, the derived

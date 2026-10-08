@@ -1555,8 +1555,8 @@ function addProjectDialog() {
 
 async function pageProject(main, [name]) {
   const p = await GET(`/api/projects/${enc(name)}`);
-  const token = h("input", { type: "password", autocomplete: "off", placeholder: "github_pat_…" });
-  const host = h("input", { placeholder: "github.com" });
+  const token = h("input", { type: "password", autocomplete: "off", placeholder: "github_pat_… or glpat-…" });
+  const host = h("input", { placeholder: "the origin's host" });
   const user = h("input", { placeholder: "x-access-token" });
   const noCheck = h("input", { type: "checkbox" });
   // A sandbox that runs already has no git credential until the token is pushed.
@@ -1715,8 +1715,8 @@ async function pageChecks(main) {
     card("Setup", h("div", { class: "stack" },
       h("div", { class: "small" }, "The setup asks for the host's root password and stops at steps in the Tailscale admin console, so it runs in Terminal. It is safe to run again."),
       h("div", { class: "row" }, btn("sbx setup", () => inTerminal(["setup"]), { icon: "terminal" }),
-        btn("sbx setup --mac-only", () => inTerminal(["setup", "--mac-only"]), { icon: "terminal" })),
-      h("div", { class: "small muted" }, "--mac-only sets up this Mac for a host that is set up already, and does not change the host.")))));
+        btn("sbx setup --local-only", () => inTerminal(["setup", "--local-only"]), { icon: "terminal" })),
+      h("div", { class: "small muted" }, "--local-only sets up this machine for a host that is set up already, and does not change the host.")))));
   await run();
 }
 

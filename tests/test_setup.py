@@ -161,10 +161,11 @@ class WizardTest(_WizardBase):
                         "",              # the policy pause
                         "rust minimal",  # the templates to build
                         "",              # build the sidecar template
+                        "n",             # no 1Password: a key file
                         "",              # the Include line
                         ])
         with mock.patch("builtins.input", lambda *_: next(answers)), mock.patch("builtins.print"):
-            code = hostsetup.cmd_setup(mock.Mock(host=None, mac_only=False), load(), Runner(responder=self.respond))
+            code = hostsetup.cmd_setup(mock.Mock(host=None, local_only=False), load(), Runner(responder=self.respond))
         self.assertEqual(code, 0)
         steps = [c[-1] for c in self.cmds if c[0] == "ssh" and "/root/sbx/host/" in c[-1]]
         self.assertEqual([s.split("/host/")[1] for s in steps],
@@ -210,12 +211,35 @@ class WizardTest(_WizardBase):
                 return ""
             return done(argv, data)
 
-        answers = iter(["192.168.1.5", "", "", "", ""])  # host, values, DHCP, keep the token, Include
+        answers = iter(["192.168.1.5", "", "", "", "n", ""])  # host, values, DHCP, keep the token, no 1Password, Include
         with mock.patch("builtins.input", lambda *_: next(answers)), mock.patch("builtins.print"):
-            code = hostsetup.cmd_setup(mock.Mock(host=None, mac_only=False), load(), Runner(responder=respond))
+            code = hostsetup.cmd_setup(mock.Mock(host=None, local_only=False), load(), Runner(responder=respond))
         self.assertEqual(code, 0)
         steps = [c[-1].split("/host/")[1] for c in self.cmds if c[0] == "ssh" and "/root/sbx/host/" in c[-1]]
         self.assertEqual(steps, ["40-api-token.sh --acl-only"])
+
+    def test_a_running_gateway_without_tailscale_is_set_up_again(self):
+        # An earlier run failed inside gw/setup.sh: the container runs, but
+        # Tailscale is not installed, so `tailscale up` cannot work yet.
+        self.cmds = []
+        self.local.write_text("SBX_AGENT_NET=10.81.0\nSBX_PERSONAL_NET=10.82.0\n")
+        respond = self.respond
+
+        def responder(argv, data):
+            if argv[0] == "ssh" and "command -v tailscale" in argv[-1]:
+                self.cmds.append(argv)
+                return Result(1)
+            if argv[0] == "ssh" and "pct status" in argv[-1]:
+                self.cmds.append(argv)
+                return ""
+            return respond(argv, data)
+
+        answers = iter(["192.168.1.5", "", "", "", "rust", "", "", ""])
+        with mock.patch("builtins.input", lambda *_: next(answers)), mock.patch("builtins.print"):
+            hostsetup.cmd_setup(mock.Mock(host=None, local_only=False), load(), Runner(responder=responder))
+        steps = [c[-1].split("/host/")[1] for c in self.cmds if c[0] == "ssh" and "/root/sbx/host/" in c[-1]]
+        self.assertIn("20-gw-create.sh", steps)
+        self.assertLess(steps.index("20-gw-create.sh"), steps.index("20-gw-create.sh --tailscale"))
 
 
 class ExistingInstallTest(_WizardBase):
@@ -233,10 +257,10 @@ class ExistingInstallTest(_WizardBase):
                 return json.dumps(disc)
             return respond(argv, data)
 
-        answers = iter(["192.168.1.5", "", "", "", "", "", ""])  # host, values, policy, adopt, sidecar, Include, spare
+        answers = iter(["192.168.1.5", "", "", "", "", "n", "", ""])  # host, values, policy, adopt, sidecar, no 1Password, Include, spare
         with mock.patch("builtins.input", lambda *_: next(answers)), mock.patch("builtins.print"), \
                 mock.patch("sbxlib.hostsetup.socket.gethostbyname", return_value="10.77.0.1"):
-            hostsetup.cmd_setup(mock.Mock(host=None, mac_only=False), load(), Runner(responder=responder))
+            hostsetup.cmd_setup(mock.Mock(host=None, local_only=False), load(), Runner(responder=responder))
         written = parse_env_file(self.local.read_text())
         self.assertEqual((written["SBX_AGENT_BRIDGE"], written["SBX_AGENT_NET"], written["SBX_TEMPLATE_VMID_MIN"]),
                          ("vmbr77", "10.77.0", "9000"))
@@ -248,10 +272,10 @@ class ExistingInstallTest(_WizardBase):
         self.assertEqual(load().default_template, "default")
 
 
-class MacOnlyTest(_WizardBase):
+class LocalOnlyTest(_WizardBase):
     HOST_CONF = "SBX_DOMAIN=lab.internal\nSBX_AGENT_NET=10.81.0\nSBX_GW_CTID=9001\n"
 
-    def run_mac_only(self, answers):
+    def run_local_only(self, answers):
         self.cmds = []
         disc = {**DISC, "guests": DISC["guests"] + [{"vmid": 9001, "name": "sbx-gw", "type": "lxc"}]}
 
@@ -265,15 +289,15 @@ class MacOnlyTest(_WizardBase):
 
         answers = iter(answers)
         with mock.patch("builtins.input", lambda *_: next(answers)), mock.patch("builtins.print"):
-            return hostsetup.cmd_setup(mock.Mock(host="192.168.1.5", mac_only=True), load(),
+            return hostsetup.cmd_setup(mock.Mock(host="192.168.1.5", local_only=True), load(),
                                        Runner(responder=responder))
 
     def test_a_second_mac_takes_the_values_from_the_host_and_its_own_token(self):
         with mock.patch("sbxlib.hostsetup.socket.gethostname", return_value="Coworkers-MacBook.local"):
-            code = self.run_mac_only(["", ""])  # the host, the Include line
+            code = self.run_local_only(["", "n", ""])  # the host, no 1Password, the Include line
         self.assertEqual(code, 0)
         self.assertEqual(self.local.read_text(), self.HOST_CONF)
-        self.assertFalse(any(c[0] == "scp" for c in self.cmds), "--mac-only must not copy to the host")
+        self.assertFalse(any(c[0] == "scp" for c in self.cmds), "--local-only must not copy to the host")
         steps = [c[-1].split("/host/")[1] for c in self.cmds if c[0] == "ssh" and "/root/sbx/host/" in c[-1]]
         self.assertEqual(steps, ["40-api-token.sh --rotate --emit --token-id cli-coworkers-macbook"])
         self.assertEqual(load().domain, "lab.internal")
@@ -302,7 +326,7 @@ class MacOnlyTest(_WizardBase):
             return respond(argv, data)
 
         self.cmds = []
-        wizard = hostsetup.Wizard(mock.Mock(host="192.168.1.5", mac_only=True), Runner(responder=responder))
+        wizard = hostsetup.Wizard(mock.Mock(host="192.168.1.5", local_only=True), Runner(responder=responder))
         wizard.target = "root@192.168.1.5"
         with mock.patch("sbxlib.hostsetup.REPO_ROOT", repo), mock.patch("builtins.print"):
             wizard._fetch_local_templates()
@@ -313,8 +337,266 @@ class MacOnlyTest(_WizardBase):
     def test_a_different_local_conf_is_replaced_only_on_a_yes(self):
         self.local.write_text("SBX_DOMAIN=other.internal\n")
         with self.assertRaisesRegex(Exception, "must agree"):
-            self.run_mac_only(["", "n"])
+            self.run_local_only(["", "n"])
         self.assertEqual(self.local.read_text(), "SBX_DOMAIN=other.internal\n")
+
+
+class SandboxKeyTest(_WizardBase):
+    """Wizard._sandbox_key: a key file here, or an item in 1Password that its
+    SSH agent serves. The agent and `op` are faked; no real key is touched."""
+
+    PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA sbx"
+    NEW = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB sbx"
+    DUMMY_PRIVATE = "-----BEGIN OPENSSH PRIVATE KEY-----DUMMYDUMMY"
+
+    def setUp(self):
+        super().setUp()
+        self.sock = self.home.parent / "agent.sock"
+        self.sock.write_text("")
+        self.agent = []        # the public key lines that the fake agent lists
+        self.agent_code = None  # force an exit code of ssh-add
+        self.items = []        # SSH Key items in the fake vault
+        self.whoami = 0
+        self.signin = []       # whoami codes after each op signin; empty: it changes nothing
+        self.op_version = "2.30.0"
+        self.created = []      # the item create argv
+        self.keygen = []
+        self.prompts, self.out = [], []
+
+    def respond_key(self, argv, data):
+        if argv[:2] == ["env", f"SSH_AUTH_SOCK={self.sock}"] and argv[2:] == ["ssh-add", "-L"]:
+            if self.agent_code is not None:
+                return Result(self.agent_code)
+            return Result(0, "\n".join(self.agent) + "\n") if self.agent else Result(1)
+        if argv == ["op", "whoami"]:
+            return Result(self.whoami)
+        if argv == ["op", "signin"]:
+            if self.signin:
+                self.whoami = self.signin.pop(0)
+            return Result(self.whoami)
+        if argv == ["op", "--version"]:
+            return self.op_version + "\n"
+        if argv[:3] == ["op", "item", "list"]:
+            return json.dumps(self.items)
+        if argv[:2] == ["op", "read"]:
+            return self.NEW if argv[2] == "op://v1/i-new/public key" else self.PUB
+        if argv[:3] == ["op", "item", "create"]:
+            self.created.append(argv)
+            self.agent.append(self.NEW)  # 1Password serves the new item at once
+            return json.dumps({"id": "i-new", "vault": {"id": "v1"},
+                               "fields": [{"id": "private_key", "value": self.DUMMY_PRIVATE}]})
+        if argv[0] == "ssh-keygen":
+            self.keygen.append(argv)
+            return ""
+        raise AssertionError(f"unexpected command {argv}")
+
+    def run_key(self, answers, *, op=True, sandboxes=()):
+        """`answers` are strings, or callables that run when a prompt is shown."""
+        it = iter(answers)
+
+        def fake_input(prompt=""):
+            self.prompts.append(prompt)
+            got = next(it)
+            if callable(got):
+                got()
+                return ""
+            return got
+
+        wizard = hostsetup.Wizard(mock.Mock(host="h", local_only=True), Runner(responder=self.respond_key))
+        say = lambda *a, **k: self.out.append(" ".join(map(str, a)))  # noqa: E731
+        fake_pve = mock.Mock(sandboxes=lambda: [mock.Mock(hostname=n) for n in sandboxes])
+        with mock.patch("builtins.input", fake_input), mock.patch("builtins.print", say), \
+                mock.patch("sbxlib.cli.warn", say), mock.patch("sbxlib.cli.info", say), \
+                mock.patch("sbxlib.cli._pve", return_value=fake_pve), \
+                mock.patch("sbxlib.onepassword.shutil.which", return_value="/usr/bin/op" if op else None):
+            wizard._sandbox_key()
+        self.assertEqual(list(it), [], "answers left over: the wizard asked less than expected")
+        return wizard
+
+    def files(self, private=False, pub=None):
+        if private:
+            (self.home / "id_ed25519").write_text("PRIV")
+        if pub:
+            (self.home / "id_ed25519.pub").write_text(pub + "\n")
+
+    def conf(self):
+        path = self.home / "config.toml"
+        return path.read_text() if path.exists() else ""
+
+    # --- no 1Password ---
+
+    def test_no_with_no_files_makes_a_key_file(self):
+        self.run_key(["n"])
+        self.assertEqual(len(self.keygen), 1)
+        self.assertEqual(self.keygen[0][-1], str(self.home / "id_ed25519"))
+        self.assertNotIn("ssh_agent", self.conf())
+
+    def test_no_keeps_an_existing_key_file(self):
+        self.files(private=True, pub=self.PUB)
+        self.run_key(["n"])
+        self.assertEqual(self.keygen, [])
+
+    def test_no_with_only_the_pub_stops_instead_of_making_a_new_key(self):
+        self.files(pub=self.PUB)
+        with self.assertRaisesRegex(hostsetup.SetupError, "lock you out"):
+            self.run_key(["n"])
+        self.assertEqual(self.keygen, [])
+
+    def test_no_clears_a_set_agent(self):
+        self.files(private=True, pub=self.PUB)
+        (self.home / "config.toml").write_text(f'ssh_agent = "{self.sock}"\ncores = 4\n')
+        wizard = self.run_key(["n"])
+        self.assertEqual(wizard.cfg.ssh_agent, "")
+        self.assertIn("cores = 4", self.conf())
+        self.assertIn("1Password", self.prompts[0])
+        self.assertIn("[Y/n]", self.prompts[0], "the default is yes when an agent is set")
+
+    # --- 1Password, the key is there already ---
+
+    def test_yes_with_the_key_listed_saves_the_agent_and_offers_removal(self):
+        self.files(private=True, pub=self.PUB)
+        self.agent = [self.PUB]
+        wizard = self.run_key(["y", str(self.sock), "n"], op=False)
+        self.assertEqual(wizard.cfg.ssh_agent, str(self.sock))
+        self.assertTrue((self.home / "id_ed25519").exists())
+        self.assertIn("Remove", self.prompts[-1])
+        self.assertEqual(self.keygen, [])
+
+    def test_yes_to_the_removal_deletes_the_private_file(self):
+        self.files(private=True, pub=self.PUB)
+        self.agent = [self.PUB]
+        self.run_key(["y", str(self.sock), "y"], op=False)
+        self.assertFalse((self.home / "id_ed25519").exists())
+        self.assertTrue((self.home / "id_ed25519.pub").exists())
+
+    def test_with_only_the_pub_and_a_listed_key_nothing_is_asked_after_the_socket(self):
+        self.files(pub=self.PUB)
+        self.agent = [self.PUB]
+        wizard = self.run_key(["y", str(self.sock)], op=False)
+        self.assertEqual(wizard.cfg.ssh_agent, str(self.sock))
+
+    def test_an_existing_sbx_item_gives_its_pub_and_creates_nothing(self):
+        self.items = [{"id": "i-old", "title": "other", "vault": {"id": "v0"}},
+                      {"id": "i-sbx", "title": "sbx", "vault": {"id": "v1"}}]
+        self.agent = [self.PUB]
+        wizard = self.run_key(["y", str(self.sock)])
+        pub = self.home / "id_ed25519.pub"
+        self.assertEqual(pub.read_text(), self.PUB + "\n")
+        self.assertEqual(pub.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(self.created, [])
+        self.assertEqual(wizard.cfg.ssh_agent, str(self.sock))
+        self.assertIn(f'ssh_agent = "{self.sock}"', self.conf())
+
+    # --- 1Password, a new key ---
+
+    def test_no_key_anywhere_makes_one_with_op_and_prints_no_secret(self):
+        wizard = self.run_key(["y", str(self.sock), "Work"])
+        self.assertEqual(len(self.created), 1)
+        argv = self.created[0]
+        self.assertEqual(argv[:3], ["op", "item", "create"])
+        self.assertIn("ed25519", argv)
+        self.assertEqual(argv[argv.index("--category") + 1], "SSH Key")
+        self.assertEqual(argv[argv.index("--vault") + 1], "Work")
+        self.assertNotIn("--reveal", argv)
+        self.assertEqual((self.home / "id_ed25519.pub").read_text(), self.NEW + "\n")
+        self.assertFalse((self.home / "id_ed25519").exists())
+        self.assertEqual(wizard.cfg.ssh_agent, str(self.sock))
+        everything = "\n".join(self.out + self.prompts + [self.conf()])
+        self.assertNotIn("DUMMYDUMMY", everything)
+        self.assertNotIn("PRIVATE KEY", everything)
+
+    def test_an_existing_file_and_new_makes_a_key_and_names_the_sandboxes(self):
+        self.files(private=True, pub=self.PUB)
+        wizard = self.run_key(["y", str(self.sock), "n", ""], sandboxes=["lab", "myapp"])
+        self.assertEqual(len(self.created), 1)
+        self.assertEqual((self.home / "id_ed25519.pub").read_text(), self.NEW + "\n")
+        warning = next(o for o in self.out if "OLD key" in o)
+        self.assertIn("lab, myapp", warning)
+        # The old file is not offered for removal: it is another key.
+        self.assertFalse(any("Remove" in p for p in self.prompts))
+        self.assertTrue((self.home / "id_ed25519").exists())
+        self.assertEqual(wizard.cfg.ssh_agent, str(self.sock))
+
+    def test_an_existing_file_and_import_goes_through_the_app_and_creates_nothing(self):
+        self.files(private=True, pub=self.PUB)
+        wizard = self.run_key(["y", str(self.sock), "i", lambda: self.agent.append(self.PUB), "n"])
+        self.assertEqual(self.created, [])
+        self.assertIn(f"Import {self.home / 'id_ed25519'}", next(p for p in self.prompts if "Import" in p))
+        self.assertEqual((self.home / "id_ed25519.pub").read_text(), self.PUB + "\n")
+        self.assertIn("Remove", self.prompts[-1])
+        self.assertEqual(wizard.cfg.ssh_agent, str(self.sock))
+
+    def test_an_imported_key_that_the_agent_never_lists_stops(self):
+        self.files(private=True, pub=self.PUB)
+        with self.assertRaisesRegex(hostsetup.SetupError, "does not list"):
+            self.run_key(["y", str(self.sock), "i", "", ""])
+        self.assertNotIn("ssh_agent", self.conf())
+
+    # --- no op ---
+
+    def test_without_op_it_says_how_to_install_it_and_can_stop(self):
+        with self.assertRaisesRegex(hostsetup.SetupError, "install"):
+            self.run_key(["y", str(self.sock), "n"], op=False)
+        text = "\n".join(self.out)
+        self.assertIn("1Password CLI (`op`) is not installed", text)
+        self.assertIn("developer.1password.com/docs/cli/get-started", text)
+        self.assertIn("sbx setup --local-only", text)
+        self.assertEqual(self.created, [])
+
+    def test_without_op_the_key_is_picked_from_the_agent_list(self):
+        self.agent = [self.NEW.replace(" sbx", " other")]
+        wizard = self.run_key(["y", str(self.sock), "y", lambda: self.agent.append(self.PUB), "2"], op=False)
+        self.assertEqual((self.home / "id_ed25519.pub").read_text(), self.PUB + "\n")
+        self.assertEqual(wizard.cfg.ssh_agent, str(self.sock))
+        self.assertTrue(any("2. ssh-ed25519 sbx" in o for o in self.out))
+
+    def test_op_too_old_for_ssh_key_items_stops_and_says_to_update(self):
+        self.op_version = "2.6.1"
+        with self.assertRaisesRegex(hostsetup.SetupError, r"version 2\.6\.1.*need 2\.20\.0 or later.*op update"):
+            self.run_key(["y", str(self.sock)])
+        self.assertEqual(self.created, [])
+
+    def test_op_that_is_not_signed_in_signs_in_here(self):
+        self.whoami = 1
+        self.signin = [0]
+        self.items = [{"id": "i1", "title": "sbx", "vault": {"id": "v1"}}]
+        self.agent = [self.PUB]
+        self.run_key(["y", str(self.sock)])
+        self.assertFalse(any("Integrate with 1Password CLI" in p for p in self.prompts))
+
+    def test_a_failed_signin_pauses_once_then_signs_in_again(self):
+        self.whoami = 1
+        self.signin = [1, 0]
+        self.items = [{"id": "i1", "title": "sbx", "vault": {"id": "v1"}}]
+        self.agent = [self.PUB]
+        self.run_key(["y", str(self.sock), ""])
+        self.assertTrue(any("Integrate with 1Password CLI" in p for p in self.prompts))
+
+    def test_op_that_cannot_sign_in_pauses_once_then_stops(self):
+        self.whoami = 1
+        with self.assertRaisesRegex(hostsetup.SetupError, "sign in"):
+            self.run_key(["y", str(self.sock), ""])
+        self.assertTrue(any("Integrate with 1Password CLI" in p for p in self.prompts))
+
+    # --- the agent ---
+
+    def test_a_missing_socket_pauses_then_stops(self):
+        missing = self.home.parent / "gone.sock"
+        with self.assertRaisesRegex(hostsetup.SetupError, "still does not exist"):
+            self.run_key(["y", str(missing), ""])
+        self.assertIn("Use the SSH agent", self.prompts[-1])
+
+    def test_an_agent_that_cannot_be_reached_stops(self):
+        self.agent_code = 2
+        with self.assertRaisesRegex(hostsetup.SetupError, "cannot reach the agent"):
+            self.run_key(["y", str(self.sock)], op=False)
+
+    def test_the_default_socket_is_the_configured_one(self):
+        self.files(private=True, pub=self.PUB)
+        self.agent = [self.PUB]
+        (self.home / "config.toml").write_text(f'ssh_agent = "{self.sock}"\n')
+        self.run_key(["", "", "n"], op=False)
+        self.assertIn(str(self.sock), self.prompts[1])
 
 
 class DoctorTest(unittest.TestCase):

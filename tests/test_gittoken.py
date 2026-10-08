@@ -1,6 +1,8 @@
 """`sbx git-token`: the token goes to the keychain and the binding, never into
 an argument of the check, and a token that does not cover a repository stores
 nothing (a controlled pair with one that does)."""
+import contextlib
+import io
 import os
 import subprocess
 import tempfile
@@ -44,7 +46,9 @@ class BindingFileTest(unittest.TestCase):
             self.assertIn("# my notes", path.read_text())
 
 
-class CommandTest(unittest.TestCase):
+class ProjectCase(unittest.TestCase):
+    """A checkout with a GitHub origin, and a config directory of its own."""
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         tmp = Path(self._tmp.name)
@@ -64,6 +68,8 @@ class CommandTest(unittest.TestCase):
         self.env.stop()
         self._tmp.cleanup()
 
+
+class CommandTest(ProjectCase):
     def run_cmd(self, codes, *extra):
         """codes: http code per repository path, in order of the curl calls."""
         calls, stdins = [], []
@@ -241,3 +247,120 @@ class UrlProjectTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GitLabCheckTest(unittest.TestCase):
+    """GitLab is asked through git's smart-HTTP handshake: a token made for
+    git alone cannot call its REST API."""
+
+    def check(self, upload: str, receive: str = "200"):
+        configs = []
+
+        def responder(args, data):
+            body = data.decode()
+            configs.append(body)
+            return upload if "git-upload-pack" in body else receive
+        [c] = gittoken.check_token(Runner(responder=responder), "glpat-x", "gitlab.com",
+                                   ["git@gitlab.com:grp/sub/app.git"], "oauth2")
+        return c.status, configs
+
+    def test_statuses(self):
+        status, configs = self.check("200", "200")
+        self.assertEqual(status, "ok")
+        self.assertIn('user = "oauth2:glpat-x"', configs[0])
+        self.assertIn("https://gitlab.com/grp/sub/app.git/info/refs?service=git-upload-pack", configs[0])
+        self.assertIn("service=git-receive-pack", configs[1])
+        self.assertEqual(self.check("200", "403")[0], "read only")
+        self.assertEqual(self.check("401")[0], "bad token")
+        self.assertEqual(self.check("404")[0], "no access")
+        # A failed read asks nothing about push.
+        self.assertEqual(len(self.check("404")[1]), 1)
+
+    def test_only_gitlab_hosts_are_asked_this_way(self):
+        self.assertTrue(gittoken.is_gitlab("gitlab.com"))
+        self.assertTrue(gittoken.is_gitlab("gitlab.example.com"))
+        self.assertFalse(gittoken.is_gitlab("git.example.com"))
+        [c] = gittoken.check_token(Runner(responder=lambda a, d: "200"), "t", "git.example.com",
+                                   ["https://git.example.com/a/b.git"])
+        self.assertEqual(c.status, "not checked")
+
+
+class GitLabCommandTest(ProjectCase):
+    """The same command for a project whose origin is on GitLab: the host
+    comes from the remote, with no --host."""
+
+    def setUp(self):
+        super().setUp()
+        subprocess.run(["git", "-C", str(self.app), "remote", "set-url", "origin", "git@gitlab.com:me/app.git"],
+                       check=True)
+        (self.app / ".sandbox/sandbox.toml").write_text("")
+
+    def run_gitlab(self, upload="200", receive="200", *extra):
+        calls, stdins = [], []
+
+        def responder(args, data):
+            calls.append(list(args))
+            stdins.append(data)
+            if args[0] == "git" and args[1] == "-C":
+                done = subprocess.run(args, capture_output=True)
+                return Result(done.returncode, done.stdout.decode(), done.stderr.decode())
+            if args[0] == "curl":
+                return upload if "git-upload-pack" in data.decode() else receive
+            return ""
+        with mock.patch("sbxlib.cli.getpass.getpass", return_value=TOKEN), \
+             mock.patch("sbxlib.cli.sys.stdin") as stdin:
+            stdin.isatty.return_value = True
+            code = cli.main(["git-token", str(self.app), *extra], runner=Runner(responder=responder))
+        return code, calls, stdins
+
+    def test_the_host_comes_from_the_remote(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code, calls, stdins = self.run_gitlab()
+        self.assertEqual(code, 0)
+        self.assertIn("https://gitlab.com/-/user_settings/personal_access_tokens", out.getvalue())
+        self.assertTrue(any(b"https://gitlab.com/me/app.git/info/refs" in d for d in stdins if d))
+        self.assertFalse(any(b"api.github.com" in d for d in stdins if d))
+        for c in calls:
+            if c[0] == "curl":
+                self.assertNotIn(TOKEN, " ".join(c))
+        b = load_bindings(self.home / "bindings" / "app.toml")
+        self.assertEqual((b.git.host, b.git.username), ("gitlab.com", "x-access-token"))
+
+    def test_a_token_gitlab_does_not_know_stores_nothing(self):
+        code, calls, _ = self.run_gitlab("401")
+        self.assertEqual(code, 1)
+        self.assertFalse([c for c in calls if c[0] == "security"])
+
+    def test_a_read_only_token_is_stored_with_a_warning(self):
+        with mock.patch("sbxlib.cli.warn") as warned:
+            code, _, _ = self.run_gitlab("200", "403")
+        self.assertEqual(code, 0)
+        self.assertIn("not push", warned.call_args[0][0])
+
+    def test_push_uses_the_host_the_stored_token_is_bound_to(self):
+        """With no --host, --push uses the host the stored token is bound to."""
+        self.run_gitlab()
+        calls, stdins = [], []
+
+        def responder(args, data):
+            calls.append(list(args))
+            stdins.append(data)
+            if args[0] == "git" and args[1] == "-C":
+                done = subprocess.run(args, capture_output=True)
+                return Result(done.returncode, done.stdout.decode(), done.stderr.decode())
+            if args[0] == "security" and args[1] == "find-generic-password":
+                return Result(0, TOKEN + "\n", "")
+            return ""
+
+        class Api:
+            def __call__(self, method, path, params=None):
+                if path == "/cluster/resources":
+                    return [{"type": "qemu", "vmid": 9101, "name": "sbx-lab", "node": "pve", "status": "running",
+                             "tags": "sbx;sbx-personal"}]
+                return None
+
+        (self.home / "id_ed25519").write_text("PRIV")
+        code = cli.main(["git-token", str(self.app), "--push", "lab"], runner=Runner(responder=responder), api=Api())
+        self.assertEqual(code, 0)
+        self.assertIn(f"https://x-access-token:{TOKEN}@gitlab.com\n".encode(), stdins)

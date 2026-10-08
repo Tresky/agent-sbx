@@ -66,7 +66,7 @@ A shared key (the domain, the bridges, the subnets, the IDs) belongs in
 - **Do not commit `host/local.conf`.** It holds the user's own values.
 - **Ask before a command that changes the host or makes VMs.** These commands
   change real infrastructure:
-  - `sbx setup` without `--mac-only` (it changes the host network and builds VMs)
+  - `sbx setup` without `--local-only` (it changes the host network and builds VMs)
   - `sbx template rebuild`, `rm`, `prune` and `adopt` (they build or remove template VMs)
   - `sbx doctor --isolation` (it makes one sandbox per profile, three VMs
     with the agent's sidecar, and removes them)
@@ -103,7 +103,9 @@ terminal. The agent prepares, explains, and checks.
      `/Applications/Tailscale.app/Contents/MacOS/Tailscale status`).
    - On Linux instead of a Mac: `docs/setup.md`, "A Linux machine instead of
      a Mac" (accept the subnet routes; the secrets are files).
-   - Optional: `mkcert` (https in each sandbox) and `herdr` (the sidebar).
+   - Optional: `mkcert` (https in each sandbox), `herdr` (the sidebar) and
+     `op`, the 1Password CLI (it lets `sbx setup` keep the sandbox key in
+     1Password).
 2. **Ask the user** for these facts:
    - Is this a new host, or a host that another Mac set up already?
    - The address of the Proxmox host.
@@ -119,7 +121,7 @@ terminal. The agent prepares, explains, and checks.
      builds a template, and then the `sidecar` template that every agent
      sandbox needs. Ask the user which kinds of projects they work on, and
      suggest the matching templates (`sbx template list` shows them).
-   - A host that is set up already: `sbx setup --mac-only`. It does not change
+   - A host that is set up already: `sbx setup --local-only`. It does not change
      the host.
 
    Before a new-host setup, tell the user what the wizard does:
@@ -194,8 +196,9 @@ host with an existing gateway keeps its values.
 - A new key in `host/defaults.conf` that the CLI reads also needs a field in
   `sbxlib/config.py` and an entry in `_ENV_MAP`. A test keeps the two defaults
   equal.
-- The tests ignore the user's `host/local.conf` (`tests/__init__.py` sets
-  `SBX_LOCAL_CONF`), so they give the same result on every setup.
+- The tests ignore the user's `host/local.conf` and their own templates and
+  components (`tests/__init__.py` sets `SBX_LOCAL_CONF` and
+  `SBX_IGNORE_LOCAL_TEMPLATES`), so they give the same result on every setup.
 - A change to a command, an option, or a setting also changes
   `docs/reference.md`. `tests/test_docs.py` fails until it does.
 - Each topic has one home in `docs/`. Link to it; do not copy it.
