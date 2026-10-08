@@ -345,6 +345,17 @@ class NewTest(unittest.TestCase):
         code = cli.main(["ssh", "b", "--sidecar"], runner=Runner(responder=lambda a, d: ""), api=api)
         self.assertEqual(code, 1, "a sandbox without a sidecar has nothing to open")
 
+    def test_scp_copies_into_the_sandbox(self):
+        api = FakeApi([], existing=["sbx-a"])
+        with mock.patch("sbxlib.cli.os.execvp") as execvp:
+            cli.main(["scp", "a", "-r", "/tmp/f", "/srv/x"], runner=Runner(responder=lambda a, d: ""), api=api)
+        self.assertEqual(execvp.call_args.args[0], "scp")
+        argv = execvp.call_args.args[1]
+        self.assertEqual(argv[0], "scp")
+        self.assertIn("-r", argv)
+        self.assertIn("ForwardAgent=no", argv)
+        self.assertEqual(argv[-3:], ["--", "/tmp/f", "dev@sbx-a.sbx.internal:/srv/x"])
+
     def test_personal_profile(self):
         code, events, _ = self.run_new("lab", "--profile", "personal", "--project", str(self.app))
         self.assertEqual(code, 0)
