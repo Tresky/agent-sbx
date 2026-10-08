@@ -1,14 +1,14 @@
 # PostgreSQL from the PostgreSQL project's apt repository, with PostGIS
 #
 # Settings, in a definition's [postgres] table:
-#   version  the major version (default 17). apt.postgresql.org has every
+#   version  the major version (default 18). apt.postgresql.org has every
 #            supported one for Debian and Ubuntu.
 #   postgis  true (default) or false: the PostGIS 3 extension for it.
 #
 # The cluster `main` runs on port 5432 in every sandbox. The sandbox user is
 # a superuser of it, by its own name, so `psql`, `createdb` and an app's
 # `pg` adapter work with no password over the local socket.
-: "${SBX_POSTGRES_VERSION:=17}"
+: "${SBX_POSTGRES_VERSION:=18}"
 : "${SBX_POSTGRES_POSTGIS:=1}"
 
 step "postgres $SBX_POSTGRES_VERSION$([[ "$SBX_POSTGRES_POSTGIS" == 1 ]] && echo " + postgis")"

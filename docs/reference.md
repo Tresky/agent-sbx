@@ -215,7 +215,7 @@ component as `SBX_RUBY_VERSIONS`.
 | `[rust]` | `components` | `"clippy rustfmt"` | more rustup components |
 | `[python]` | `versions` | `["3.13"]` | the Pythons that uv caches |
 | `[android]` | `platform`, `build_tools`, `emulator`, `image` | `35`, `35.0.0`, `false`, `google_apis;x86_64` | the SDK platform and build tools; the emulator, its system image and a `Medium_Phone` device |
-| `[postgres]` | `version`, `postgis` | `17`, `true` | the PostgreSQL major version from apt.postgresql.org, and whether PostGIS 3 comes with it |
+| `[postgres]` | `version`, `postgis` | `18`, `true` | the PostgreSQL major version from apt.postgresql.org, and whether PostGIS 3 comes with it |
 | `[mise]` | `tools` | `[]` | what `mise use --global` installs in the template, such as `["ruby@3.4.10", "node@24"]` |
 | `[odin]` | `version`, `wgpu_version`, `premake_version` | see `template/components/odin.sh` | the Odin, wgpu-native and premake releases |
 
