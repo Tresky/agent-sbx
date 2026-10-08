@@ -17,9 +17,14 @@ The tables below list the problems that `sbx doctor` does not explain.
 | `Host key verification failed` or `Permission denied` from ssh | an agent or a script ran the command; SSH has no terminal to ask for the password | run `sbx setup` (or the ssh command) in your own Terminal window |
 | `Too many authentication failures` | ssh offers each of your keys before the password | sbx adds `-o PubkeyAuthentication=no`; add it to your own `ssh` and `scp` commands too |
 | Tailscale refuses the gateway's tag | the tailnet policy does not name the tag yet | merge the policy fragment first; `sbx setup` shows it |
+| `Failed to exec "tailscale"` during `20-gw-create.sh --tailscale` | an earlier run made the gateway, but `gw/setup.sh` stopped before it installed Tailscale | run `sbx setup` again; it runs the gateway setup again. Or on the host: `bash /root/sbx/host/20-gw-create.sh`, and read why it failed |
+| `Temporary failure resolving 'deb.debian.org'` during the gateway setup | the gateway copied the host's resolver, often Tailscale's `100.100.100.100`, which it cannot reach | run `sbx setup` again; the gateway now uses `SBX_UPSTREAM_DNS`. On a gateway made before this fix: `pct set <ctid> --nameserver "1.1.1.1 9.9.9.9"`, then `pct reboot <ctid>` |
+| `the gateway cannot resolve names through ...` | the LAN blocks DNS to the upstream servers | set `SBX_UPSTREAM_DNS` in `host/local.conf` to servers the LAN allows (your router, for example) |
 | `the container got no default route on lan0` | the host's LAN has no DHCP server | answer "no" to the DHCP question in `sbx setup`, or set `SBX_GW_LAN_IP` and `SBX_GW_LAN_GW` in `host/local.conf` |
 | `no active storage holds VM disks` | no storage can make linked clones | add an LVM-thin, ZFS or directory storage in Proxmox |
 | the template build stops with `PROVISION FAILED` | a step in `template/provision.sh` or in a component failed | the script prints the end of the log; run `bash /root/sbx/host/vm-diag.sh <vmid>` on the host for more. Fix the cause, then build again: the new build removes the failed VM |
+| downloads in a sandbox or a build die partway: `Connection reset by peer`, or apt's `Ign:` on a package | a gateway made before the fix answered out-of-window replies with a RST | refresh the gateway: `bash /root/sbx/host/20-gw-create.sh` on the host. `pct exec <ctid> -- nft list chain inet sbx_guard input` counts the packets it now drops |
+| the build log repeats `W: Tried to start delayed item ... but failed` | apt loops after one failed download; the network is fine | each apt run now stops after 30 minutes and is tried again, up to 3 times; to save the wait, stop the build and build again |
 | the template build prints nothing for many minutes | a compile is quiet for minutes | wait; the script warns after 15 quiet minutes and stops after 45 |
 | the SSH session dropped during the build | the build VM continues by itself | `sbx template finish <name>` |
 | `no component '<x>'`, or `needs <y> before it` | the definition names a component that does not exist, or lists them in the wrong order | `sbx template components` lists them; correct the definition |
@@ -35,6 +40,7 @@ The tables below list the problems that `sbx doctor` does not explain.
 | Symptom | Cause | What to do |
 |---|---|---|
 | a sandbox name does not resolve | Tailscale is off on your Mac, or the split-DNS nameserver is missing | connect Tailscale; in the admin console, add the nameserver `<agent-net>.1`, restricted to your domain |
+| a name does not resolve right after you add the split-DNS nameserver; `dig @100.100.100.100` finds it | Tailscale on macOS updates the system's DNS only when it connects | turn Tailscale off and on again on your Mac |
 | a new sandbox's name does not resolve for about a minute | your Mac cached a negative answer (about 75 s) from a lookup before the sandbox existed | wait; sbx itself never asks too early |
 | `does not resolve on this Mac` during `sbx new` | the sandbox's name was late, and sbx used its address | the sandbox works; the name follows |
 | `tailscale ping` says `via DERP`, and everything is slow | your router blocks UDP between your Mac's subnet and the host's subnet | permit UDP port 41641 between the two subnets |
