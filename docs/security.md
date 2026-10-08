@@ -210,6 +210,11 @@ secret by accident.
 - A personal sandbox uses your forwarded SSH agent for the clones only.
 - sbx never puts one of your own SSH keys in a sandbox. Sandboxes use a key
   pair that `sbx setup` makes for them alone.
+- With `ssh_agent` set, the private half of that key is only in 1Password, and
+  no private key file is on the Mac. A personal sandbox whose forwarded agent
+  IS the 1Password agent can ask it to sign with the sbx key too, and with
+  every other key that the agent serves. 1Password asks you to approve each
+  use. Agent sandboxes forward nothing.
 
 **Claude.**
 

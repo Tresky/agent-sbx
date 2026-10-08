@@ -451,7 +451,7 @@ fails when the token has a right on any other path.
    and applies the ACLs again.
 6. It sets up the Mac and runs `sbx doctor`.
 
-`--mac-only` skips steps 2 to 4: it copies `/root/sbx/host/local.conf`, and the
+`--local-only` skips steps 2 to 4: it copies `/root/sbx/host/local.conf`, and the
 local template definitions and components that this Mac lacks, from the host
 instead, so the second Mac and the host agree.
 
@@ -562,6 +562,22 @@ host; most of it is the two clones and the sidecar's first boot.
 with every option explicit, because that block also matches the full name and
 would append the domain twice. `known_hosts` is keyed by the full name, and
 the CLI's `HostKeyAlias` is the same, so `sbx rm` removes the one entry.
+
+With `ssh_agent` set (the key is in 1Password), the private key is not a
+file. OpenSSH picks an agent key by its public half when `IdentitiesOnly yes`
+is set and `IdentityFile` names a `.pub`. So the block, and the CLI's argv,
+use `IdentityFile <ssh_key>.pub` plus `IdentityAgent <socket>`. The CLI must
+say `IdentityAgent` itself: `-F /dev/null` hides the user's own ssh config,
+and without it only `$SSH_AUTH_SOCK` counts.
+
+`IdentityAgent` also changes what `ForwardAgent=yes` forwards, because ssh
+points `SSH_AUTH_SOCK` at the `IdentityAgent`. A personal sandbox would then
+get 1Password, not the agent that the git preflight checked. So with
+`ssh_agent` set and forwarding on, the CLI passes
+`ForwardAgent=<$SSH_AUTH_SOCK>`, an explicit path (OpenSSH 8.2 or later), and
+falls back to `yes` when the variable is unset. The cloud-init `sshkeys`
+parameter gets the same `.pub` as before, so a VM does not know which way the
+Mac holds the key.
 
 ## herdr and the pane layout
 
@@ -925,7 +941,7 @@ dependencies):
 - `sbx git-token` and `sbx claude-token`: the token reaches its consumer on
   stdin only, and a bad token stores nothing;
 - `sbx setup`: the values proposed for a new host, an existing host that keeps
-  its values, the order of the host steps, `--mac-only`, and the per-Mac token;
+  its values, the order of the host steps, `--local-only`, and the per-Mac token;
 - `sbx doctor`: the token scope;
 - the template definitions: every shipped preset loads, the settings become
   build variables, a local file wins, each mistake is refused, the derived

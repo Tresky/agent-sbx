@@ -15,6 +15,10 @@ to a first agent sandbox.
 - A Tailscale tailnet where you are an admin. You change its policy and its DNS.
 - Optional: `mkcert` (`brew install mkcert`) for https in each sandbox, and
   `herdr` for the sidebar.
+- Optional: 1Password and its CLI `op` (2.20.0 or later), to keep the sandbox SSH key in
+  1Password instead of a file ([step 7](#7-your-mac)). Install `op` from
+  <https://developer.1password.com/docs/cli/get-started/>, and turn on
+  1Password, Settings, Developer, "Integrate with 1Password CLI".
 
 ## The fast path: `sbx setup`
 
@@ -75,7 +79,7 @@ When the setup is done, read [usage.md](usage.md).
 
 ### A second Mac
 
-For a Mac that uses a host that is set up already, run `sbx setup --mac-only`.
+For a Mac that uses a host that is set up already, run `sbx setup --local-only`.
 It copies `host/local.conf` from the host, makes a separate API token for this
 Mac, and sets up the Mac. It does not change the host. Each Mac has its own
 token, so a new token on one Mac does not stop the others.
@@ -281,7 +285,7 @@ token. It then prints three things:
 
 1. A `security add-generic-password` command. Run it on your Mac. It puts the
    token in the macOS keychain, so the secret is in no file. Off macOS, skip
-   it and run `sbx setup --mac-only` (step 7), which stores the token in
+   it and run `sbx setup --local-only` (step 7), which stores the token in
    `~/.config/sbx/secrets/`.
 2. The `pve_api` and `pve_token_command` lines for `config.toml`.
 3. Two ways to verify the self-signed certificate of the host. Choose one.
@@ -291,7 +295,7 @@ token. It then prints three things:
 Proxmox shows the token secret one time. If you lose it, run the script again
 with `--rotate`.
 
-You can skip this step. `sbx setup --mac-only` in step 7 makes a token for
+You can skip this step. `sbx setup --local-only` in step 7 makes a token for
 each Mac by itself.
 
 Check, in the web UI: **Datacenter**, **Permissions**. The user `sbx@pve` has a
@@ -302,18 +306,18 @@ bridges. It has no role on `/`, on `vmbr0`, or on a different VM.
 
 ```
 ln -s "$PWD/bin/sbx" "$(brew --prefix 2>/dev/null || echo /usr/local)/bin/sbx"
-sbx setup --mac-only
+sbx setup --local-only
 ```
 
-`sbx setup --mac-only` does not change the host. It does these things:
+`sbx setup --local-only` does not change the host. It does these things:
 
 - It copies `host/local.conf` from the host, so this Mac and the host agree.
 - It makes this Mac's own API token (`cli-<Mac name>`) and puts it in the
   macOS keychain, or off macOS in a file that only you can read
   ([the secret store](reference.md#the-secret-store)). It writes `pve_api`, the token command, and the certificate
   check into `~/.config/sbx/config.toml`.
-- It makes a key pair for the sandboxes only. None of your own keys is put in
-  a sandbox.
+- It asks where the key for the sandboxes lives. None of your own keys is put
+  in a sandbox. See [The sandbox key](#the-sandbox-key) below.
 - It writes the SSH block for the sandboxes, and asks to add its `Include`
   line to `~/.ssh/config`.
 - It asks to run `mkcert -install`. Without the mkcert CA, a sandbox serves
@@ -325,6 +329,71 @@ For `agent` sandboxes that clone a private repository, run
 "One git token per project", has the steps.
 
 Check: `sbx doctor` reports no failure.
+
+### The sandbox key
+
+Every sandbox and sidecar trusts one key pair that is for the sandboxes only.
+`sbx setup` (with or without `--local-only`) asks each time:
+
+> Keep the sandbox SSH key in 1Password and use its SSH agent, instead of a key
+> file on this machine?
+
+**No** (the default for a new setup). The key is a file pair,
+`~/.config/sbx/id_ed25519` and `.pub`, with no passphrase. The setup makes it
+when neither file exists. If only the `.pub` exists, the key lives in
+1Password, and the setup stops: a new key would lock you out of the sandboxes
+that exist. Export the key from 1Password to the `ssh_key` path, or answer yes.
+
+**Yes.** The private key stays in 1Password, and ssh reaches it through the
+1Password SSH agent. Only the `.pub` is on disk. Before the question, turn on
+1Password, Settings, Developer, "Use the SSH agent". The setup then:
+
+1. Asks for the agent socket. The default is
+   `~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock` on macOS
+   and `~/.1password/agent.sock` on Linux. It waits if the socket is missing.
+2. Looks for the key. In this order, it stops at the first match:
+   - The `.pub` is on disk, and `ssh-add -L` on that socket lists it.
+   - A 1Password item titled `sbx` exists. The setup reads its public key
+     with `op` and creates nothing.
+   - Otherwise there is no key in 1Password yet. See below.
+3. Saves `ssh_agent` in `config.toml` ([reference.md](reference.md#mac-settings-configsbxconfigtoml)).
+4. Offers to remove the private key file (the default is no), once the agent
+   lists its public key.
+
+When there is no key in 1Password yet:
+
+| You have | The setup |
+|---|---|
+| `~/.config/sbx/id_ed25519` already | asks: **[i]mport** or **[n]ew**. Import: `op` cannot import an existing private key, so the setup tells you to do it in the 1Password app: New Item, SSH Key, Add Private Key, Import. Title the item `sbx`. Your current sandboxes keep working. New: the setup makes a new key with `op`. Your current sandboxes keep trusting the OLD key until you rebuild them. |
+| no key file | makes the key with `op item create --category "SSH Key" --title sbx --ssh-generate-key ed25519`, and reads the public key back. The private key is not printed or stored by sbx. |
+
+`op` problems:
+
+- **`op` is not installed.** The setup says so and prints the install link. It
+  offers to let you make the `sbx` item in the 1Password app instead, and then
+  you pick the key from the list that the agent shows.
+- **`op` is older than 2.20.0.** An older `op` has no SSH Key items (`Unknown
+  item category SSH Key`), so the setup stops and asks you to update it:
+  `op update`, `brew upgrade --cask 1password-cli`, or the install link.
+- **`op` is not signed in.** The setup runs `op signin` in its own terminal
+  (a signin in another terminal does not reach it): authorize the terminal in
+  the 1Password app, or type the account password. If that fails, turn on
+  1Password, Settings, Developer, "Integrate with 1Password CLI", or add the
+  account with `op account add`.
+
+The 1Password SSH agent serves only the Private (or Personal) vault by
+default. If the key is in another vault, list the item in
+`~/.config/1Password/ssh/agent.toml`. If the agent does not list the key, the
+setup pauses and says so.
+
+With `ssh_agent` set, sbx runs `ssh` with `IdentityAgent=<socket>` and
+`IdentityFile=<ssh_key>.pub`, and the `Host sbx-*` block has both lines too.
+1Password asks you to approve a use of the key. [architecture.md](architecture.md#ssh)
+explains why the options are explicit. `sbx doctor` checks the socket, the
+`.pub`, and that the agent lists the key, and it warns when the private file
+is still on disk.
+
+Check: `ssh-add -L` on the socket lists the `sbx` key.
 
 ## 8. The first sandbox
 

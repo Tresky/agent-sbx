@@ -21,14 +21,17 @@ class Result:
 
 class Runner:
     """`responder`, when given, REPLACES process execution: it receives
-    (argv, input) and returns a Result, a str (stdout), or None."""
+    (argv, input) and returns a Result, a str (stdout), or None.
+
+    `capture` is True (stdout and stderr), False (neither), or "stdout": the
+    command can still prompt on the terminal through stderr and stdin."""
 
     def __init__(self, responder=None, verbose=False):
         self.responder = responder
         self.verbose = verbose
         self.calls: list[list[str]] = []
 
-    def run(self, argv: list[str], *, input: bytes | None = None, capture: bool = True,
+    def run(self, argv: list[str], *, input: bytes | None = None, capture: bool | str = True,
             check: bool = True, timeout: float | None = None) -> Result:
         self.calls.append(list(argv))
         if self.verbose:
@@ -40,7 +43,7 @@ class Runner:
             try:
                 done = subprocess.run(argv, input=input, timeout=timeout,
                                       stdout=subprocess.PIPE if capture else None,
-                                      stderr=subprocess.PIPE if capture else None)
+                                      stderr=subprocess.PIPE if capture is True else None)
             except FileNotFoundError:
                 raise CommandError(argv, 127, f"{argv[0]}: command not found") from None
             except subprocess.TimeoutExpired:

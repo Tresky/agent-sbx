@@ -2,6 +2,7 @@
 user's ~/.ssh/config, and a Mac with many keys does not hit MaxAuthTries."""
 from __future__ import annotations
 
+import os
 import posixpath
 import random
 import shlex
@@ -28,6 +29,12 @@ def sidecar_alias(cfg: Config, hostname: str) -> str:
     return f"sidecar.{cfg.fqdn(hostname)}"
 
 
+def ssh_value(value) -> str:
+    """A path as an ssh option value: ssh splits an unquoted one at a space."""
+    text = str(value)
+    return f'"{text}"' if any(c.isspace() for c in text) else text
+
+
 class Vm:
     def __init__(self, cfg: Config, runner: Runner, hostname: str, address: str | None = None, *,
                  port: int = 22, alias: str = ""):
@@ -38,8 +45,12 @@ class Vm:
     def ssh_argv(self, *, forward_agent: bool = False, tty: bool = False) -> list[str]:
         # -F /dev/null: the user's config is ignored on purpose. Its `Host sbx-*`
         # block matches the full name too, and would append the domain again.
+        cfg = self.cfg
+        agent = cfg.ssh_agent_path
+        # With an agent the identity is the .pub, and ssh asks the agent for
+        # the matching key: the private half is not on this machine.
         argv = ["ssh", "-F", "/dev/null",
-                "-i", str(self.cfg.ssh_key_path), "-o", "IdentitiesOnly=yes",
+                "-i", str(cfg.ssh_identity_path), "-o", "IdentitiesOnly=yes",
                 "-o", f"UserKnownHostsFile={state_dir() / 'known_hosts'}",
                 "-o", "StrictHostKeyChecking=accept-new",
                 # One known_hosts entry per sandbox, whether it was reached by
@@ -49,12 +60,22 @@ class Vm:
                 "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR",
                 # Never from the user's config: an agent sandbox must not get
                 # the user's SSH agent because of a wildcard Host block.
-                "-o", f"ForwardAgent={'yes' if forward_agent else 'no'}"]
+                "-o", f"ForwardAgent={self._forward(forward_agent)}"]
+        if agent:
+            argv += ["-o", f"IdentityAgent={ssh_value(agent)}"]
         if self.port != 22:
             argv += ["-p", str(self.port)]
         if tty:
             argv.append("-t")
         return argv + [f"{self.cfg.vm_user}@{self.address}"]
+
+    def _forward(self, forward_agent: bool) -> str:
+        if not forward_agent:
+            return "no"
+        # ssh points SSH_AUTH_SOCK at IdentityAgent, so a bare `yes` would
+        # forward the key agent instead of the user's own. Name the socket.
+        sock = os.environ.get("SSH_AUTH_SOCK")
+        return ssh_value(sock) if self.cfg.ssh_agent and sock else "yes"
 
     def run(self, command: str, *, input: bytes | None = None, check: bool = True,
             capture: bool = True, forward_agent: bool = False):
