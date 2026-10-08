@@ -43,13 +43,29 @@ class Vm:
         self.port, self.alias = port, alias or cfg.fqdn(hostname)
 
     def ssh_argv(self, *, forward_agent: bool = False, tty: bool = False) -> list[str]:
+        argv = self._client_argv("ssh", "-p", forward_agent=forward_agent)
+        if tty:
+            argv.append("-t")
+        return argv + [self.target]
+
+    def scp_argv(self, *, recursive: bool = False) -> list[str]:
+        """scp with the options of ssh_argv, and no agent forwarding. The caller
+        adds the files and `self.target`:/path."""
+        argv = self._client_argv("scp", "-P")
+        return argv + ["-r"] if recursive else argv
+
+    @property
+    def target(self) -> str:
+        return f"{self.cfg.vm_user}@{self.address}"
+
+    def _client_argv(self, program: str, port_flag: str, *, forward_agent: bool = False) -> list[str]:
         # -F /dev/null: the user's config is ignored on purpose. Its `Host sbx-*`
         # block matches the full name too, and would append the domain again.
         cfg = self.cfg
         agent = cfg.ssh_agent_path
         # With an agent the identity is the .pub, and ssh asks the agent for
         # the matching key: the private half is not on this machine.
-        argv = ["ssh", "-F", "/dev/null",
+        argv = [program, "-F", "/dev/null",
                 "-i", str(cfg.ssh_identity_path), "-o", "IdentitiesOnly=yes",
                 "-o", f"UserKnownHostsFile={state_dir() / 'known_hosts'}",
                 "-o", "StrictHostKeyChecking=accept-new",
@@ -64,10 +80,8 @@ class Vm:
         if agent:
             argv += ["-o", f"IdentityAgent={ssh_value(agent)}"]
         if self.port != 22:
-            argv += ["-p", str(self.port)]
-        if tty:
-            argv.append("-t")
-        return argv + [f"{self.cfg.vm_user}@{self.address}"]
+            argv += [port_flag, str(self.port)]
+        return argv
 
     def _forward(self, forward_agent: bool) -> str:
         if not forward_agent:

@@ -25,6 +25,7 @@ path, a git URL, or a name that `sbx projects` lists.
 | `sbx new <name> [options]` | makes a sandbox. The options are below. |
 | `sbx list` | every sandbox: name, profile, template, project, status, VM ID, expiry, start at boot, address |
 | `sbx ssh <name> [--sidecar] [-- command]` | a shell in the sandbox, or one command. `--sidecar`: the sandbox's sidecar instead (the sandbox's name, port 2222). |
+| `sbx scp <name> [-r] <local path>... <path in the sandbox>` | copy files into the sandbox, with the options of `sbx ssh` (no agent forwarding). `-r`: directories. |
 | `sbx snap <name> [label] [--ram]` | takes a snapshot of the sandbox and its sidecar, which keep running. The default label is `clean`. `--ram` saves the memory too, so a rollback resumes them as they were. |
 | `sbx rollback <name> [label]` | returns the sandbox and its sidecar to a snapshot. The default label is `clean`. |
 | `sbx autostart <name>` | the sandbox and its sidecar start at host boot, and the Claude Code sessions live in it are resumed after one. Nothing running is restarted. See [After a host reboot](usage.md#after-a-host-reboot). |

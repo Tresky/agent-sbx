@@ -66,6 +66,9 @@ sbx ssh lab -- uname -a
 ssh sbx-lab
 ```
 
+To copy a file in: `sbx scp lab ./notes.txt /home/dev/notes.txt` (`-r` for a
+directory). It is `scp` with the same key and host-key handling as `sbx ssh`.
+
 `ssh sbx-<name>` needs the `Include` line in `~/.ssh/config`, which
 `sbx setup` offers to add.
 
