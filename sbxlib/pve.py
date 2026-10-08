@@ -35,6 +35,7 @@ AUTOSTART_TAG = "sbx-autostart"
 
 _TOKEN_RE = re.compile(r"^[^@\s]+@[^!\s]+![^=\s]+=[0-9a-fA-F-]{36}$")
 TASK_TIMEOUT = 900.0
+CLONE_TIMEOUT = 3600.0  # a full copy of a large disk
 
 
 class PveError(RuntimeError):
@@ -193,12 +194,12 @@ class Pve:
     def _vm(self, node: str, vmid: int, tail: str = "") -> str:
         return f"/nodes/{node}/qemu/{vmid}{tail}"
 
-    def _wait(self, node: str, data):
+    def _wait(self, node: str, data, timeout: float = TASK_TIMEOUT):
         """Most changes return a task id and finish later. Block until it ends."""
         if not (isinstance(data, str) and data.startswith("UPID:")):
             return data
         path = f"/nodes/{node}/tasks/{urllib.parse.quote(data, safe='')}/status"
-        deadline = time.monotonic() + TASK_TIMEOUT
+        deadline = time.monotonic() + timeout
         while True:
             status = self.api("GET", path) or {}
             if status.get("status") == "stopped":
@@ -206,7 +207,7 @@ class Pve:
                     raise PveError(f"task failed: {status.get('exitstatus')} ({data.split(':')[5]})")
                 return None
             if time.monotonic() > deadline:
-                raise PveError(f"task did not finish in {int(TASK_TIMEOUT)} s: {data}")
+                raise PveError(f"task did not finish in {int(timeout)} s: {data}")
             time.sleep(1)
 
     # --- queries ---
@@ -244,6 +245,25 @@ class Pve:
                 continue
             out.append(Sandbox(int(r["vmid"]), r.get("name", ""), r.get("node", ""), r.get("status", ""), tags))
         return sorted(out, key=lambda s: s.hostname)
+
+    # --- sbx fork ---
+    # The source is only READ: a snapshot of it, a clone from that snapshot, and
+    # the removal of that snapshot. Nothing here stops, starts or reconfigures it.
+    def vm_config(self, node: str, vmid: int) -> dict:
+        return self.api("GET", self._vm(node, vmid, "/config")) or {}
+
+    def clone_from_snapshot(self, node: str, src_vmid: int, snapname: str, newid: int, name: str) -> None:
+        """A FULL copy of `src_vmid` as it was at `snapname`. A running source
+        keeps running; a full copy needs no template and no snapshot afterwards."""
+        self._wait(node, self.api("POST", self._vm(node, src_vmid, "/clone"),
+                                  {"newid": newid, "name": name, "pool": self.cfg.pve_pool,
+                                   "full": 1, "snapname": snapname}), timeout=CLONE_TIMEOUT)
+
+    def configure(self, node: str, vmid: int, params: dict) -> None:
+        self._wait(node, self.api("PUT", self._vm(node, vmid, "/config"), params))
+
+    def delete_snapshot(self, node: str, vmid: int, label: str) -> None:
+        self._wait(node, self.api("DELETE", self._vm(node, vmid, f"/snapshot/{urllib.parse.quote(label, safe='')}")))
 
     def set_expiry(self, box: Sandbox, expires: dt.date | None) -> None:
         """Replace the sbx-exp tag; None removes it (never expires). The other

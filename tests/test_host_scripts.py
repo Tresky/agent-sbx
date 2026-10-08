@@ -161,6 +161,22 @@ esac
         self.assertNotEqual(done.returncode, 0)
         self.assertFalse((self.root / "etc/sbx/sidecar/cloudflared.env").exists())
 
+    def test_quarantine_drops_everything_from_the_sandbox(self):
+        self.write_env()
+        self.apply()
+        normal = (self.root / "etc/nftables.conf").read_text()
+        self.assertIn("# not in quarantine", normal)
+        with open(self.root / "etc/sbx/sidecar.env", "a") as fh:
+            fh.write("SBX_SIDECAR_QUARANTINE=1\n")
+        out = self.apply()
+        rules = (self.root / "etc/nftables.conf").read_text()
+        self.assertIn('iifname "ens18" drop', rules)
+        # In the forward chain, after the DNAT accept (SSH in), before any accept out.
+        fwd = rules[rules.index("chain forward"):]
+        self.assertLess(fwd.index("ct status dnat accept"), fwd.index('iifname "ens18" drop'))
+        self.assertLess(fwd.index('iifname "ens18" drop'), fwd.index("udp dport 53 accept"))
+        self.assertIn("QUARANTINE", out)
+
     def test_a_missing_wire_is_an_error(self):
         self.write_env()
         self.env["IP_ADDR"] = IP_ADDR.replace("10.79.0.1/30", "10.79.0.9/30")

@@ -131,10 +131,11 @@ In the order they were discussed, none started:
 
 - **A lab VLAN at home** for the Proxmox host and the gateway's LAN leg, so
   a gateway compromise lands away from the house devices.
-- **Fork a sandbox and run a workflow in the fork.** A full clone from a
-  snapshot with a fresh machine id, host keys and name; a prompt over SSH
-  stdin into a tmux session; the child reports back through the Mac, since
-  sandboxes no longer see each other.
+- **Fork a sandbox.** Done: `sbx fork` (2026-09-29). An agent sandbox was copied on the
+  host while it ran: its database (2.5 GB, recovered cleanly), its checkout and its
+  history, with a new sidecar, VLAN, name, host keys and machine id, and no claude.ai
+  login; the original kept running. Next: run a workflow in a fork, with a prompt
+  over SSH and the child reporting back through the Mac.
 - **Debian and mise.** Done in part: the sidecar is on Debian, and the
   `debian` template has the core and a `mise` component on Debian 13
   genericcloud (git, Docker, Node, agent-browser with Playwright's libraries,

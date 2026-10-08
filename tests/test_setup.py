@@ -236,7 +236,7 @@ class WizardTest(_WizardBase):
 
         answers = iter(["192.168.1.5", "", "", "", "rust", "", "", ""])
         with mock.patch("builtins.input", lambda *_: next(answers)), mock.patch("builtins.print"):
-            hostsetup.cmd_setup(mock.Mock(host=None, mac_only=False), load(), Runner(responder=responder))
+            hostsetup.cmd_setup(mock.Mock(host=None, local_only=False), load(), Runner(responder=responder))
         steps = [c[-1].split("/host/")[1] for c in self.cmds if c[0] == "ssh" and "/root/sbx/host/" in c[-1]]
         self.assertIn("20-gw-create.sh", steps)
         self.assertLess(steps.index("20-gw-create.sh"), steps.index("20-gw-create.sh --tailscale"))

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shlex
 import sys
@@ -73,15 +74,27 @@ class Definition:
         return self.path.parent.name == "local"
 
 
+_CHECKOUT = REPO_ROOT.resolve()   # this checkout; a test's own root is elsewhere
+
+
+def _local(root: Path, *parts: str) -> Path:
+    """<root>/<parts>/local: the user's own, not in git. With
+    SBX_IGNORE_LOCAL_TEMPLATES (the tests set it), the checkout has none, so
+    a user's own definition cannot change a test's result."""
+    if root.resolve() == _CHECKOUT and os.environ.get("SBX_IGNORE_LOCAL_TEMPLATES"):
+        return Path(os.devnull) / "local"
+    return root.joinpath(*parts, "local")
+
+
 def definition_dirs(root: Path | None = None) -> tuple[Path, Path]:
     """(shared, local): a local definition wins over a shared one."""
     root = root or REPO_ROOT
-    return root / "templates", root / "templates" / "local"
+    return root / "templates", _local(root, "templates")
 
 
 def component_path(name: str, root: Path | None = None) -> Path | None:
     root = root or REPO_ROOT
-    for d in (root / "template" / "components" / "local", root / "template" / "components"):
+    for d in (_local(root, "template", "components"), root / "template" / "components"):
         if (d / f"{name}.sh").is_file():
             return d / f"{name}.sh"
     return None
@@ -91,7 +104,7 @@ def components(root: Path | None = None) -> dict[str, Path]:
     """Every component, local over shared."""
     root = root or REPO_ROOT
     out: dict[str, Path] = {}
-    for d in (root / "template" / "components", root / "template" / "components" / "local"):
+    for d in (root / "template" / "components", _local(root, "template", "components")):
         for p in sorted(d.glob("*.sh")) if d.is_dir() else []:
             out[p.stem] = p
     return dict(sorted(out.items()))
@@ -212,7 +225,7 @@ def versions_path(root: Path | None = None) -> Path:
     """What `sbx versions --write` derived from the projects, per template.
     Not in git: it is this setup's."""
     root = root or REPO_ROOT
-    return root / "templates" / "local" / "versions.toml"
+    return _local(root, "templates") / "versions.toml"
 
 
 def derived(name: str, root: Path | None = None) -> dict[str, dict[str, list[str]]]:
