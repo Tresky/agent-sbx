@@ -296,17 +296,17 @@ A SANDBOX, FROM START TO END
   sbx new app --project ~/code/app     clone the project and run its recipe
   sbx new lab --template rust          ... from a named template
   sbx ssh lab                          a shell        (or: ssh sbx-lab)
+  sbx scp lab ./f.txt /home/dev/f.txt  copy a file into it (-r: a directory)
   sbx herdr lab                        put it in your herdr sidebar (done by `new` too)
   sbx layout app --replace             the project's .sandbox/herdr.toml panes, again
   sbx remote-control lab               Claude Code Remote Control (agent: --allow-agent)
   sbx claude-token                     sign every sandbox in to your Claude subscription
-  sbx list                             every sandbox
   sbx snap lab [--ram]  /  sbx rollback lab   a snapshot of it and its sidecar, and back
   sbx publish lab 3000                 a preview of port 3000, behind Cloudflare Access
   sbx extend lab --days 7              a later expiry (--never: none)
   sbx autostart lab                    start at host boot, resume its Claude sessions
   sbx rm lab                           destroy it; `sbx gc` destroys expired ones
-  sbx web                              the portal: all of sbx, in a web page on this Mac
+  sbx list  /  sbx web                 every sandbox  /  the portal, all of sbx in a web page
 
 A PROJECT
   sbx projects                         the projects this Mac has used
@@ -1655,6 +1655,16 @@ def cmd_ssh(args, cfg: Config, runner: Runner, api=None) -> int:
     os.execvp("ssh", argv + (["--", " ".join(args.command)] if args.command else []))
 
 
+def cmd_scp(args, cfg: Config, runner: Runner, api=None) -> int:
+    hostname = names.hostname(args.name)
+    _pve(cfg, runner, api).require(hostname)
+    if len(args.paths) < 2:
+        raise PveError("usage: sbx scp <name> <local path>... <path in the sandbox>")
+    *sources, dest = args.paths
+    vm = Vm(cfg, runner, hostname)
+    os.execvp("scp", vm.scp_argv(recursive=args.recursive) + ["--", *sources, f"{vm.target}:{dest}"])
+
+
 def _herdr_add(runner: Runner, hostname: str) -> None:
     """Best effort: put the sandbox in the local herdr's sidebar."""
     if not herdr_mod.available():
@@ -2226,6 +2236,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--sidecar", action="store_true", help="the sandbox's sidecar instead of the sandbox")
     s.add_argument("command", nargs="*")
     s.set_defaults(fn=cmd_ssh)
+
+    s = sub.add_parser("scp", help="copy local files into a sandbox: scp <name> <local>... <remote path>")
+    s.add_argument("name")
+    s.add_argument("-r", "--recursive", action="store_true", help="copy directories")
+    s.add_argument("paths", nargs="+", metavar="path", help="one or more local files, then the destination in the sandbox")
+    s.set_defaults(fn=cmd_scp)
 
     s = sub.add_parser("herdr", help="put the sandbox in your herdr sidebar (or --attach: a full window on it)")
     s.add_argument("name")
