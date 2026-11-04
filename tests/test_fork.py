@@ -144,7 +144,12 @@ class GitAuthAgainTest(unittest.TestCase):
     def test_it_writes_the_rewrites_again_with_real_git(self):
         import subprocess
         with tempfile.TemporaryDirectory() as home:
-            env = {**os.environ, "HOME": home, "GIT_CONFIG_NOSYSTEM": "1"}
+            # HOME alone is not enough: Git also honors XDG_CONFIG_HOME and
+            # GIT_CONFIG_GLOBAL, which may still point at the client's config.
+            config = Path(home, ".gitconfig")
+            env = {**os.environ, "HOME": home,
+                   "XDG_CONFIG_HOME": str(Path(home, ".config")),
+                   "GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_NOSYSTEM": "1"}
 
             class LocalVm:
                 cfg = cli.load_config()
@@ -158,6 +163,7 @@ class GitAuthAgainTest(unittest.TestCase):
             project = cli.Project("app", "", None, None, None)
             for _ in range(2):   # the second run is the fork's
                 cli._git_auth(cli.load_config(), Runner(), LocalVm(), "agent", project, "placeholder")
+            self.assertTrue(config.is_file(), "Git must write only to the temporary config")
             got = subprocess.run(["git", "config", "--global", "--get-all",
                                   "url.http://10.79.0.1:8080/github/.insteadOf"],
                                  env=env, capture_output=True, text=True).stdout.split()
