@@ -111,7 +111,7 @@ ns sideB nft -f /tmp/sideB.conf || { echo "sidecar rules failed to load"; exit 2
 # answers on the "internet"; 22 and 4400 in agent A are sshd and a dev server.
 SA="placeholder-for-sandbox-A"; SB="placeholder-for-sandbox-B"
 printf '%s\n' "$SA" > /tmp/secretA; printf '%s\n' "$SB" > /tmp/secretB
-printf 'claude=sk-ant-oat01-REAL-A\ngithub=ghp_REAL_A\n' > /tmp/tokensA
+printf 'claude=sk-ant-oat01-REAL-A\ngithub=ghp_REAL_A\ngit.named=http://203.0.113.10:9000 x-access-token ghp_NAMED_A\n' > /tmp/tokensA
 printf 'claude=sk-ant-oat01-REAL-B\ngithub=ghp_REAL_B\n' > /tmp/tokensB
 for n in lan ts gw agentA agentB; do ns "$n" python3 -m http.server 8000 --bind 0.0.0.0 >/dev/null 2>&1 & done
 ns agentA python3 -m http.server 22 --bind 0.0.0.0 >/dev/null 2>&1 &
@@ -177,6 +177,9 @@ contains "git call keeps its path"                                     "$out" '"
 # git asks without a credential first; libcurl (git's HTTP library, and curl
 # --anyauth) sends the stored one only after a 401 that names the scheme.
 report "git's way: a credential sent only after the 401"             "$(code agentA --anyauth -u "sbx:$SA" http://10.79.0.1:8080/github/o/r.git/info/refs)" 200
+out="$(c agentA -u "sbx:$SA" 'http://10.79.0.1:8080/git/203.0.113.10:9000/only-named/r.git/info/refs?service=git-upload-pack')"
+contains "several tokens: the proxy finds the one that reaches the repo" "$out" "Basic $(printf 'x-access-token:ghp_NAMED_A' | base64 -w0)"
+report   "several tokens: a host with no token is refused"  "$(code agentA -u "sbx:$SA" http://10.79.0.1:8080/git/198.51.100.7/o/r.git/info/refs)" 403
 report   "wrong placeholder is refused"          "$(code agentA -H 'Authorization: Bearer wrong' http://10.79.0.1:8080/v1/messages)" 401
 report   "no credential is refused"              "$(code agentA http://10.79.0.1:8080/v1/messages)" 401
 report   "A's placeholder is useless at sidecar B" "$(code agentB -H "Authorization: Bearer $SA" http://10.79.0.5:8080/v1/messages)" 401

@@ -15,6 +15,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from . import cfsetup
 from . import claudetoken
@@ -36,7 +37,7 @@ from . import versions as versions_mod
 from .config import Config, ConfigError, load as load_config, local_conf_path, state_dir
 from .inputs import PLACEHOLDER, REPO, SEND, InputError
 from .manifest import MANIFEST_PATH, Manifest, ManifestError
-from .pve import HttpApi, Pve, PveError, TemplateVm
+from .pve import GIT_TOKEN_TAG, HttpApi, Pve, PveError, TemplateVm, git_token_tag
 from .run import CommandError, Runner
 from .vm import SIDECAR_SSH_PORT, Vm, VmError, dns_has, resolves, sidecar_alias, ssh_value
 
@@ -292,9 +293,9 @@ TWO PROFILES
 
 A SANDBOX, FROM START TO END
   sbx new lab                          a plain sandbox, {profile} profile
-  sbx new lab --profile personal       ... for your own work
+  sbx new lab --profile personal       ... for your own work (--template rust: a named template)
   sbx new app --project ~/code/app     clone the project and run its recipe
-  sbx new lab --template rust          ... from a named template
+  sbx new lab --git work --repo api    no project: its git tokens and repos (usage.md)
   sbx ssh lab                          a shell        (or: ssh sbx-lab)
   sbx scp lab ./f.txt /home/dev/f.txt  copy a file into it (-r: a directory)
   sbx herdr lab                        put it in your herdr sidebar (done by `new` too)
@@ -752,51 +753,242 @@ def cmd_projects(args, cfg: Config, runner: Runner, api=None) -> int:
     return 0
 
 
+class NamedGit(NamedTuple):
+    """One git token that a sandbox can hold, by its name in the secret store."""
+    name: str
+    host: str
+    username: str
+    token: str
+
+
 def _project_repos(project: Project) -> list[str]:
     manifest = project.manifest or Manifest()
     return [u for u in [project.url] + [i.url for i in manifest.inputs if i.kind == "repo"] if u]
 
 
+def _named_git(runner: Runner, name: str) -> "NamedGit":
+    """A stored token, by name. For `sbx new`, it fails before a VM exists."""
+    gittoken.check_name(name)
+    access = inputs_mod.load_bindings(state_dir() / "bindings" / f"{name}.toml").git
+    token = runner.run(access.token_command, check=False).stdout.strip() if access else ""
+    if not token:
+        raise InputError(f"no git token named {name}. Store one: sbx git-token --name {name}")
+    return NamedGit(name, access.host, access.username, token)
+
+
+def _list_git_tokens(cfg: Config, runner: Runner, api) -> int:
+    """Every stored git token, by name, and the sandboxes that hold it."""
+    users: dict[str, list[str]] = {}
+    try:
+        for box in _pve(cfg, runner, api).sandboxes():
+            for token in box.git_tokens:
+                users.setdefault(token, []).append(box.hostname)
+            if box.project:
+                users.setdefault(box.project, []).append(box.hostname)
+    except (ConfigError, PveError, CommandError):  # the list must work without the host
+        pass
+    rows = [("TOKEN", "HOST", "STORED", "SANDBOXES")]
+    for path in sorted((state_dir() / "bindings").glob("*.toml")):
+        git = inputs_mod.load_bindings(path).git
+        if git is not None:
+            stored = secretstore.exists(runner, gittoken.keychain_service(path.stem), "sbx")
+            mine = users.get(git_token_tag(path.stem)[len(GIT_TOKEN_TAG):], [])
+            rows.append((path.stem, git.host, "yes" if stored else "no", ", ".join(mine) or "-"))
+    if len(rows) == 1:
+        print("no git tokens; sbx git-token --name <token> stores one")
+        return 0
+    widths = [max(len(r[c]) for r in rows) for c in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(cell.ljust(w) for cell, w in zip(r, widths)).rstrip())
+    return 0
+
+
+def _add_git_token(sc: Vm, token: "NamedGit") -> None:
+    q = shlex.quote
+    sc.run(f"sudo sbx-sidecar-apply --git-add {q(token.name)} {q(token.host)} {q(token.username)}",
+           input=(token.token + "\n").encode())
+
+
+def _sidecar_of(cfg: Config, runner: Runner, hostname: str) -> Vm:
+    """A running sidecar, with the scripts of this checkout: a sidecar from an
+    older template then knows every token command, with no template build."""
+    sc = Vm(cfg, runner, hostname, port=SIDECAR_SSH_PORT, alias=sidecar_alias(cfg, hostname))
+    _refresh_sidecar_files(sc)
+    return sc
+
+
+def _wire_from_sidecar(cfg: Config, runner: Runner, sc: Vm, hostname: str) -> None:
+    """Git in a running sandbox, to match what its sidecar holds now."""
+    hosts = sc.run("sudo sbx-sidecar-apply --git-hosts").stdout.split()
+    placeholder = sc.run("sudo cat /etc/sbx/sidecar/secret").stdout.strip()
+    if not placeholder:
+        raise VmError(f"the sidecar of {hostname} has no placeholder for its sandbox")
+    _wire_git_hosts(cfg, Vm(cfg, runner, hostname), hosts, placeholder)
+
+
+def _push_git_to_sidecar(cfg: Config, runner: Runner, box, token: "NamedGit", own_project: bool) -> None:
+    """The token into the sidecar, and git in the VM through the sidecar. A
+    sandbox made with no project has no git settings yet. The VM holds only
+    the placeholder."""
+    sc = _sidecar_of(cfg, runner, box.hostname)
+    if own_project:
+        # The sandbox's own project: this replaces the token that `sbx new` gave
+        # it. The host first: the sidecar must never send it to another one.
+        upstream = shlex.quote(f"s|^SBX_GIT_UPSTREAM=.*|SBX_GIT_UPSTREAM=https://{token.host}|")
+        sc.run(f"sudo sed -i {upstream} /etc/sbx/sidecar.env")
+        sc.run("sudo sbx-sidecar-apply --git-token", input=(token.token + "\n").encode())
+    else:
+        _add_git_token(sc, token)
+    _wire_from_sidecar(cfg, runner, sc, box.hostname)
+
+
+def _drop_git_token(cfg: Config, runner: Runner, api, name: str, sandboxes: list[str]) -> int:
+    pve = _pve(cfg, runner, api)
+    sidecars = pve.sidecars()
+    for target in sandboxes:
+        box = pve.require(names.hostname(target))
+        if box.hostname not in sidecars:
+            raise InputError(f"{box.hostname} has no sidecar, so it holds the token itself. "
+                             f"Remove it there: sbx ssh {target} -- rm ~/.git-credentials")
+        sc = _sidecar_of(cfg, runner, box.hostname)
+        sc.run(f"sudo sbx-sidecar-apply --git-drop {shlex.quote(name)}")
+        _wire_from_sidecar(cfg, runner, sc, box.hostname)
+        pve.set_git_token(box, name, on=False)
+        info(f"{box.hostname}: its sidecar no longer has the token {name}")
+    return 0
+
+
+def _repo_url(spec: str) -> str:
+    """A git URL from `owner/repo` on GitHub, or from a git URL as it is."""
+    return manifest_mod.check_git_url(gittoken.repo_url(spec, "github.com"), "repository")
+
+
+def _repo_specs(specs: list[str]) -> list[tuple[str, str]]:
+    """(name, URL) of each repository: a name that `sbx repo list` shows, a git
+    URL, or owner/repo. It looks at no git host: a clone says what works."""
+    known = projects_mod.load()
+    out = []
+    for spec in specs:
+        if spec in known:
+            if not known[spec].url:
+                raise InputError(f"{spec} has no git URL; its checkout has no origin")
+            out.append((spec, known[spec].url))
+        else:
+            url = _repo_url(spec)
+            out.append((names.project_name(url), url))
+    return out
+
+
+def _clone_repos(vm: Vm, repos: list[tuple[str, str]], forward_agent: bool = False) -> int:
+    """Each repository into ~/code, with what the sandbox has. If a clone fails,
+    sbx reports it and goes on to the next one. Returns how many failed."""
+    q = shlex.quote
+    failed = 0
+    for name, url in repos:
+        dest = f"code/{name}"
+        done = vm.run(f"if test -e {q(dest)}; then echo already here; exit 0; fi; "
+                      f"GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes' git clone -q -- {q(url)} {q(dest)}",
+                      check=False, forward_agent=forward_agent)
+        if done.code != 0:
+            failed += 1
+            lines = done.stderr.strip().splitlines()
+            warn(f"{name}: not cloned: {lines[-1] if lines else f'git stopped with code {done.code}'}")
+        elif "already here" in done.stdout:
+            info(f"{name}: already in ~/{dest}")
+        else:
+            info(f"{name}: cloned into ~/{dest}")
+    return failed
+
+
+def cmd_repo(args, cfg: Config, runner: Runner, api=None) -> int:
+    """The repositories that this Mac knows. Registering one needs no token and
+    reads nothing from the git host."""
+    if args.action == "add":
+        url = _repo_url(args.url)
+        name = names.project_name(args.name or url)
+        if args.name and name != args.name:
+            raise InputError(f"{args.name!r} is not a repository name: use letters, digits, '.', '_' and '-'")
+        old = projects_mod.load().get(name)
+        if old is not None and old.url and old.url != url:
+            raise InputError(f"{name} is already {old.url}. Choose another name with --name, or: sbx repo rm {name}")
+        projects_mod.record(name, None, url)
+        info(f"{name}: {url}")
+        return 0
+    if args.action == "rm":
+        if not projects_mod.forget(args.name):
+            raise projects_mod.ProjectError(f"no repository named {args.name!r}")
+        info(f"forgot {args.name}")
+        return 0
+    if args.action == "clone":
+        repos = _repo_specs(args.repos)
+        box = _pve(cfg, runner, api).require(names.hostname(args.sandbox))
+        failed = _clone_repos(Vm(cfg, runner, box.hostname), repos, forward_agent=box.profile == "personal")
+        return 1 if failed else 0
+    rows = [("REPO", "URL")] + [(e.name, e.url or "-") for _, e in sorted(projects_mod.load().items())]
+    if len(rows) == 1:
+        print("no repositories yet; sbx repo add <git URL or owner/repo> registers one")
+        return 0
+    widths = [max(len(r[c]) for r in rows) for c in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(cell.ljust(w) for cell, w in zip(r, widths)).rstrip())
+    return 0
+
+
 def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
-    # No manifest: for a URL, reading it needs the very token this stores.
-    project = resolve_project(args.project, args.branch, args.from_path, runner, need_remote=False, manifest=False)
-    binding = state_dir() / "bindings" / f"{project.name}.toml"
+    if args.list:
+        return _list_git_tokens(cfg, runner, api)
+    if bool(args.project) == bool(args.name):
+        raise InputError("name a project, or a token with --name; one of the two")
+    if args.drop and not args.name:
+        raise InputError("--drop goes with --name")
+    if args.name:
+        project, name, again, repos = None, gittoken.check_name(args.name), f"--name {args.name}", []
+        if args.drop:
+            return _drop_git_token(cfg, runner, api, name, args.drop)
+    else:
+        # No manifest: for a URL, reading it needs the very token this stores.
+        project = resolve_project(args.project, args.branch, args.from_path, runner, need_remote=False, manifest=False)
+        name, again = project.name, args.project
+    binding = state_dir() / "bindings" / f"{name}.toml"
 
     if args.remove:
-        gone = gittoken.forget(runner, project.name)
+        gone = gittoken.forget(runner, name)
         dropped = gittoken.remove_binding(binding)
-        info(f"{project.name}: token in {secretstore.where()} {'removed' if gone else 'was absent'}, "
+        info(f"{name}: token in {secretstore.where()} {'removed' if gone else 'was absent'}, "
              f"[git] section {'removed' if dropped else 'was absent'}")
         return 0
 
-    repos = _project_repos(project)
-    if not repos:
-        raise InputError(f"{project.name}: no origin remote, so there is nothing for a token to cover")
+    if project is not None:
+        repos = _project_repos(project)
+        if not repos:
+            raise InputError(f"{name}: no origin remote, so there is nothing for a token to cover")
 
     # `--push` alone, with a token in the secret store already, installs that
     # one: the usual case is a sandbox that exists and needs the token now.
-    token = gittoken.stored(runner, project.name) if args.push and not args.stdin else ""
+    token = gittoken.stored(runner, name) if args.push and not args.stdin else ""
     bound = inputs_mod.load_bindings(binding).git
     # The host: what the user said, else what the stored token was bound to,
     # else the host of the project's own remote.
-    origin = gittoken.repo_path(repos[0])
+    origin = gittoken.repo_path(repos[0]) if repos else None
     host = args.host or (bound.host if token and bound else None) or (origin[0] if origin else "github.com")
     username = args.username or (bound.username if token and bound else None) or "x-access-token"
     if token:
-        info(f"using the token stored for {project.name}; `sbx git-token {args.project} --remove` first to replace it")
+        info(f"using the token stored for {name}; `sbx git-token {again} --remove` first to replace it")
     else:
-        print(f"project: {project.name}")
-        print("the token must cover: " + ", ".join(repos))
-        if project.checkout is None:
+        print(f"project: {name}" if project is not None else f"token: {name}, for {host} (--host changes it)")
+        if repos:
+            print("the token must cover: " + ", ".join(repos))
+        which = "the ones above" if repos else "the ones that you want"
+        if project is not None and project.checkout is None:
             print("  (from the URL alone: a repository that the recipe adds is checked by `sbx new`)")
         if host == "github.com":
             print("make it at github.com > Settings > Developer settings > Fine-grained tokens:")
-            print("  Only select repositories (the ones above); Contents: Read, or Read and write to push")
+            print(f"  Only select repositories ({which}); Contents: Read, or Read and write to push")
         elif gittoken.is_gitlab(host):
             # Both kinds work on the Free tier. A project access token would
             # be the closest match, but GitLab.com sells it with Premium only.
             print(f"make it at https://{host}/-/user_settings/personal_access_tokens:")
-            print("  Fine-grained: Group and project, the projects above; Code: Download, and Push to push")
+            print(f"  Fine-grained: Group and project ({which}); Code: Download, and Push to push")
             print("  (or a legacy token with read_repository and write_repository: it reaches every project of yours)")
 
         if args.stdin:
@@ -804,7 +996,7 @@ def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
         else:
             if not sys.stdin.isatty():
                 raise InputError("no terminal to ask for the token; pass --stdin and pipe it in")
-            token = getpass.getpass(f"token for {project.name} (hidden): ").strip()
+            token = getpass.getpass(f"token for {name} (hidden): ").strip()
         if not token or any(c.isspace() for c in token):
             raise InputError("the token is empty or has whitespace in it")
 
@@ -820,8 +1012,8 @@ def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
             if any(c.status == "read only" for c in checks):
                 warn("the token can read but not push where it says `read only`; an agent's push will fail there")
 
-        service = gittoken.store(runner, project.name, token)
-        gittoken.write_binding(binding, project.name, host, username)
+        service = gittoken.store(runner, name, token)
+        gittoken.write_binding(binding, name, host, username)
         info(f"stored in {secretstore.where()} as {service}")
         info(f"wrote [git] in {binding}")
 
@@ -833,18 +1025,23 @@ def cmd_git_token(args, cfg: Config, runner: Runner, api=None) -> int:
     if args.push:
         pve = _pve(cfg, runner, api)
         sidecars = pve.sidecars()
-        for name in args.push:
-            box = pve.require(names.hostname(name))
+        for target in args.push:
+            box = pve.require(names.hostname(target))
             if box.hostname in sidecars:
-                sc = Vm(cfg, runner, box.hostname, port=SIDECAR_SSH_PORT, alias=sidecar_alias(cfg, box.hostname))
-                sc.run("sudo sbx-sidecar-apply --git-token", input=(token + "\n").encode())
+                own = project is not None and projects_mod.tag(name)[len("sbx-proj-"):] == box.project
+                _push_git_to_sidecar(cfg, runner, box, NamedGit(name, host, username, token), own)
+                if not own:
+                    pve.set_git_token(box, name)
                 info(f"{box.hostname}: its sidecar adds the token to git requests now")
             else:
                 _install_git_token(Vm(cfg, runner, box.hostname), username, host, token)
                 info(f"{box.hostname}: git uses the token for {host} now, in every shell")
     else:
-        print(f"an agent sandbox of {project.name} now clones with this token: sbx new <name> --project {args.project}")
-        print(f"a sandbox that runs already gets it with: sbx git-token {args.project} --push <name>")
+        if project is None:
+            print(f"a new sandbox gets this token with: sbx new <sandbox> --git {name}")
+        else:
+            print(f"an agent sandbox of {name} now clones with this token: sbx new <name> --project {args.project}")
+        print(f"a sandbox that runs already gets it with: sbx git-token {again} --push <name>")
     return 0
 
 
@@ -1310,6 +1507,37 @@ def _preflight_git(cfg: Config, runner: Runner, profile: str, project: Project) 
         warn(f"the git token for {project.name} can read but not push: " + ", ".join(read_only))
 
 
+def _wire_git_proxy(cfg: Config, vm: Vm, host: str, placeholder: str) -> None:
+    """Git in the VM talks to the sidecar's proxy for every remote on `host`,
+    and presents the placeholder. The VM holds no git token."""
+    q = shlex.quote
+    proxy = f"{cfg.sidecar_proxy_url}/github/"
+    vm.put(f"http://sbx:{placeholder}@{cfg.sidecar_addr}:8080\n".encode(), ".git-credentials")
+    # --unset-all first: a sandbox that has them already (a fork of one)
+    # holds several values, and git refuses to overwrite those with one.
+    vm.run(f"git config --global --unset-all url.{q(proxy)}.insteadOf; "
+           "git config --global credential.helper store && "
+           f"git config --global url.{q(proxy)}.insteadOf {q(f'https://{host}/')} && "
+           f"git config --global --add url.{q(proxy)}.insteadOf {q(f'git@{host}:')} && "
+           f"git config --global --add url.{q(proxy)}.insteadOf {q(f'ssh://git@{host}/')}")
+
+
+def _wire_git_hosts(cfg: Config, vm: Vm, hosts: list[str], placeholder: str) -> None:
+    """Git in the VM talks to the sidecar's proxy for every remote on these
+    hosts: the hosts that the sandbox has a token for, and no others. Every older
+    rewrite to this sidecar goes first, so a removed host goes back to plain git."""
+    q = shlex.quote
+    vm.put(f"http://sbx:{placeholder}@{cfg.sidecar_addr}:8080\n".encode(), ".git-credentials")
+    pattern = "^url\\." + re.escape(cfg.sidecar_proxy_url) + "/.*\\.insteadof$"
+    steps = ["git config --global credential.helper store"]
+    for host in hosts:
+        key = q(f"url.{cfg.sidecar_proxy_url}/git/{host}/.insteadOf")
+        steps += [f"git config --global --add {key} {q(remote)}"
+                  for remote in (f"https://{host}/", f"git@{host}:", f"ssh://git@{host}/")]
+    vm.run(f"git config --global --name-only --get-regexp {q(pattern)} | "
+           "while read -r key; do git config --global --unset-all \"$key\"; done; " + " && ".join(steps))
+
+
 def _git_auth(cfg: Config, runner: Runner, vm: Vm, profile: str, project: Project, placeholder: str = "") -> bool:
     """Returns whether git commands in the VM need the forwarded SSH agent.
     _preflight_git has already proved that the access works.
@@ -1321,17 +1549,7 @@ def _git_auth(cfg: Config, runner: Runner, vm: Vm, profile: str, project: Projec
         return True
     access = _git_access(cfg, _bindings(project))
     if placeholder:
-        q = shlex.quote
-        host = access.host if access else "github.com"
-        proxy = f"{cfg.sidecar_proxy_url}/github/"
-        vm.put(f"http://sbx:{placeholder}@{cfg.sidecar_addr}:8080\n".encode(), ".git-credentials")
-        # --unset-all first: a sandbox that has them already (a fork of one)
-        # holds several values, and git refuses to overwrite those with one.
-        vm.run(f"git config --global --unset-all url.{q(proxy)}.insteadOf; "
-               "git config --global credential.helper store && "
-               f"git config --global url.{q(proxy)}.insteadOf {q(f'https://{host}/')} && "
-               f"git config --global --add url.{q(proxy)}.insteadOf {q(f'git@{host}:')} && "
-               f"git config --global --add url.{q(proxy)}.insteadOf {q(f'ssh://git@{host}/')}")
+        _wire_git_proxy(cfg, vm, access.host if access else "github.com", placeholder)
         return False
     if access is None:
         return False
@@ -1421,6 +1639,14 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
         _preflight_git(cfg, runner, profile, project)
     elif args.with_input or args.without_input:
         raise InputError("--with and --without need --project")
+    if args.git and project is not None:
+        raise InputError(f"--git is for a sandbox with no project. A project has its own token: "
+                         f"sbx git-token {args.project}")
+    named_git = [_named_git(runner, name) for name in args.git]
+    if len(named_git) > 1 and not cfg.sidecar_for(profile):
+        raise InputError("only a sandbox with a sidecar can hold several git tokens; "
+                         f"a {profile} sandbox keeps one, in the VM")
+    repos = _repo_specs(args.repo)
     if args.remote_control_mode and profile != remotecontrol.ALLOWED_PROFILE:
         raise InputError(f"--remote-control-mode: Remote Control is not available in an {profile} sandbox")
     if not cfg.ssh_identity_path.exists():
@@ -1478,7 +1704,7 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
     node = pve.create(template, vmid, hostname, profile, pubkey,
                       cores=args.cores or cfg.cores, memory_mb=args.memory or cfg.memory_mb,
                       disk_gb=args.disk, expires=expires, project=project.name if project else "",
-                      vlan=vlan if sidecar else None,
+                      git_tokens=args.git, vlan=vlan if sidecar else None,
                       ipconfig=f"ip={cfg.sidecar_vm_addr}/30,gw={cfg.sidecar_addr}" if sidecar else "ip=dhcp",
                       nameserver=cfg.dns_server if sidecar else "", searchdomain=cfg.domain if sidecar else "")
     if args.gpu:
@@ -1492,9 +1718,12 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
     if sidecar:
         runner.run(["ssh-keygen", "-R", sidecar_alias(cfg, hostname), "-f", known_hosts], check=False)
         info("waiting for the sidecar")
-        _provision_sidecar(cfg, runner, pve, node, sc_vmid, hostname, secret,
-                           claude if cfg.sidecar_claude == "proxy" else "",
-                           _git_token(cfg, runner, project) if project is not None else None)
+        sc = _provision_sidecar(cfg, runner, pve, node, sc_vmid, hostname, secret,
+                                claude if cfg.sidecar_claude == "proxy" else "",
+                                _git_token(cfg, runner, project) if project is not None else None,
+                                refresh=bool(named_git))  # an older template lacks the named tokens
+        for token in named_git:
+            _add_git_token(sc, token)
 
     info("waiting for the sandbox")
     vm = _connect(cfg, runner, pve, node, vmid, hostname, by_name_only=sidecar)
@@ -1518,6 +1747,18 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
             # The VM exists; a bare error would leave the user with a dead end.
             raise VmError(f"{exc}\n  The sandbox {hostname} is up without its project. "
                           f"Fix the cause, then: sbx rm {args.name} -y && sbx new {args.name} ...") from None
+    elif named_git:
+        if sidecar:
+            hosts = sorted({token.host for token in named_git})
+            _wire_git_hosts(cfg, vm, hosts, secret)
+            info(f"git on {', '.join(hosts)} goes through the sidecar; the tokens stay there")
+        else:
+            token = named_git[0]
+            _install_git_token(vm, token.username, token.host, token.token)
+            info(f"git on {token.host} uses the token {token.name}, in every shell")
+    if repos and code == 0:
+        # A clone that fails is reported, and the sandbox is still made.
+        _clone_repos(vm, repos, forward_agent=profile == "personal")
 
     if code != 0:
         warn(f"the recipe failed with exit code {code}. The sandbox stays up: sbx ssh {args.name}")
@@ -1857,10 +2098,10 @@ _FORK_KEEP_TAGS = ("sbx", "sbx-agent", "sbx-personal")
 
 
 def _fork_tags(src_tags, src_hostname: str, expires) -> str:
-    """The copy's tags: the profile, the template and the project of the
-    original; its own expiry; where it came from. Not the original's expiry,
+    """The copy's tags: the profile, the template, the project and the named
+    git token of the original; its own expiry; where it came from. Not the original's expiry,
     autostart or lineage."""
-    kept = [t for t in src_tags if t in _FORK_KEEP_TAGS or t.startswith(("sbx-tpl-", "sbx-proj-"))]
+    kept = [t for t in src_tags if t in _FORK_KEEP_TAGS or t.startswith(("sbx-tpl-", "sbx-proj-", GIT_TOKEN_TAG))]
     kept += [f"sbx-fork-of-{src_hostname.removeprefix('sbx-')}"]
     if expires:
         kept.append(f"sbx-exp-{expires:%Y%m%d}")
@@ -1889,6 +2130,12 @@ def cmd_fork(args, cfg: Config, runner: Runner, api=None) -> int:
     project = Project(src.project, "", None, None, None) if src.project else None
     claude = "" if args.no_claude else claudetoken.get(runner)
     git = _git_token(cfg, runner, project) if project is not None else None
+    named_git = []
+    for name in src.git_tokens:
+        try:
+            named_git.append(_named_git(runner, name))
+        except InputError:
+            warn(f"the copy does not get the git token {name}: this machine no longer stores it")
 
     node = src.node
     ttl = args.ttl if args.ttl is not None else cfg.agent_ttl_days
@@ -1938,6 +2185,10 @@ def cmd_fork(args, cfg: Config, runner: Runner, api=None) -> int:
         _install_claude_proxy(vm, secret)
     if project is not None:
         _git_auth(cfg, runner, vm, "agent", project, secret)
+    if named_git:
+        for token in named_git:
+            _add_git_token(sc, token)
+        _wire_git_hosts(cfg, vm, sorted({t.host for t in named_git} | ({git[0]} if git else set())), secret)
     # 5. Out of quarantine.
     sc.put(_sidecar_env(cfg, new_host, git[0] if git else "github.com"), "/etc/sbx/sidecar.env",
            mode="0644", sudo=True)
@@ -2073,14 +2324,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="also make one sandbox per profile and prove what each can reach (about 2 min)")
     s.set_defaults(fn=doctor.cmd_doctor)
 
+    def source_opts(sp):
+        sp.add_argument("--branch", help="branch to clone (default: the checkout's branch)")
+        sp.add_argument("--from", dest="from_path", metavar="PATH",
+                        help="local checkout that file inputs come from, when --project is a URL")
+
     def project_opts(sp, required):
         if required:
             sp.add_argument("project", help="a local checkout or a git URL")
         else:
             sp.add_argument("--project", help="a local checkout or a git URL to clone and set up")
-        sp.add_argument("--branch", help="branch to clone (default: the checkout's branch)")
-        sp.add_argument("--from", dest="from_path", metavar="PATH",
-                        help="local checkout that file inputs come from, when --project is a URL")
+        source_opts(sp)
 
     s = sub.add_parser("inputs", help="show what a project's recipe asks for; makes nothing")
     project_opts(s, required=True)
@@ -2136,6 +2390,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("projects", help="the projects this Mac has used, their tokens and sandboxes")
     s.set_defaults(fn=cmd_projects, action="list")
+    s = sub.add_parser("repo", help="the repositories that this Mac knows, and a clone in a sandbox")
+    rs = s.add_subparsers(dest="action", required=True)
+    r_add = rs.add_parser("add", help="register a repository; it needs no token")
+    r_add.add_argument("url", help="a git URL, or owner/repo on GitHub")
+    r_add.add_argument("--name", help="the name to use (default: the last part of the URL)")
+    rs.add_parser("list", help="the registered repositories")
+    r_rm = rs.add_parser("rm", help="forget a repository")
+    r_rm.add_argument("name")
+    r_clone = rs.add_parser("clone", help="try to clone repositories in a running sandbox, with the tokens it has")
+    r_clone.add_argument("sandbox")
+    r_clone.add_argument("repos", nargs="+", metavar="REPO", help="a name from `sbx repo list`, a git URL, or owner/repo")
+    s.set_defaults(fn=cmd_repo)
+
     s = sub.add_parser("project", help="add or forget a project (see also: sbx projects)")
     ps = s.add_subparsers(dest="action", required=True)
     p_add = ps.add_parser("add", help="record a checkout, so --project <name> works by name")
@@ -2144,8 +2411,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_rm.add_argument("project", help="the project name")
     s.set_defaults(fn=cmd_projects)
 
-    s = sub.add_parser("git-token", help="store a project's git token (keychain, or a private file) and bind it")
-    project_opts(s, required=True)
+    s = sub.add_parser("git-token", help="store a git token (keychain, or a private file), for a project or by name")
+    s.add_argument("project", nargs="?", help="a local checkout or a git URL")
+    source_opts(s)
+    s.add_argument("--name", metavar="TOKEN", help="a token that belongs to no project and names no repository")
+    s.add_argument("--drop", action="append", default=[], metavar="NAME",
+                   help="with --name: take the token out of this running sandbox (repeatable)")
+    s.add_argument("--list", action="store_true", help="every stored token, and the sandboxes that hold it")
     s.add_argument("--host", help="the git host the token is for (default: the host of the project's remote)")
     s.add_argument("--username", help="the user name sent with the token (default: x-access-token, "
                                       "which GitHub ignores and GitLab accepts)")
@@ -2206,6 +2478,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="send this input to an agent sandbox (repeatable)")
     s.add_argument("--without", dest="without_input", action="append", default=[], metavar="INPUT",
                    help="withhold this input; its placeholder is used (repeatable)")
+    s.add_argument("--git", action="append", default=[], metavar="TOKEN",
+                   help="give a sandbox with no project this stored git token (sbx git-token --name; repeatable)")
+    s.add_argument("--repo", action="append", default=[], metavar="REPO",
+                   help="try to clone this repository into ~/code: a name from `sbx repo list`, a git URL, "
+                        "or owner/repo (repeatable)")
     s.add_argument("--cores", type=int)
     s.add_argument("--memory", type=int, metavar="MB")
     s.add_argument("--disk", type=int, metavar="GB", help="grow the disk to this size")

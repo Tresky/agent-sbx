@@ -1,5 +1,7 @@
-"""`sbx git-token`: one git token per project, stored in the secret store
-(secretstore.py: the macOS keychain, or files off macOS) and named from the project's bindings file.
+"""`sbx git-token`: one git token per project, or a NAMED token that belongs to
+no project, for a sandbox that spans several repositories. Either way it is
+stored in the secret store (secretstore.py: the macOS keychain, or files off
+macOS) and named from a bindings file.
 
 The token never appears on a command line of this tool, except in the one
 `security add-generic-password` call that stores it: that program takes the
@@ -38,6 +40,27 @@ def repo_path(url: str) -> tuple[str, str] | None:
 
 def keychain_service(project: str) -> str:
     return f"sbx-git-{project}"
+
+
+# A named token's name becomes a keychain service, a file name and a Proxmox
+# tag, so it takes what all three accept, and no path separator.
+_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
+
+
+def check_name(name: str) -> str:
+    if not _NAME_RE.fullmatch(name):
+        raise InputError(f"{name!r} is not a token name: use lowercase letters, digits, '.', '_' and '-', "
+                         "and start with a letter or a digit")
+    return name
+
+
+def repo_url(spec: str, host: str) -> str:
+    """A git URL from `owner/repo` on this host, or from a git URL as it is."""
+    if repo_path(spec):
+        return spec
+    if re.fullmatch(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+", spec):
+        return f"https://{host}/{spec}"
+    raise InputError(f"{spec!r} is not a repository: use owner/repo, or a git URL")
 
 
 def is_gitlab(host: str) -> bool:

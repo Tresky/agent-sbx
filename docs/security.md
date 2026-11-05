@@ -95,8 +95,11 @@ the sandbox cannot change the tag, so the sidecar cannot be routed around.
 
 The sidecar holds what the sandbox must not:
 
-- **The real credentials.** The project's git token, and the Claude token
-  (unless `sidecar_claude = "direct"`). The sandbox gets one
+- **The real credentials.** The git tokens (the project's, and any named ones
+  that you give the sandbox), and the Claude token
+  (unless `sidecar_claude = "direct"`). An agent can use every repository that
+  any of those git tokens covers, and a token goes only to its own host. The
+  sandbox gets one
   placeholder, made for it alone, which works only against its own sidecar,
   and which a leak makes useless anywhere else. The sidecar swaps it for the
   real token on each call, and logs the call.

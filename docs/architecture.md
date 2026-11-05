@@ -179,6 +179,30 @@ sequenceDiagram
     Note over p,gh: The real token lives only in the sidecar.<br/>Claude calls work the same way:<br/>placeholder in → real bearer token out.
 ```
 
+**Several git tokens in one sidecar.** A named token is one line of
+`/etc/sbx/sidecar/tokens`, and git in the VM reaches it through
+`http://<sidecar>:8080/git/<host>/`. The mechanism is in `handle_git`
+(`sidecar/sidecar.py`):
+
+- A `GET .../info/refs` has no body, so the proxy can send it more than once. It
+  tries each token for that host, then no token, until the answer is not a 401,
+  403 or 404. A token goes only to the host that it is for, and a host with no
+  token gets a 403 and no upstream call, so the proxy is not a way out.
+- The `POST` that follows has a streamed body, so the proxy sends it once, with
+  the token that worked. It remembers that token by host, repository and git
+  service, in memory. The key has the service because a token that can read may
+  be unable to push.
+- A final 401 from the host reaches git as a 403. git deletes a credential that
+  gets a 401, here the placeholder in `~/.git-credentials`, and every later git
+  command would then fail. The proxy's own 401, for a missing placeholder, stays
+  a 401: git needs it, to send the placeholder at all. `RealGitTest` in
+  `tests/test_sidecar.py` proves this with the real git program.
+
+`sbx git-token --push` and `sbx new --git` copy this checkout's sidecar scripts
+first (`_refresh_sidecar_files`), so a sidecar from an older template works
+with no template build. A sidecar of `sbx new --project` keeps `/github/` until
+it gets a named token.
+
 **Why the sidecar is a VM, not a container.** A container would need a shell
 on the host to provision it (`pct exec`), which the token does not have. A VM
 gets its SSH key through cloud-init from the token, the guest agent reports

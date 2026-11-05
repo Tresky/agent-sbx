@@ -32,6 +32,12 @@ from .run import Runner
 # have. Proxmox starts the gateway first (order 1, host/20-gw-create.sh), then
 # the unordered guests by id; the resume in the sandbox waits for the network.
 AUTOSTART_TAG = "sbx-autostart"
+GIT_TOKEN_TAG = "sbx-git-"
+
+
+def git_token_tag(name: str) -> str:
+    """Tags are lower-case and take only [a-z0-9_.+-], so the name is folded."""
+    return GIT_TOKEN_TAG + re.sub(r"[^a-z0-9_.+-]", "-", name.lower())
 
 _TOKEN_RE = re.compile(r"^[^@\s]+@[^!\s]+![^=\s]+=[0-9a-fA-F-]{36}$")
 TASK_TIMEOUT = 900.0
@@ -145,6 +151,11 @@ class Sandbox:
             if tag.startswith("sbx-proj-"):
                 return tag[9:]
         return ""
+
+    @property
+    def git_tokens(self) -> list[str]:
+        """The named git tokens that this sandbox holds. `sbx fork` reads them."""
+        return [tag[len(GIT_TOKEN_TAG):] for tag in self.tags if tag.startswith(GIT_TOKEN_TAG)]
 
     @property
     def template(self) -> str:
@@ -273,6 +284,13 @@ class Pve:
             tags.append(f"sbx-exp-{expires:%Y%m%d}")
         self.api("PUT", self._vm(box.node, box.vmid, "/config"), {"tags": ";".join(tags)})
 
+    def set_git_token(self, box: Sandbox, name: str, on: bool = True) -> None:
+        """Record that the sandbox holds this named git token, or no longer
+        does. The other tags stay."""
+        tag = git_token_tag(name)
+        tags = [t for t in box.tags if t != tag] + ([tag] if on else [])
+        self.api("PUT", self._vm(box.node, box.vmid, "/config"), {"tags": ";".join(tags)})
+
     def set_autostart(self, box: Sandbox, on: bool) -> None:
         """Start at boot, or not, for the sandbox and its sidecar: config only,
         which a running VM takes without a restart. The tag lets `sbx list`
@@ -337,7 +355,7 @@ class Pve:
     # --- lifecycle ---
     def create(self, template: TemplateVm, vmid: int, hostname: str, profile: str, pubkey: str, *,
                cores: int, memory_mb: int, disk_gb: int | None, expires: dt.date | None,
-               project: str = "", vlan: int | None = None, ipconfig: str = "ip=dhcp",
+               project: str = "", git_tokens=(), vlan: int | None = None, ipconfig: str = "ip=dhcp",
                nameserver: str = "", searchdomain: str = "") -> str:
         """Returns the node the sandbox lives on. With `vlan`, the NIC carries
         that tag: the sandbox then shares a segment with its sidecar only."""
@@ -350,6 +368,7 @@ class Pve:
         tags = ["sbx", f"sbx-{profile}", f"sbx-tpl-{template.name}"] + ([f"sbx-exp-{expires:%Y%m%d}"] if expires else [])
         if project:
             tags.append(projects.tag(project))
+        tags += [git_token_tag(name) for name in git_tokens]
         params = {
             # The bridge IS the profile: the gateway's rules key on the
             # interface, and a root user in the VM cannot move it. The tag,

@@ -214,6 +214,9 @@ myapp` installs it there too.
 Without a `[git]` section, sbx uses `git_token_command` in `config.toml`. Without
 that, an agent sandbox can clone public repositories only.
 
+For work with no main repository, a sandbox needs no project:
+[a sandbox for several repositories](usage.md#a-sandbox-for-several-repositories).
+
 ### A GitHub token
 
 **Settings**, **Developer settings**, **Fine-grained tokens**. Under

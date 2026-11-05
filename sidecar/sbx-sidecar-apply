@@ -8,7 +8,13 @@
 #   sbx-sidecar-apply                 apply the env file
 #   sbx-sidecar-apply --claude-token  read a new Claude token from stdin (one line;
 #                                     empty removes it), write it, restart the service
-#   sbx-sidecar-apply --git-token     the same, for the git token
+#   sbx-sidecar-apply --git-token     the same, for the git token of the sandbox's project
+#   sbx-sidecar-apply --git-add <name> <host> <user>
+#                                     read one more git token from stdin (one line),
+#                                     keep it under this name, restart the service
+#   sbx-sidecar-apply --git-drop <name>
+#                                     forget that token, restart the service
+#   sbx-sidecar-apply --git-hosts     print the hosts that the sandbox has a token for
 #   sbx-sidecar-apply --tunnel-token  read the Cloudflare tunnel's connector token from
 #                                     stdin (one line; empty stops the tunnel and removes it)
 set -euo pipefail
@@ -35,6 +41,47 @@ if [[ "${1:-}" == "--claude-token" || "${1:-}" == "--git-token" ]]; then
   mv "$DIR/tokens.new" "$DIR/tokens"
   systemctl restart sbx-sidecar
   if [[ -n "$token" ]]; then echo "$label token updated"; else echo "$label token removed"; fi
+  exit 0
+fi
+
+if [[ "${1:-}" == "--git-add" ]]; then
+  name="${2:-}" host="${3:-}" user="${4:-}"
+  # Each value becomes part of one line of the tokens file.
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "ERROR: not a token name: $name" >&2; exit 1; }
+  [[ "$host" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || { echo "ERROR: not a git host: $host" >&2; exit 1; }
+  [[ "$user" =~ ^[A-Za-z0-9._@+-]+$ ]] || { echo "ERROR: not a user name: $user" >&2; exit 1; }
+  IFS= read -r token || token=""
+  [[ -n "$token" && ! "$token" =~ [[:space:]] ]] || { echo "ERROR: the token is empty or has whitespace in it" >&2; exit 1; }
+  umask 077
+  { awk -v p="git.$name=" 'index($0, p) != 1' "$DIR/tokens" 2>/dev/null || true
+    printf 'git.%s=https://%s %s %s\n' "$name" "$host" "$user" "$token"; } > "$DIR/tokens.new"
+  mv "$DIR/tokens.new" "$DIR/tokens"
+  systemctl restart sbx-sidecar
+  echo "git token $name added, for $host"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--git-drop" ]]; then
+  name="${2:-}"
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "ERROR: not a token name: $name" >&2; exit 1; }
+  umask 077
+  awk -v p="git.$name=" 'index($0, p) != 1' "$DIR/tokens" > "$DIR/tokens.new" 2>/dev/null || true
+  if cmp -s "$DIR/tokens.new" "$DIR/tokens"; then
+    rm -f "$DIR/tokens.new"
+    echo "this sandbox has no git token $name"
+    exit 0
+  fi
+  mv "$DIR/tokens.new" "$DIR/tokens"
+  systemctl restart sbx-sidecar
+  echo "git token $name removed"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--git-hosts" ]]; then
+  # The field before the token only: this output holds no token.
+  { if grep -q '^github=.' "$DIR/tokens" 2>/dev/null; then echo "${SBX_GIT_UPSTREAM#*://}"; fi
+    awk '/^git\./ { sub(/^[^=]*=/, ""); sub(/^[a-z]+:\/\//, ""); print $1 }' "$DIR/tokens" 2>/dev/null || true
+  } | sort -u
   exit 0
 fi
 
