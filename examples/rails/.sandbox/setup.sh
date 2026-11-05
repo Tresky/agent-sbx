@@ -6,7 +6,7 @@
 # The recipe is safe to run again in the same sandbox:
 #   ssh sbx-<name> sbx-recipe-run code/<app> .sandbox/setup.sh .env.local
 #
-# No `set -u`: the rvm and nvm shell functions read unset variables.
+# No `set -u`: the nvm shell function reads unset variables.
 set -eo pipefail
 
 step() { printf '\n==> %s\n' "$*"; }
@@ -17,36 +17,15 @@ tool_version() { [[ -f .tool-versions ]] && awk -v t="$1" '$1 == t {print $2; ex
 trim() { tr -d '[:space:]' < "$1"; }
 
 step "ruby"
-ruby_version=""
-if [[ -f .ruby-version ]]; then
-  ruby_version="$(trim .ruby-version)"
-elif [[ -n "$(tool_version ruby)" ]]; then
-  ruby_version="$(tool_version ruby)"
-elif [[ -f Gemfile.lock ]]; then
+# mise reads .ruby-version, .tool-versions and mise.toml, in this recipe and in
+# every later shell. It does not read Gemfile.lock, so a project that names its
+# Ruby only there sets the version for this recipe.
+if [[ ! -f .ruby-version && -z "$(tool_version ruby)" && ! -f mise.toml && ! -f .mise.toml && -f Gemfile.lock ]]; then
   # RUBY VERSION / "   ruby 3.4.1p0"
-  ruby_version="$(awk '/^RUBY VERSION/ {getline; print $2; exit}' Gemfile.lock | sed 's/p[0-9]*$//')"
+  lock_ruby="$(awk '/^RUBY VERSION/ {getline; print $2; exit}' Gemfile.lock | sed 's/p[0-9]*$//')"
+  if [[ -n "$lock_ruby" ]]; then export MISE_RUBY_VERSION="$lock_ruby"; fi
 fi
-ruby_version="${ruby_version#ruby-}"
-if [[ -n "$ruby_version" ]]; then
-  if [[ ! "$ruby_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    # rvm stable knows no Ruby newer than 2021, so it cannot complete a partial
-    # "3.4". Take the newest match that the template caches.
-    match="$(rvm list strings | grep -E "^ruby-${ruby_version//./\\.}\\." | sort -V | tail -1 || true)"
-    if [[ -z "$match" ]]; then
-      echo "ruby '$ruby_version' is not a full version, and the template has no match." >&2
-      echo "Write a full version such as 3.4.1 to .ruby-version." >&2
-      exit 1
-    fi
-    ruby_version="${match#ruby-}"
-  fi
-  rvm install "$ruby_version"   # no operation when the template has it
-  if [[ -f .ruby-gemset ]]; then
-    # rvm's cd hook selects the gemset in every later shell, so the gems must go there.
-    rvm use "$ruby_version@$(trim .ruby-gemset)" --create
-  else
-    rvm use "$ruby_version"
-  fi
-fi
+mise install ruby   # no operation when the template has it
 ruby --version
 
 step "gems"

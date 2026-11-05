@@ -218,17 +218,17 @@ component as `SBX_RUBY_VERSIONS`.
 |---|---|---|---|
 | `[node]` | `versions` | `["lts/*"]` | the Node versions (nvm); the first is the default. Every template has Node. |
 | `[docker]` | `images` | `[]` | the Docker images to pull. Every template has Docker. |
-| `[ruby]` | `versions` | `["3.4.10"]` | the Rubies (rvm), full versions only; the first is the default |
+| `[ruby]` | `versions` | `["3.4.10"]` | the Rubies (mise); the first is the default |
 | `[go]` | `version` | `1.27.1` | the Go version |
 | `[rust]` | `toolchains` | `["stable"]` | the rustup toolchains; the first is the default |
 | `[rust]` | `components` | `"clippy rustfmt"` | more rustup components |
 | `[python]` | `versions` | `["3.13"]` | the Pythons that uv caches |
 | `[android]` | `platform`, `build_tools`, `emulator`, `image` | `35`, `35.0.0`, `false`, `google_apis;x86_64` | the SDK platform and build tools; the emulator, its system image and a `Medium_Phone` device |
 | `[postgres]` | `version`, `postgis` | `18`, `true` | the PostgreSQL major version from apt.postgresql.org, and whether PostGIS 3 comes with it |
-| `[mise]` | `tools` | `[]` | what `mise use --global` installs in the template, such as `["ruby@3.4.10", "node@24"]` |
+| `[mise]` | `tools` | `[]` | what `mise use --global` installs in the template, such as `["python@3.13", "node@24"]` |
 | `[odin]` | `version`, `wgpu_version`, `premake_version` | see `template/components/odin.sh` | the Odin, wgpu-native and premake releases |
 
-`rails`, `gis`, `media` and `sidecar` take no settings. `rails` needs `ruby` before it in the list.
+`rails`, `gis`, `media` and `sidecar` take no settings. `ruby` needs `mise` before it in the list, and `rails` needs `ruby`.
 
 ### Project bindings (`~/.config/sbx/bindings/<project>.toml`)
 

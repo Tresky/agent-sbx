@@ -6,7 +6,7 @@ their settings:
 
     # templates/rails.toml
     description = "Ruby on Rails"
-    components  = ["ruby", "rails"]
+    components  = ["mise", "ruby", "rails"]
     [ruby]
     versions = ["3.4.1"]
     [docker]

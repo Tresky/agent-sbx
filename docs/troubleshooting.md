@@ -34,7 +34,7 @@ The tables below list the problems that `sbx doctor` does not explain.
 | `more than one template is built` | `sbx new` cannot choose | pass `--template`, set `[recipe] template` in the project, or set `default_template` in `config.toml` |
 | `sbx doctor` says a template is older than its definition | the definition or a component changed after the build | `sbx template rebuild <name>`, when convenient; the old template still works |
 | `sbx doctor` says a template is from before named templates | the setup predates named templates | `sbx template adopt <vmid> default` |
-| `rvm install 3.4` fails | rvm cannot complete a partial Ruby version | write full versions, for example `3.4.1` |
+| `component 'ruby' needs mise before it in the list` | a definition lists `ruby` without `mise` | add `mise` before `ruby` in `components` |
 | `'<key>' is a shared setting` | `config.toml` sets a value that `host/local.conf` owns | move the value to `host/local.conf`, and remove it from `config.toml` |
 
 ## Names and the network
@@ -74,8 +74,10 @@ The tables below list the problems that `sbx doctor` does not explain.
 |---|---|---|
 | the recipe failed | see the log | `sbx ssh <name> -- tail -n 50 .local/state/sbx/recipe.log` |
 | you fixed the recipe and want to run it again | | `ssh sbx-<name> sbx-recipe-run code/<project> .sandbox/setup.sh <env-file>` |
-| `Could not find rails-...` after a green `bundle install` | the project has `.ruby-gemset`, and the gems went to another gemset | `rvm use <version>@<gemset> --create` before `bundle install` |
-| a recipe dies on an unset variable | `set -u` breaks rvm and nvm | remove `-u` from the recipe's `set` line |
+| `rvm: command not found` in a recipe | the `ruby` component now uses mise, and the recipe still calls `rvm` | replace `rvm install` and `rvm use` with `mise install ruby` |
+| `mise: command not found` in a recipe | the template was built when the `ruby` component used rvm | `sbx template rebuild <name>` |
+| `Config files in ... are not trusted` | a project outside `~/code` has a `mise.toml` with `[env]`, a template or a hook | `mise trust <file>`, or move the project under `~/code` |
+| a recipe dies on an unset variable | `set -u` breaks nvm | remove `-u` from the recipe's `set` line |
 | a second run of the recipe fails | a step is not safe to repeat | see "Write a recipe that can run again" in [projects.md](projects.md) |
 
 ## Ports and HTTPS

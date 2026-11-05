@@ -275,6 +275,11 @@ Mac trusts.
   snapshots with the VM.
 - **The internet is open.** An agent can send data anywhere on the internet.
   sbx protects your network, not your data from exfiltration.
+- **mise's trust.** A template with mise trusts each `mise.toml` under `~/code`,
+  so that file can run commands when a shim of that project runs. Do not clone
+  a repository that you do not trust into `~/code` of a personal sandbox. In an
+  agent sandbox this gives nothing new: the agent already runs what it wants as
+  the same user.
 
 ## How to check your setup
 

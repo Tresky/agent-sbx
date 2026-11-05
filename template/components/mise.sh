@@ -19,6 +19,11 @@ as_user 'mise --version'
 # The shims directory exists from the start: a shell puts it on its PATH only
 # if it exists, and the first tool of a sandbox would otherwise need a new shell.
 as_user 'mkdir -p ~/.local/share/mise/shims'
+# A shim has no terminal in which to ask for trust. A mise.toml with [env], a
+# template or a hook would stop the shims in that project with "not trusted"; a
+# file with [tools] only needs no trust. The sandbox runs the project's recipe
+# anyway, so this trust gives the project nothing more.
+as_user 'mise settings add trusted_config_paths "$HOME/code"'
 for tool in $SBX_MISE_TOOLS; do
   as_user "mise use --global --yes '$tool'"
 done

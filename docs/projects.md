@@ -51,7 +51,7 @@ flowchart LR
 
 A project picks its template in the manifest (`[recipe] template = "rails"`).
 The template caches the Ruby and Node versions and the Docker images of its
-projects. The recipe still asks for its own versions (`rvm install`,
+projects. The recipe still asks for its own versions (`mise install ruby`,
 `nvm install`); a version that the template caches costs nothing, and any
 other version costs a compile or a download at recipe time. `sbx versions`
 shows what the projects need and what each template caches.
@@ -61,8 +61,8 @@ shows what the projects need and what each template caches.
 
 - `sbx-recipe-run` starts the recipe with `bash`, from the project directory.
 - The shell has `node`, `docker` and the `nvm` function in every template. It
-  also has the tools of its template's components: `ruby` and the `rvm`
-  function with `ruby`, `go` with `go`, `cargo` with `rust`, and so on.
+  also has the tools of its template's components: `ruby` and `mise` with
+  `ruby`, `go` with `go`, `cargo` with `rust`, and so on.
 - The `env` inputs are exported for the recipe. They are also in the file that
   `env_file` names.
 - Three variables come from sbx itself, first in that file:
@@ -80,13 +80,13 @@ ssh sbx-<name> sbx-recipe-run code/<project> .sandbox/setup.sh <env_file>
 
 ### Rules for a recipe
 
-- **Do not use `set -u`.** The `rvm` and `nvm` functions read unset variables.
+- **Do not use `set -u`.** The `nvm` function reads unset variables.
 - **Take every URL that your Mac follows from `SBX_FQDN`:** a callback, an OIDC
   issuer, a CORS origin. In the sandbox, `hostname -f` answers with the short
   name only.
-- **With `.ruby-gemset`, run `rvm use <version>@<gemset> --create` before
-  `bundle install`.** rvm's `cd` hook selects that gemset in every later
-  shell, so gems in another gemset are invisible to `bin/rails`.
+- **Do not depend on `.ruby-gemset`.** mise ignores the file. The gems go in
+  the Ruby's own directory, and Bundler picks their versions from
+  `Gemfile.lock`.
 - **Do not edit the project's `.env` for the sandbox's ports.** Write
   `.env.development.local`; dotenv-rails reads it first.
 - **Bind dev servers to `127.0.0.1`.** The sandbox then serves them with
@@ -105,7 +105,7 @@ safe to repeat:
   the file is missing, even when it is empty and git-ignored.
 - Start a container only when it is not there already: `docker start` an
   existing one.
-- `rvm install` of a version that exists is a no-op.
+- `mise install ruby` of a version that exists is a no-op.
 
 ## The manifest
 

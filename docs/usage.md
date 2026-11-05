@@ -303,9 +303,11 @@ application with the hostname, so a bypass never outlives its preview.
 - Rails and Vite accept the sandbox's name as a `Host` header with no change
   in the project. A preview's hostname needs the step in
   [Previews](#previews).
-- A template may have mise (the `debian` template does): a project's
-  `.tool-versions` or `mise.toml` picks its versions, and `mise install`
-  fetches them.
+- A template with the `ruby` component has mise, and so does `debian`. A
+  project's `.ruby-version`, `.tool-versions` or `mise.toml` picks its versions.
+  `mise install ruby` fetches the Ruby only. `mise install` with no name fetches
+  every tool of the project, and their shims come before nvm's Node and the
+  template's Go on the PATH.
 
 ### herdr
 

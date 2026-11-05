@@ -35,9 +35,9 @@ log "markers in /var/lib/sbx"
 guest 'ls -la /var/lib/sbx/'
 log "longest-running processes"
 guest "ps -eo pid,etime,args --sort=-etime | grep -v '\\[' | head -20"
-log "network from inside the guest: the download that the rvm installer makes"
-guest 'sudo -u dev -H curl -sS --fail -L -o /dev/null -w "%{http_code} %{size_download} bytes from %{url_effective}\n" https://github.com/rvm/rvm/archive/1.29.12.tar.gz'
-log "rvm state for the user dev"
-guest 'ls -d /home/dev/.rvm 2>&1; sudo -u dev -H gpg --list-keys --with-colons 2>/dev/null | grep -c "^pub" | sed "s/^/gpg keys imported: /"'
+log "network from inside the guest: the releases that mise downloads a Ruby from"
+guest 'sudo -u dev -H curl -sS --fail -L -o /dev/null -w "%{http_code} %{size_download} bytes from %{url_effective}\n" https://github.com/jdx/ruby/releases'
+log "mise state for the user dev"
+guest 'sudo -u dev -H zsh -c "mise --version; mise ls" 2>&1'
 log "cloud-init"
 guest 'cloud-init status --long 2>&1 | head -5'
