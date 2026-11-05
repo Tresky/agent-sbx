@@ -2,6 +2,7 @@
 """A stand-in for api.anthropic.com and api.github.com: answers every request
 with the path and the credential headers it received, so a test can see which
 token arrived. Usage: sidecar_fake_api.py <bind-address> <port>"""
+import base64
 import http.server
 import json
 import socketserver
@@ -18,6 +19,13 @@ class Echo(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         if length:
             self.rfile.read(length)
+        # A repository that only one token reaches, for the proxy's choice of token.
+        wanted = "Basic " + base64.b64encode(b"x-access-token:ghp_NAMED_A").decode()
+        if self.path.startswith("/only-named/") and self.headers.get("Authorization") != wanted:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         data = json.dumps({"path": self.path, "authorization": self.headers.get("Authorization", ""),
                            "x-api-key": self.headers.get("x-api-key", "")}).encode()
         self.send_response(200)

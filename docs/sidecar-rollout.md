@@ -141,7 +141,7 @@ In the order they were discussed, none started:
   genericcloud (git, Docker, Node, agent-browser with Playwright's libraries,
   Claude Code, herdr, mise; a headless browser and a mise Python ran in a
   sandbox of it, which used 3.3 GB of disk against 5.7 GB for `minimal`).
-  Next: mise in place of `ruby`, `go`, `rust`, `python` and the rvm/nvm
+  Next: mise in place of `go`, `rust`, `python` and the nvm
   shell setup, then a smaller core.
 - **Uploads through the proxy.** The proxy buffers whole requests; a
   `git push` with a chunked body needs streaming.

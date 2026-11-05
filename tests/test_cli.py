@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from sbxlib import cli, names
+from sbxlib import cli, gittoken, names
 from sbxlib.config import ConfigError, load, parse_env_file
 from sbxlib.pve import PveError
 from sbxlib.run import Result, Runner
@@ -94,6 +94,8 @@ class NewTest(unittest.TestCase):
 
         self.agent_keys = 0  # ssh-add -l exit code: 0 = keys present
         self.more_resources = []  # more built templates, for the template choice
+        self.keychain = {}  # service -> value, for what a test stores
+        self.clone_fails = set()  # the repositories whose clone fails in the VM
         self.patches = [mock.patch.dict(os.environ, {"SBX_CONFIG_DIR": str(home)}),
                         mock.patch("sbxlib.cli.resolves", return_value=True),
                         mock.patch("sbxlib.cli.dns_has", return_value=True),
@@ -118,6 +120,10 @@ class NewTest(unittest.TestCase):
             if args[0] == "git" and args[1] == "-C":  # real git for the local checkout
                 done = subprocess.run(args, capture_output=True)
                 return Result(done.returncode, done.stdout.decode(), done.stderr.decode())
+            if args[:2] == ["security", "find-generic-password"] and args[args.index("-s") + 1] in self.keychain:
+                return Result(0, self.keychain[args[args.index("-s") + 1]] + "\n")
+            if args[0] == "ssh" and "git clone" in args[-1] and any(f"code/{n}" in args[-1] for n in self.clone_fails):
+                return Result(128, "", "fatal: unable to access: The requested URL returned error: 403")
             if args[0] == "ssh" and "-T" in args:  # the GitHub probe with the agent alone
                 return Result(1, "", "Hi me! You've successfully authenticated, but GitHub does not provide shell access.")
             if args[0] == "ssh-add":
@@ -268,6 +274,94 @@ class NewTest(unittest.TestCase):
         self.assertFalse([e for e in events if e[0] == "cmd" and "dev@10.79.0.2" in e[1]])
         self.assertTrue(all("dev@10.77.0.57" not in e[1] or "-p 2222" in e[1] for e in events if e[0] == "cmd"),
                         "the address on the sidecar network is the sidecar's, on its own port")
+
+    def named_token(self, name="work", host="github.com"):
+        self.keychain[f"sbx-git-{name}"] = "github_pat_named"
+        bindings = self.tmp / "cfg" / "bindings"
+        bindings.mkdir(exist_ok=True)
+        gittoken.write_binding(bindings / f"{name}.toml", name, host, "x-access-token")
+
+    def test_git_gives_a_plain_sandbox_its_tokens_through_the_sidecar(self):
+        self.named_token("work")
+        self.named_token("other", "gitlab.com")
+        code, events, payloads = self.run_new("lab", "--git", "work", "--git", "other")
+        self.assertEqual(code, 0)
+        # The real tokens: on stdin, one --git-add each, and in no argv.
+        self.assertFalse([e for e in events if "github_pat_named" in " ".join(map(str, e))])
+        self.assertEqual(payloads.count(b"github_pat_named\n"), 2)
+        adds = [e[1] for e in events if e[0] == "cmd" and "--git-add" in e[1]]
+        self.assertIn("--git-add work github.com x-access-token", adds[0])
+        self.assertIn("--git-add other gitlab.com x-access-token", adds[1])
+        self.assertTrue(all("-p 2222" in a for a in adds))
+        # A sidecar from an older template gets the scripts that know --git-add.
+        script = next(i for i, e in enumerate(events) if e[0] == "cmd" and "/usr/local/lib/sbx/sidecar.py" in e[1])
+        self.assertLess(script, next(i for i, e in enumerate(events) if e[0] == "cmd" and "--git-add" in e[1]))
+        # The VM: the placeholder, and every kind of remote through the proxy.
+        creds = next(p for p in payloads if p and p.startswith(b"http://sbx:"))
+        self.assertNotIn(b"github_pat_named", creds)
+        rewrite = next(e[1] for e in events if e[0] == "cmd" and "insteadOf" in e[1])
+        self.assertIn("dev@sbx-lab.sbx.internal", rewrite)
+        for host in ("github.com", "gitlab.com"):
+            for remote in (f"https://{host}/", f"git@{host}:", f"ssh://git@{host}/"):
+                self.assertIn(f"url.http://10.79.0.1:8080/git/{host}/.insteadOf {remote}", rewrite)
+        # The wiring comes before the snapshot, so a rollback keeps it.
+        snapshot = next(i for i, e in enumerate(events) if e[0] == "api" and e[2].endswith("/qemu/9101/snapshot"))
+        self.assertLess(next(i for i, e in enumerate(events) if e[0] == "cmd" and "insteadOf" in e[1]), snapshot)
+        params = events[self.pos(events, "api", "PUT", "/nodes/pve/qemu/9101/config")][3]
+        self.assertIn("sbx-git-work", params["tags"].split(";"))
+        self.assertIn("sbx-git-other", params["tags"].split(";"))
+
+    def test_a_plain_sandbox_with_no_token_keeps_git_as_it_was(self):
+        code, events, _ = self.run_new("lab")
+        self.assertEqual(code, 0)
+        self.assertFalse([e for e in events if e[0] == "cmd" and ("insteadOf" in e[1] or "--git-add" in e[1])])
+        params = events[self.pos(events, "api", "PUT", "/nodes/pve/qemu/9101/config")][3]
+        self.assertNotIn("sbx-git-", params["tags"])
+
+    def test_git_with_no_such_token_makes_no_vm(self):
+        code, events, _ = self.run_new("lab", "--git", "work")
+        self.assertEqual(code, 1)
+        self.assertFalse([e for e in events if e[0] == "api"], "the host was contacted for a token that does not exist")
+
+    def test_git_with_a_project_makes_no_vm(self):
+        self.named_token()
+        code, events, _ = self.run_new("myapp", "--project", str(self.app), "--with", "key", "--git", "work")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.clones(events), [])
+
+    def test_git_in_a_personal_sandbox_installs_the_token(self):
+        self.named_token()
+        code, events, payloads = self.run_new("lab", "--profile", "personal", "--no-remote-control", "--git", "work")
+        self.assertEqual(code, 0)
+        self.assertIn(b"https://x-access-token:github_pat_named@github.com\n", payloads)
+
+    def test_two_tokens_with_no_sidecar_make_no_vm(self):
+        self.named_token("work")
+        self.named_token("other")
+        code, events, _ = self.run_new("lab", "--profile", "personal", "--no-remote-control",
+                                       "--git", "work", "--git", "other")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.clones(events), [])
+
+    def test_repo_clones_each_one_before_the_snapshot(self):
+        code, events, _ = self.run_new("lab", "--repo", "me/api", "--repo", "git@github.com:me/web.git")
+        self.assertEqual(code, 0)
+        clones = [i for i, e in enumerate(events) if e[0] == "cmd" and "git clone" in e[1]]
+        self.assertEqual(len(clones), 2)
+        snapshot = next(i for i, e in enumerate(events) if e[0] == "api" and e[2].endswith("/qemu/9101/snapshot"))
+        self.assertLess(clones[-1], snapshot, "a rollback keeps what was cloned")
+
+    def test_a_clone_that_fails_still_makes_the_sandbox(self):
+        self.clone_fails = {"web"}
+        code, events, _ = self.run_new("lab", "--repo", "me/web", "--repo", "me/api")
+        self.assertEqual(code, 0)
+        self.assertEqual(len([e for e in events if e[0] == "cmd" and "git clone" in e[1]]), 2)
+        self.assertTrue([e for e in events if e[0] == "api" and e[2].endswith("/qemu/9101/snapshot")])
+
+    def test_a_repo_that_is_not_a_repo_makes_no_vm(self):
+        code, events, _ = self.run_new("lab", "--repo", "no-such-registered-name")
+        self.assertEqual(code, 1)
+        self.assertFalse([e for e in events if e[0] == "api"])
 
     def test_no_sidecar_is_the_old_flow(self):
         Path(os.environ["SBX_CONFIG_DIR"], "config.toml").write_text("agent_sidecar = false\n")

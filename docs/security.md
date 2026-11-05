@@ -95,8 +95,11 @@ the sandbox cannot change the tag, so the sidecar cannot be routed around.
 
 The sidecar holds what the sandbox must not:
 
-- **The real credentials.** The project's git token, and the Claude token
-  (unless `sidecar_claude = "direct"`). The sandbox gets one
+- **The real credentials.** The git tokens (the project's, and any named ones
+  that you give the sandbox), and the Claude token
+  (unless `sidecar_claude = "direct"`). An agent can use every repository that
+  any of those git tokens covers, and a token goes only to its own host. The
+  sandbox gets one
   placeholder, made for it alone, which works only against its own sidecar,
   and which a leak makes useless anywhere else. The sidecar swaps it for the
   real token on each call, and logs the call.
@@ -272,6 +275,11 @@ Mac trusts.
   snapshots with the VM.
 - **The internet is open.** An agent can send data anywhere on the internet.
   sbx protects your network, not your data from exfiltration.
+- **mise's trust.** A template with mise trusts each `mise.toml` under `~/code`,
+  so that file can run commands when a shim of that project runs. Do not clone
+  a repository that you do not trust into `~/code` of a personal sandbox. In an
+  agent sandbox this gives nothing new: the agent already runs what it wants as
+  the same user.
 
 ## How to check your setup
 

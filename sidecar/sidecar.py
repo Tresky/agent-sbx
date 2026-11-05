@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import collections
 import http.client
 import http.server
 import json
@@ -47,6 +48,10 @@ RESERVED = {2222, 8081}
 OAUTH_BETA = "oauth-2025-04-20"
 NFT_SET = ("ip", "sbx_sidecar_nat", "approved")
 CHUNK = 64 * 1024  # the proxy streams in pieces of this size; it never holds a whole body
+# What a git host answers when this credential does not reach this repository.
+# The proxy then tries the sandbox's next token.
+REFUSED = {401, 403, 404}
+GitToken = collections.namedtuple("GitToken", "name upstream user token")
 
 
 def log(msg: str) -> None:
@@ -60,18 +65,70 @@ class Config:
         # `github` is the git token for whatever host --github-upstream names
         # (GitHub, GitLab, ...); `git_user` is the user name sent with it.
         self.tokens = {"claude": "", "github": "", "git_user": ""}
+        # `git.<name>=<upstream> <user> <token>`: more git tokens, by name. One
+        # sandbox can hold several, for one host or for several.
+        self.named_git: list[GitToken] = []
         for line in open(args.tokens_file):
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, _, v = line.partition("=")
-                self.tokens[k.strip()] = v.strip()
+                k = k.strip()
+                if k.startswith("git."):
+                    parts = v.split()
+                    if len(parts) == 3:
+                        self.named_git.append(GitToken(k[4:], *parts))
+                    else:  # the name only: never the value
+                        log(f"tokens: {k} is not <upstream> <user> <token>; ignored")
+                else:
+                    self.tokens[k] = v.strip()
         self.claude_upstream, self.github_upstream = args.claude_upstream, args.github_upstream
+        # (host, repository, git service) -> the token that worked for it.
+        self.git_choices: dict[tuple[str, str, str], GitToken | None] = {}
         self.net_expose_port = args.net_expose_port
         if not self.secret:
             raise SystemExit("the secret file is empty")
 
+    def git_tokens_for(self, host: str) -> list[GitToken]:
+        """Every token for this host, in the order to try them. A token never
+        goes to another host."""
+        out = [t for t in self.named_git if netloc(t.upstream) == host]
+        if self.tokens["github"] and netloc(self.github_upstream) == host:
+            out.insert(0, GitToken("project", self.github_upstream, self.tokens["git_user"], self.tokens["github"]))
+        return out
+
+    def remember_git(self, key: tuple[str, str, str], token: GitToken | None) -> None:
+        if len(self.git_choices) >= 4096:  # one sandbox's repositories; a bound, not a cache policy
+            self.git_choices.clear()
+        self.git_choices[key] = token
+
+    def chosen_git(self, host: str, repo: str, service: str) -> GitToken | None:
+        """The token for a request that cannot be tried twice: its body streams
+        once. git always asks for /info/refs first, which finds the token."""
+        for svc in [service] if service else ["git-receive-pack", "git-upload-pack"]:
+            if (host, repo, svc) in self.git_choices:
+                return self.git_choices[(host, repo, svc)]
+        tokens = self.git_tokens_for(host)
+        return tokens[0] if tokens else None
+
 
 CFG: Config
+
+
+def netloc(upstream: str) -> str:
+    return urllib.parse.urlsplit(upstream).netloc
+
+
+def git_request(command: str, path: str) -> tuple[str, str, bool]:
+    """(the repository, the git service, whether each token may be tried).
+    Only git's first request qualifies: a GET has no body to send twice."""
+    plain, _, query = path.partition("?")
+    for tail in ("/git-upload-pack", "/git-receive-pack"):
+        if plain.endswith(tail):
+            return plain[:-len(tail)].removesuffix(".git"), tail[1:], False
+    if plain.endswith("/info/refs"):
+        service = urllib.parse.parse_qs(query).get("service", [""])[0]
+        return plain[:-len("/info/refs")].removesuffix(".git"), service, command == "GET"
+    return plain.split(".git/", 1)[0], "", False
 
 
 def presented_secret(handler: http.server.BaseHTTPRequestHandler) -> bool:
@@ -161,7 +218,9 @@ def local_location(location: str, upstream: str, prefix: str) -> str:
 
 class Proxy(Quiet):
     """<wire>:8080. Every request carries the placeholder; the upstream gets
-    the real token. /github/<path> goes to the git host, the rest to Claude."""
+    the real token. /git/<host>/<path> goes to that git host, if the sandbox has
+    a token for it; /github/<path> to the host of the project's token; the rest
+    to Claude."""
 
     def handle_any(self):
         if not presented_secret(self):
@@ -173,37 +232,81 @@ class Proxy(Quiet):
             return self.reply(401, {"error": "unknown sandbox credential"},
                               {"WWW-Authenticate": 'Basic realm="sbx sidecar"'})
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
-        git = self.path.startswith("/github/")
-        if git:
-            upstream, token, path = CFG.github_upstream, CFG.tokens["github"], self.path[len("/github"):]
-            if token:
-                git_auth(token, headers, CFG.tokens["git_user"])
+        if self.path.startswith("/github/"):
+            return self.handle_git("/github", netloc(CFG.github_upstream), CFG.github_upstream, headers)
+        if self.path.startswith("/git/"):
+            host = self.path[len("/git/"):].partition("/")[0]
+            tokens = CFG.git_tokens_for(host)
+            if not tokens:  # this proxy is not a way out to any host at all
+                log(f"proxy {self.command} {self.path} -> 403 (no token for this host)")
+                return self.reply(403, {"error": f"this sandbox has no git token for {host}"})
+            return self.handle_git(f"/git/{host}", host, tokens[0].upstream, headers)
+        upstream, token, path = CFG.claude_upstream, CFG.tokens["claude"], self.path
+        if token:
+            claude_auth(token, headers)
+        body, chunked = self.request_body()
+        try:
+            conn, resp = self.open_upstream(upstream, path, headers, body, chunked)
+        except OSError as exc:
+            log(f"proxy {self.command} {path} -> 502 ({exc})")
+            return self.reply(502, {"error": f"upstream: {exc}"})
+        try:
+            sent = self.relay(resp)
+        finally:
+            conn.close()
+        log(f"proxy {self.command} {path} -> {resp.status} ({sent} bytes)")
+
+    def handle_git(self, prefix: str, host: str, upstream: str, headers: dict) -> None:
+        """git's first request tries each token of this host, then none, as a
+        public repository needs none. The one that works serves the requests
+        that follow. If none works, the sandbox gets the host's answer."""
+        path = self.path[len(prefix):]
+        repo, service, try_each = git_request(self.command, path)
+        if try_each:
+            choices, (body, chunked) = [*CFG.git_tokens_for(host), None], (None, False)
         else:
-            upstream, token, path = CFG.claude_upstream, CFG.tokens["claude"], self.path
-            if token:
-                claude_auth(token, headers)
+            choices, (body, chunked) = [CFG.chosen_git(host, repo, service)], self.request_body()
+        for i, choice in enumerate(choices):
+            sent_headers = dict(headers)
+            if choice is not None:
+                git_auth(choice.token, sent_headers, choice.user)
+            label = choice.name if choice is not None else "no token"
+            try:
+                conn, resp = self.open_upstream(upstream, path, sent_headers, body, chunked)
+            except OSError as exc:
+                log(f"proxy {self.command} {path} ({label}) -> 502 ({exc})")
+                return self.reply(502, {"error": f"upstream: {exc}"})
+            if resp.status in REFUSED and i < len(choices) - 1:
+                log(f"proxy {self.command} {path} ({label}) -> {resp.status}; the next one")
+                conn.close()
+                continue
+            break
+        if try_each and resp.status not in REFUSED:
+            CFG.remember_git((host, repo, service), choice)
+        try:
+            sent = self.relay(resp, upstream, prefix)
+        finally:
+            conn.close()
+        log(f"proxy {self.command} {path} ({label}) -> {resp.status} ({sent} bytes)")
+
+    def open_upstream(self, upstream: str, path: str, headers: dict, body, chunked: bool):
+        """(the connection, the response). Both ways are STREAMED, in CHUNK
+        pieces: a sidecar has little memory, and a git clone or push of a large
+        repository is hundreds of MB."""
         u = urllib.parse.urlsplit(upstream)
         cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
         conn = cls(u.hostname, u.port, timeout=300)
         headers["Host"] = u.netloc
-        # Both ways are STREAMED, in CHUNK pieces: a sidecar has little memory,
-        # and a git clone or push of a large repository is hundreds of MB.
-        body, chunked = self.request_body()
         if chunked:
             headers["Transfer-Encoding"] = "chunked"
         elif body is not None:
             headers["Content-Length"] = self.headers["Content-Length"]
         try:
-            try:
-                conn.request(self.command, path, body=body, headers=headers, encode_chunked=chunked)
-                resp = conn.getresponse()
-            except OSError as exc:
-                log(f"proxy {self.command} {path} -> 502 ({exc})")
-                return self.reply(502, {"error": f"upstream: {exc}"})
-            sent = self.relay(resp, upstream if git else None)
-        finally:
+            conn.request(self.command, path, body=body, headers=headers, encode_chunked=chunked)
+            return conn, conn.getresponse()
+        except OSError:
             conn.close()
-        log(f"proxy {self.command} {path} -> {resp.status} ({sent} bytes)")
+            raise
 
     def request_body(self):
         """(an iterator of the request body's pieces, or None; whether it is chunked)."""
@@ -239,15 +342,21 @@ class Proxy(Quiet):
                 yield data
             self.rfile.readline()  # the CRLF after each chunk
 
-    def relay(self, resp, git_upstream: str | None = None) -> int:
+    def relay(self, resp, git_upstream: str | None = None, git_prefix: str = "/github") -> int:
         """The upstream's answer to the sandbox, piece by piece. Returns the bytes.
-        With git_upstream, a redirect to that host comes back into the proxy."""
+        With git_upstream, a redirect to that host comes back into the proxy,
+        and a 401 goes on as a 403. git DELETES a credential that gets a 401,
+        here the placeholder, so one repository that no token reaches would
+        break every git command after it. The placeholder was right: the
+        host's refusal is about the real tokens, and git need not forget it."""
         git, upstream = git_upstream is not None, git_upstream
-        self.send_response(resp.status)
+        self.send_response(403 if git and resp.status == 401 else resp.status)
         for k, v in resp.getheaders():
             if k.lower() not in ("transfer-encoding", "connection", "content-length", "keep-alive"):
+                if git and k.lower() == "www-authenticate":
+                    continue
                 if git and k.lower() == "location":
-                    v = local_location(v, upstream, "/github")
+                    v = local_location(v, upstream, git_prefix)
                 self.send_header(k, v)
         no_body = self.command == "HEAD" or resp.status in (204, 304) or 100 <= resp.status < 200
         length = resp.getheader("Content-Length")

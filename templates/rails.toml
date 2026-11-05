@@ -1,6 +1,6 @@
 # Ruby on Rails, with the libraries that most Rails apps link.
 description = "Ruby on Rails"
-components  = ["ruby", "rails"]
+components  = ["mise", "ruby", "rails"]
 
 [ruby]
 versions = ["3.4.10"]

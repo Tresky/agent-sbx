@@ -63,14 +63,14 @@ class DefinitionTest(Repo):
 
     def test_settings_become_build_variables(self):
         env = templates.build_env(templates.load("rails"))
-        self.assertEqual(env["SBX_COMPONENTS"], "ruby rails")
+        self.assertEqual(env["SBX_COMPONENTS"], "mise ruby rails")
         self.assertEqual(env["SBX_RUBY_VERSIONS"], "3.4.10")
         self.assertEqual(env["SBX_DOCKER_IMAGES"], "postgres:17 redis:7")
         self.assertEqual(env["SBX_TEMPLATE_DISK_GB"], "60")
         self.assertEqual(env["SBX_TEMPLATE_NAME"], "rails")
 
     def test_a_local_definition_wins_over_a_shared_one(self):
-        self.define("rails", 'description = "mine"\ncomponents = ["ruby"]\n')
+        self.define("rails", 'description = "mine"\ncomponents = ["mise", "ruby"]\n')
         d = templates.load("rails")
         self.assertEqual((d.description, d.local), ("mine", True))
 
@@ -87,13 +87,14 @@ class DefinitionTest(Repo):
         cases = {
             'components = ["cobol"]': "no component 'cobol'",
             'components = ["rails", "ruby"]': "needs ruby before it",
-            'components = ["ruby", "ruby"]': "listed twice",
+            'components = ["ruby"]': "needs mise before it",
+            'components = ["mise", "ruby", "ruby"]': "listed twice",
             'components = []\n[ruby]\nversions = ["3.4.1"]': "not a listed component",
-            'components = ["ruby"]\n[ruby]\nVersions = ["3.4.1"]': "lowercase",
+            'components = ["mise", "ruby"]\n[ruby]\nVersions = ["3.4.1"]': "lowercase",
             'apt = ["rm -rf /"]': "apt must be",
             'disk_gb = 5': "disk_gb must be",
             'colour = "red"': "unknown key 'colour'",
-            'components = ["ruby"]\n[ruby]\nversions = [1, 2]': "a value must be",
+            'components = ["mise", "ruby"]\n[ruby]\nversions = [1, 2]': "a value must be",
         }
         for text, needle in cases.items():
             with self.subTest(text=text):
@@ -132,17 +133,42 @@ class DefinitionTest(Repo):
         rust.write_text(rust.read_text() + "\n# changed\n")
         self.assertEqual(templates.fingerprint(d), after)
 
+    def run_component(self, name: str, settings: str = "") -> list[str]:
+        """Source a real component, with helpers that record each command."""
+        log = Path(self._tmp.name) / f"{name}.log"
+        stubs = 'set -Eeuo pipefail; step() { :; }; apt-get() { :; }; CHECK_TOOLS=; ' \
+                'as_user() { printf "%s\\n" "$1" >> "$LOG"; }; as_user_retry() { as_user "$1"; }; ' \
+                f'{settings} source "$1"; printf "check:%s\\n" "$CHECK_TOOLS" >> "$LOG"'
+        component = self.root / "template" / "components" / f"{name}.sh"
+        done = subprocess.run(["bash", "-c", stubs, "bash", str(component)], capture_output=True, text=True,
+                              env={**os.environ, "LOG": str(log)})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return log.read_text().splitlines()
+
+    def test_the_mise_component_trusts_the_projects_under_code(self):
+        # A shim has no terminal in which to ask for trust.
+        self.assertIn('mise settings add trusted_config_paths "$HOME/code"', self.run_component("mise"))
+
+    def test_the_ruby_component_caches_each_version_and_defaults_to_the_first(self):
+        calls = self.run_component("ruby", 'SBX_RUBY_VERSIONS="3.3.6 3.4.10";')
+        self.assertIn("mise settings add idiomatic_version_file_enable_tools ruby", calls)
+        self.assertEqual([c for c in calls if c.startswith("mise install")],
+                         ["mise install 'ruby@3.3.6'", "mise install 'ruby@3.4.10'"])
+        self.assertEqual([c for c in calls if c.startswith("mise use")], ["mise use --global --yes 'ruby@3.3.6'"])
+        self.assertIn("gem install bundler --no-document", calls)
+        self.assertEqual(calls[-1], "check: ruby bundle")
+
     def test_the_host_entry_point_prints_what_bash_reads(self):
         # The host runs the module as a script: no sbxlib import may be needed.
         (self.root / "sbxlib").mkdir()
         shutil.copy(REPO / "sbxlib" / "templates.py", self.root / "sbxlib" / "templates.py")
-        self.define("mine", 'description = "it\'s mine"\ncomponents = ["ruby"]\n[ruby]\nversions = ["3.4.1", "3.3.6"]\n')
+        self.define("mine", 'description = "it\'s mine"\ncomponents = ["mise", "ruby"]\n[ruby]\nversions = ["3.4.1", "3.3.6"]\n')
         script = f'eval "$(python3 {self.root}/sbxlib/templates.py env mine)"; ' \
                  'echo "$SBX_RUBY_VERSIONS|$SBX_COMPONENTS|${#SBX_TEMPLATE_HASH}"'
         # This copy's root is its checkout: its local definitions must count.
         env = {k: v for k, v in os.environ.items() if k != "SBX_IGNORE_LOCAL_TEMPLATES"}
         done = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
-        self.assertEqual(done.stdout.strip(), "3.4.1 3.3.6|ruby|12", done.stderr)
+        self.assertEqual(done.stdout.strip(), "3.4.1 3.3.6|mise ruby|12", done.stderr)
         done = subprocess.run(["python3", f"{self.root}/sbxlib/templates.py", "env", "nope"],
                               capture_output=True, text=True)
         self.assertEqual(done.returncode, 1)

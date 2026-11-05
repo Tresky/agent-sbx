@@ -179,6 +179,30 @@ sequenceDiagram
     Note over p,gh: The real token lives only in the sidecar.<br/>Claude calls work the same way:<br/>placeholder in → real bearer token out.
 ```
 
+**Several git tokens in one sidecar.** A named token is one line of
+`/etc/sbx/sidecar/tokens`, and git in the VM reaches it through
+`http://<sidecar>:8080/git/<host>/`. The mechanism is in `handle_git`
+(`sidecar/sidecar.py`):
+
+- A `GET .../info/refs` has no body, so the proxy can send it more than once. It
+  tries each token for that host, then no token, until the answer is not a 401,
+  403 or 404. A token goes only to the host that it is for, and a host with no
+  token gets a 403 and no upstream call, so the proxy is not a way out.
+- The `POST` that follows has a streamed body, so the proxy sends it once, with
+  the token that worked. It remembers that token by host, repository and git
+  service, in memory. The key has the service because a token that can read may
+  be unable to push.
+- A final 401 from the host reaches git as a 403. git deletes a credential that
+  gets a 401, here the placeholder in `~/.git-credentials`, and every later git
+  command would then fail. The proxy's own 401, for a missing placeholder, stays
+  a 401: git needs it, to send the placeholder at all. `RealGitTest` in
+  `tests/test_sidecar.py` proves this with the real git program.
+
+`sbx git-token --push` and `sbx new --git` copy this checkout's sidecar scripts
+first (`_refresh_sidecar_files`), so a sidecar from an older template works
+with no template build. A sidecar of `sbx new --project` keeps `/github/` until
+it gets a named token.
+
 **Why the sidecar is a VM, not a container.** A container would need a shell
 on the host to provision it (`pct exec`), which the token does not have. A VM
 gets its SSH key through cloud-init from the token, the guest agent reports
@@ -596,9 +620,9 @@ reads `pane layout`, which reports each pane's rectangle, and warns when a
 pane is not where the grid said. The herdr-spreader plugin cannot make such a
 grid: it splits each pane from the one made just before it.
 
-A pane's shell starts inside the project with no `cd`, so rvm's and nvm's `cd`
-hooks have not chosen its Ruby, gemset and Node. The template's `~/.zshrc`
-therefore ends with one `cd .`.
+A pane's shell starts inside the project with no `cd`, so nvm's `cd` hook has
+not chosen its Node. The template's `~/.zshrc` therefore ends with one `cd .`.
+mise's shims need no hook: they read the version files at each call.
 
 ## The portal
 
@@ -815,9 +839,12 @@ definition lists. The build tags the template with it (`sbx-h-<hash>`), and
 files that `sbx new` refreshes from the checkout (`zshenv`, `zshrc`,
 `sbx_mirror.py`) do not count, because a change to them needs no rebuild.
 
-**Versions.** The managers own them, and each template caches them. rvm reads
-`.ruby-version`, nvm reads `.nvmrc`, and Go downloads the toolchain that
-`go.mod` names, so a project always gets its own versions. `sbx versions`
+**Versions.** The managers own them, and each template caches them. mise reads
+`.ruby-version`, `.tool-versions` and `mise.toml`, nvm reads `.nvmrc`, and Go
+downloads the toolchain that `go.mod` names, so a project always gets its own
+versions. mise downloads a precompiled Ruby from `jdx/ruby` when one exists, and
+verifies its attestation. It compiles a Ruby that has no such build. A `ruby`
+shim installs a missing version at its first call. `sbx versions`
 scans the registered projects, groups them by the template that their
 sandboxes use, and `--write` saves each group in `templates/local/versions.toml`.
 A build adds those after the definition's own versions, so the definition's
@@ -836,7 +863,7 @@ has unless its definition is `bare`:
 - Chrome through `agent-browser`, with Playwright's system libraries;
 - Claude Code and herdr;
 - `sbx-mirror`, the DHCP-hostname unit, `sbx-recipe-run`, and a `~/.zshenv`
-  that loads `rvm`, `nvm` and the PATH for every shell, including the
+  that loads `nvm` and the PATH for every shell, including the
   non-interactive one of `ssh host command` and an agent's tool call;
 - `/etc/sbx/template`: the template's name, fingerprint and components.
 
@@ -932,9 +959,10 @@ Each of these cost real time. Keep them in mind when you change the code.
 | `/run` | mounted `noexec`; systemd cannot start a script there | put the script under `/usr/local/lib` |
 | `sysctl --system` in an unprivileged container | exits non-zero on keys it may not write | `sysctl -p <own file>`, and read the value back |
 | dnsmasq `expand-hosts` in a container | reads `/etc/hosts`, where Proxmox writes `127.0.1.1 <hostname>` | `no-hosts` |
-| rvm and a partial version | `rvm install 3.4` asks for a tarball that does not exist; rvm stable's database ends in 2021 | full versions |
-| rvm and `set -u` | rvm's functions and its `cd` hook read unset variables | never `set -u` in a script that loads rvm |
-| rvm and `ssh host command` | rvm runs `exec 6>&2`; a daemon started there holds the session's stderr, and ssh never returns | `~/.zshenv` closes fd 6 in a non-interactive shell |
+| nvm and `set -u` | nvm's functions read unset variables | never `set -u` in a script that loads nvm |
+| rvm and `ssh host command`, on a template built with rvm | rvm runs `exec 6>&2`; a daemon started there holds the session's stderr, and ssh never returns | `~/.zshenv` closes fd 6 in a non-interactive shell |
+| mise and `.ruby-version` | mise ignores the file unless a setting names Ruby | the `ruby` component sets `idiomatic_version_file_enable_tools` |
+| mise's trust and a shim | a shim has no terminal in which to ask; a `mise.toml` with `[env]`, a template or a hook stops the shims with "not trusted", and `[tools]` alone needs no trust | the `mise` component sets `trusted_config_paths` to `~/code` |
 | `qm destroy` | removes every ACL on the destroyed VM's path | apply the token's ACLs again after a template rebuild |
 | Ubuntu 24.04 and Chromium | AppArmor blocks unprivileged user namespaces: "No usable sandbox" | `kernel.apparmor_restrict_unprivileged_userns=0` |
 | one machine ID across clones | one DHCP client ID, one address for every clone | an empty `/etc/machine-id` in the seal |

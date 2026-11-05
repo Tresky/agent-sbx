@@ -1,6 +1,10 @@
 """sbx fork: the original is only read; the copy is cleaned while its new
 sidecar lets nothing out; the copy gets its own VLAN, tags and credentials."""
+import contextlib
+import io
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,7 +21,7 @@ SRC_SC = Sandbox(9108, "sbx-app-sc", "pve", "running", ("sbx-sidecar", "sbx-of-s
 ALLOWED_ON_SOURCE = {"snapshot", "clone_from_snapshot", "delete_snapshot"}
 
 
-class ForkTest(unittest.TestCase):
+class ForkCase(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -63,6 +67,8 @@ class ForkTest(unittest.TestCase):
              mock.patch("sbxlib.cli.claudetoken.get", return_value="sk-ant-oat01-real"):
             return cli.cmd_fork(args, cli.load_config(), Runner(responder=lambda a, d: ""))
 
+
+class ForkTest(ForkCase):
     def test_the_original_is_only_snapshotted_cloned_from_and_its_snapshot_removed(self):
         pve = self.pve()
         self.assertEqual(self.run_fork(pve), 0)
@@ -136,6 +142,102 @@ class ForkTest(unittest.TestCase):
             self.run_fork(pve)
         self.assertFalse([e for e in self.log if e[0] == "pve" and e[1] == "start"])
 
+
+
+class ForkNamedTokenTest(ForkCase):
+    """The original holds named git tokens and has no project."""
+
+    SRC = Sandbox(9107, "sbx-app", "pve", "running",
+                  ("sbx", "sbx-agent", "sbx-tpl-rails", "sbx-git-work", "sbx-git-other"))
+
+    def pve(self, *a, **k):
+        pve = super().pve(*a, **k)
+        pve.require.return_value = self.SRC
+        return pve
+
+    def named(self, runner, name):
+        hosts = {"work": "github.com", "other": "gitlab.com"}
+        return cli.NamedGit(name, hosts[name], "x-access-token", f"token-{name}")
+
+    def test_the_copy_gets_the_same_tokens_and_a_new_placeholder(self):
+        with mock.patch("sbxlib.cli._named_git", side_effect=self.named):
+            self.assertEqual(self.run_fork(self.pve()), 0)
+        (conf,) = [e for e in self.log if e[0] == "pve" and e[1] == "configure"]
+        tags = conf[2][2]["tags"].split(";")
+        self.assertIn("sbx-git-work", tags)
+        self.assertIn("sbx-git-other", tags)
+        adds = [e[1] for e in self.log if e[0] == "sidecar" and "--git-add" in e[1]]
+        self.assertEqual(len(adds), 2)
+        self.assertIn("--git-add work github.com x-access-token", adds[0])
+        secret = next(e[3] for e in self.log if e[0] == "provision")
+        put = next(e for e in self.log if e[0] == "vm-put" and e[1] == ".git-credentials")
+        self.assertIn(secret.encode(), put[2])
+        self.assertNotIn(b"token-work", put[2])
+        rewrite = next(e[1] for e in self.log if e[0] == "vm" and "insteadOf" in e[1])
+        self.assertIn("/git/github.com/.insteadOf", rewrite)
+        self.assertIn("/git/gitlab.com/.insteadOf", rewrite)
+        self.assertFalse([e for e in self.log if e[0] == "git_auth"], "no project: no project's git settings")
+        # In quarantine: the tokens go in before the copy can reach anything.
+        lift = next(i for i, e in enumerate(self.log) if e[0] == "sidecar-put" and e[1] == "/etc/sbx/sidecar.env")
+        self.assertLess(next(i for i, e in enumerate(self.log) if e[0] == "sidecar" and "--git-add" in e[1]), lift)
+
+    def test_a_token_that_is_gone_is_left_out_with_a_warning(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(self.run_fork(self.pve()), 0)
+        self.assertIn("does not get the git token work", err.getvalue())
+        self.assertFalse([e for e in self.log if e[0] == "sidecar" and "--git-add" in e[1]])
+
+
+class WireGitHostsRealGitTest(unittest.TestCase):
+    """_wire_git_hosts with the real git program, in the shells of a sandbox."""
+
+    def git_env(self):
+        # HOME alone is not enough: Git also honors XDG_CONFIG_HOME and
+        # GIT_CONFIG_GLOBAL, which may still point at the client's config.
+        home = Path(self.tmp.name)
+        return {**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
+                "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+
+    def run_wire(self, shell, hosts):
+        home = Path(self.tmp.name)
+        env = self.git_env()
+
+        class LocalVm:
+            def put(self, data, dest, **k):
+                (home / dest).write_bytes(data)
+
+            def run(self, cmd, **k):
+                done = subprocess.run([shell, "-c", cmd], env=env, capture_output=True, text=True)
+                assert done.returncode == 0, done.stderr
+        with tempfile.TemporaryDirectory() as cfg_dir, mock.patch.dict(os.environ, {"SBX_CONFIG_DIR": cfg_dir}):
+            cli._wire_git_hosts(cli.load_config(), LocalVm(), hosts, "the-placeholder")
+        got = subprocess.run(["git", "config", "--global", "--get-regexp", "insteadof"], env=env,
+                             capture_output=True, text=True)
+        return sorted(got.stdout.splitlines())
+
+    def test_it_replaces_every_older_rewrite_and_keeps_the_users_own(self):
+        for shell in ("sh", "zsh"):
+            if shutil.which(shell) is None:
+                continue
+            with self.subTest(shell=shell):
+                self.tmp = tempfile.TemporaryDirectory()
+                self.addCleanup(self.tmp.cleanup)
+                env = self.git_env()
+                for key, value in (("url.http://10.79.0.1:8080/github/.insteadOf", "https://github.com/"),
+                                   ("url.https://example.com/mine/.insteadOf", "mine:")):
+                    subprocess.run(["git", "config", "--global", "--add", key, value], env=env, check=True)
+                base = "url.http://10.79.0.1:8080/git"
+                got = self.run_wire(shell, ["github.com", "gitlab.com"])
+                self.assertEqual(got, sorted(
+                    [f"{base}/{h}/.insteadof {r}" for h in ("github.com", "gitlab.com")
+                     for r in (f"https://{h}/", f"git@{h}:", f"ssh://git@{h}/")]
+                    + ["url.https://example.com/mine/.insteadof mine:"]))
+                # A second run adds nothing, and a removed host goes back to plain git.
+                self.assertEqual(self.run_wire(shell, ["github.com", "gitlab.com"]), got)
+                self.assertEqual(self.run_wire(shell, []), ["url.https://example.com/mine/.insteadof mine:"])
+                creds = (Path(self.tmp.name) / ".git-credentials").read_text()
+                self.assertEqual(creds, "http://sbx:the-placeholder@10.79.0.1:8080\n")
 
 
 class GitAuthAgainTest(unittest.TestCase):

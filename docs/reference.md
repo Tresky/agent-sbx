@@ -53,6 +53,8 @@ Options of `sbx new`:
 | `--from <checkout>` | the checkout that `file` inputs come from, when `--project` is a URL |
 | `--with <input>` | send this input to an agent sandbox. Repeatable. |
 | `--without <input>` | withhold this input; its placeholder is used. Repeatable. |
+| `--git <token>` | give a sandbox with no project this stored git token (`sbx git-token --name`). Repeatable. An agent sandbox's sidecar holds the tokens. A personal sandbox, or an agent sandbox with `agent_sidecar = false`, takes one, in `~/.git-credentials`. Not with `--project`. |
+| `--repo <repo>` | try to clone this repository into `~/code`, before the `clean` snapshot. A registered name, a git URL, or `owner/repo`. Repeatable. A clone that fails gives a warning, and the sandbox still comes up. |
 | `--cores N` | CPU cores. The default is `cores` in `config.toml`. |
 | `--memory MB` | memory. The default is `memory_mb` in `config.toml`. |
 | `--disk GB` | grow the disk to this size |
@@ -71,7 +73,12 @@ Options of `sbx new`:
 | `sbx project add <project>` | records a checkout, so `--project <name>` works by name |
 | `sbx project rm <name>` | forgets a project. Its token and its bindings stay. |
 | `sbx inputs <project> [--branch B] [--from PATH]` | shows what the recipe asks for, and where each value comes from. It makes nothing. |
-| `sbx git-token <project> [--host H] [--username U] [--stdin] [--no-check] [--remove] [--push NAME]` | stores the project's git token in [the secret store](#the-secret-store), after a check that it covers each repository (GitHub and GitLab). `--host` defaults to the host of the project's remote, `--username` to `x-access-token`. `--no-check` skips the check. `--remove` forgets it. The project may be a git URL: nothing is cloned, and no checkout is needed on this Mac. A project named by URL then reads its `.sandbox/` with this token. `--push NAME` also installs the token into that running sandbox, either profile (repeatable): for an agent sandbox with a sidecar, into its sidecar. With a token in the secret store already, it asks for none and installs that one. |
+| `sbx git-token [<project> \| --name TOKEN] [--host H] [--username U] [--stdin] [--no-check] [--remove] [--push NAME] [--drop NAME]` | stores a git token in [the secret store](#the-secret-store). For a project, it first checks that the token covers each repository (GitHub and GitLab). `--name` stores a token that belongs to no project and names no repository, with no check ([usage.md](usage.md#a-sandbox-for-several-repositories)). `--host` defaults to the host of the project's remote, or to `github.com`. `--username` defaults to `x-access-token`. `--no-check` skips the check. `--remove` forgets it, and a sidecar that has the token keeps it. The project may be a git URL: nothing is cloned, and no checkout is needed on this Mac. A project named by URL then reads its `.sandbox/` with this token. `--push NAME` also installs the token into that running sandbox, either profile (repeatable). With a sidecar, the sidecar holds it beside the sandbox's other tokens, and git in the VM goes through the sidecar. `--push` also copies this checkout's sidecar scripts there, and it restarts the sidecar's proxy. With a token in the secret store already, it asks for none and installs that one. `--name TOKEN --drop NAME` takes the token out of a running sandbox with a sidecar (repeatable), and the Mac keeps it. |
+| `sbx git-token --list` | each stored token, its host, and the sandboxes that hold it. It prints no token. |
+| `sbx repo add <url> [--name N]` | registers a repository, in the same list as `sbx projects`. It takes a git URL or `owner/repo` on GitHub. It needs no token, and it looks at no git host. |
+| `sbx repo list` | the registered repositories |
+| `sbx repo rm <name>` | forgets a repository |
+| `sbx repo clone <sandbox> <repo> ...` | tries to clone each repository into `~/code` in a running sandbox, with the tokens that it holds. `<repo>` is a registered name, a git URL, or `owner/repo`. A clone that fails is reported, and the next one still runs. The exit code is 1 if any failed. |
 | `sbx claude-token` | runs `claude setup-token` and stores the Claude token |
 | `sbx claude-token --stdin` | reads a new Claude token from stdin |
 | `sbx claude-token --push [name ...]` | writes the stored token into running sandboxes, and into the named ones (for an agent sandbox with the proxy: into its sidecar) |
@@ -211,17 +218,17 @@ component as `SBX_RUBY_VERSIONS`.
 |---|---|---|---|
 | `[node]` | `versions` | `["lts/*"]` | the Node versions (nvm); the first is the default. Every template has Node. |
 | `[docker]` | `images` | `[]` | the Docker images to pull. Every template has Docker. |
-| `[ruby]` | `versions` | `["3.4.10"]` | the Rubies (rvm), full versions only; the first is the default |
+| `[ruby]` | `versions` | `["3.4.10"]` | the Rubies (mise); the first is the default |
 | `[go]` | `version` | `1.27.1` | the Go version |
 | `[rust]` | `toolchains` | `["stable"]` | the rustup toolchains; the first is the default |
 | `[rust]` | `components` | `"clippy rustfmt"` | more rustup components |
 | `[python]` | `versions` | `["3.13"]` | the Pythons that uv caches |
 | `[android]` | `platform`, `build_tools`, `emulator`, `image` | `35`, `35.0.0`, `false`, `google_apis;x86_64` | the SDK platform and build tools; the emulator, its system image and a `Medium_Phone` device |
 | `[postgres]` | `version`, `postgis` | `18`, `true` | the PostgreSQL major version from apt.postgresql.org, and whether PostGIS 3 comes with it |
-| `[mise]` | `tools` | `[]` | what `mise use --global` installs in the template, such as `["ruby@3.4.10", "node@24"]` |
+| `[mise]` | `tools` | `[]` | what `mise use --global` installs in the template, such as `["python@3.13", "node@24"]` |
 | `[odin]` | `version`, `wgpu_version`, `premake_version` | see `template/components/odin.sh` | the Odin, wgpu-native and premake releases |
 
-`rails`, `gis`, `media` and `sidecar` take no settings. `rails` needs `ruby` before it in the list.
+`rails`, `gis`, `media` and `sidecar` take no settings. `ruby` needs `mise` before it in the list, and `rails` needs `ruby`.
 
 ### Project bindings (`~/.config/sbx/bindings/<project>.toml`)
 
@@ -302,6 +309,7 @@ secret, never the value.
 | `sbx-exp-YYYYMMDD` | the expiry date |
 | `sbx-autostart` | `sbx autostart` is on: the sandbox and its sidecar start at boot, after the gateway |
 | `sbx-proj-<project>` | the project |
+| `sbx-git-<token>` | a named git token that the sandbox holds; one tag for each. `sbx git-token --list` reads them, and `sbx fork` gives the copy the same tokens. |
 | `sbx-tpl-<name>` | the template it was cloned from |
 
 ### Proxmox tags on a sidecar
@@ -321,7 +329,7 @@ take it for a sandbox. Its VM is named `<sandbox>-sc`.
 |---|---|
 | `/etc/sbx/sidecar.env` | the sandbox's policy: the wire, the sandbox's name, `sidecar_ports`, the upstreams. `sbx new` writes it. |
 | `/etc/sbx/sidecar/secret` | the per-sandbox placeholder that the sandbox presents |
-| `/etc/sbx/sidecar/tokens` | `claude=`, `github=` (the git token, for any host) and `git_user=`: the real credentials |
+| `/etc/sbx/sidecar/tokens` | the real credentials: `claude=`, `github=` (the git token of the sandbox's project, for any host), `git_user=`, and one `git.<name>=<upstream> <user> <token>` line for each named token |
 | `/etc/sbx/sidecar/approved` | the ports approved in `ask` mode, one per line. The sidecar opens them again when it starts, so an approval survives a reboot and a policy change. |
 | `/etc/nftables.conf` | the firewall, rendered from `sidecar/nftables.conf.tmpl` by `sbx-sidecar-apply` |
 | `/usr/local/bin/sbx-sidecar-apply` | renders the firewall, registers the sandbox's name, restarts the service. `--claude-token` reads a new token from stdin; `--tunnel-token` the tunnel's connector token (empty: stop the tunnel). |

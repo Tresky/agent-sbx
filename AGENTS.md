@@ -76,12 +76,15 @@ A shared key (the domain, the bridges, the subnets, the IDs) belongs in
   - `sbx remote-control` (it puts a full claude.ai login in a sandbox;
     `--allow-agent` puts one in an agent sandbox, where the agent can read it)
   - `sbx claude-token` without `--status` (it writes into every running sandbox)
+  - `sbx git-token --push` and `--drop` (they change what a sandbox can reach, and
+    restart its sidecar's proxy), `sbx repo clone` (it writes into a sandbox)
 - **These commands are safe to run at any time:** `sbx doctor`, `sbx guide`,
   `sbx list`, `sbx projects`, `sbx inputs <project>`, `sbx versions`,
   `sbx template list`, `sbx template show`, `sbx template components`,
   `sbx template export`, the listing forms `sbx publish <name>`,
-  `sbx autostart <name> --status`, `sbx remote-control <name> --status` and
-  `sbx claude-token --status`, and the unit tests.
+  `sbx autostart <name> --status`, `sbx remote-control <name> --status`,
+  `sbx claude-token --status`, `sbx git-token --list` and `sbx repo list`, and
+  the unit tests.
 - **The portal (`sbx web`) follows the same rules.** Do not use its API to
   make, change or remove a VM without the user's consent. Do not read the
   portal link in `~/.config/sbx/portal/url`: it holds the session token.

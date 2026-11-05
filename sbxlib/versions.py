@@ -1,11 +1,12 @@
 """`sbx versions`: what the registered projects need, so the template caches
 exactly that and nothing typed by hand.
 
-The version managers own the versions. rvm reads .ruby-version, nvm reads
+The version managers own the versions. mise reads .ruby-version, nvm reads
 .nvmrc or .node-version, and Go downloads the toolchain that go.mod names.
 A project therefore always gets its own versions, whatever the template
 holds. The template is a cache: a Ruby that is in it costs nothing, one that
-is not costs a compile of about eight minutes at recipe time. So the list
+is not costs a download at recipe time, or a compile if it has no precompiled
+build. So the list
 that a template caches is derived from the projects that use it, and a
 rebuild bakes the union of what is in use. Docker images follow the same rule: the ones that
 the projects' compose files name are pulled into the template.

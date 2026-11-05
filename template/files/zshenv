@@ -1,7 +1,8 @@
 # ~/.zshenv is the ONE file zsh reads for every shell, including the
 # non-interactive shell that `ssh host command` and an agent tool call start.
-# rvm and nvm are shell functions, so a shell that skips this file has no
-# `ruby` and no `node`. Keep this file fast: every tool call pays for it.
+# nvm is a shell function and mise's shims need this PATH, so a shell that skips
+# this file has no `ruby` and no `node`. Keep this file fast: every tool call
+# pays for it.
 
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/go/bin:/usr/local/go/bin:/opt/odin:$PATH"
 
@@ -21,13 +22,15 @@ if [[ -s "$NVM_DIR/nvm.sh" ]]; then
   fi
 fi
 
+# A template built before mise replaced rvm still has rvm, and `sbx new` writes
+# this file into its sandboxes. A newer template has no ~/.rvm.
 [[ -s "$HOME/.rvm/scripts/rvm" ]] && source "$HOME/.rvm/scripts/rvm"
 
 # mise's shims (the mise component), ahead of the rest: a tool that mise
 # manages resolves to the version of the current directory's mise.toml.
 [[ -d "$HOME/.local/share/mise/shims" ]] && PATH="$HOME/.local/share/mise/shims:$PATH"
 
-# rvm runs `exec 6>&2` for its log output, and every child inherits fd 6. In
+# On a template with rvm: rvm runs `exec 6>&2` for its log output, and every child inherits fd 6. In
 # `ssh host command` that is the session's stderr pipe, so a daemon started
 # there (the herdr server that `herdr machine add` starts) holds the session
 # open and the command never returns. An interactive shell keeps fd 6: there

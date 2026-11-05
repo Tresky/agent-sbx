@@ -5,10 +5,16 @@ interfaces; this file proves the handlers' decisions."""
 from __future__ import annotations
 
 import base64
+import contextlib
+import http.server
 import io
 import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -66,6 +72,8 @@ class FakeUpstream:
     calls: list[dict] = []
     status = 200
     headers: list[tuple[str, str]] = []
+    # With it: the status for each request's credential (None: no credential).
+    status_for = None
 
     def __init__(self, host, port=None, timeout=None):
         self.host, self.port = host, port
@@ -80,8 +88,10 @@ class FakeUpstream:
                                    "body": body, "headers": dict(headers or {}), "chunked": encode_chunked})
 
     def getresponse(self):
-        return FakeResponse(FakeUpstream.status, FakeUpstream.response_body, FakeUpstream.response_length,
-                            FakeUpstream.headers)
+        status = FakeUpstream.status
+        if FakeUpstream.status_for is not None:
+            status = FakeUpstream.status_for(FakeUpstream.calls[-1])
+        return FakeResponse(status, FakeUpstream.response_body, FakeUpstream.response_length, FakeUpstream.headers)
 
     def close(self):
         pass
@@ -133,6 +143,7 @@ class Base(unittest.TestCase):
         FakeUpstream.response_body = b'{"ok": true}'
         FakeUpstream.response_length = False
         FakeUpstream.status = 200
+        FakeUpstream.status_for = None
         FakeUpstream.headers = []
         self._real = (sidecar.http.client.HTTPConnection, sidecar.open_port, sidecar.close_port)
         sidecar.http.client.HTTPConnection = FakeUpstream
@@ -277,6 +288,258 @@ class ProxyTest(Base):
         self.assertEqual(call["body"], payload)
         self.assertTrue(call["chunked"])
         self.assertEqual(call["headers"].get("Transfer-Encoding"), "chunked")
+
+
+def token_of(call: dict) -> str | None:
+    """The token that this upstream call carries; None for no credential."""
+    auth = call["headers"].get("Authorization")
+    return base64.b64decode(auth[6:]).decode().partition(":")[2] if auth else None
+
+
+class SeveralGitTokensTest(Base):
+    """One sandbox, several tokens. A request names no token: the proxy tries."""
+
+    UPSTREAM = "http://203.0.113.10:9001"
+    PATH = "/git/203.0.113.10:9001/me/app"
+
+    def setUp(self):
+        super().setUp()
+        self.set_tokens("claude=\ngithub=\n"
+                        f"git.first={self.UPSTREAM} x-access-token tok-first\n"
+                        f"git.second={self.UPSTREAM} oauth2 tok-second\n"
+                        "git.gitlab=https://gitlab.example x-access-token tok-other-host\n")
+
+    def get(self, service="git-upload-pack", path=None):
+        return request(sidecar.Proxy, "agent", "GET", f"{path or self.PATH}.git/info/refs?service={service}",
+                       {"x-api-key": SECRET})
+
+    def post(self, service="git-upload-pack", path=None):
+        return request(sidecar.Proxy, "agent", "POST", f"{path or self.PATH}.git/{service}",
+                       {"x-api-key": SECRET}, b"want refs")
+
+    def test_each_token_is_tried_until_one_works(self):
+        FakeUpstream.status_for = lambda call: 200 if token_of(call) == "tok-second" else 404
+        status, _, _ = self.get()
+        self.assertEqual(status, 200)
+        self.assertEqual([token_of(c) for c in FakeUpstream.calls], ["tok-first", "tok-second"])
+        self.assertEqual(FakeUpstream.calls[1]["path"], "/me/app.git/info/refs?service=git-upload-pack")
+
+    def test_the_token_that_worked_serves_the_request_that_follows(self):
+        """The POST carries a body, so it cannot be tried twice."""
+        FakeUpstream.status_for = lambda call: 200 if token_of(call) == "tok-second" else 404
+        self.get()
+        FakeUpstream.calls.clear()
+        status, _, _ = self.post()
+        self.assertEqual(status, 200)
+        [call] = FakeUpstream.calls
+        self.assertEqual(token_of(call), "tok-second")
+        self.assertEqual(call["body"], b"want refs")
+
+    def test_a_token_that_only_reads_does_not_stop_a_push(self):
+        def host(call):
+            if "receive-pack" in call["path"]:
+                return 200 if token_of(call) == "tok-second" else 403
+            return 200
+        FakeUpstream.status_for = host
+        self.get()  # a fetch: the first token works
+        self.assertEqual(token_of(FakeUpstream.calls[-1]), "tok-first")
+        FakeUpstream.calls.clear()
+        self.assertEqual(self.get("git-receive-pack")[0], 200)
+        self.assertEqual([token_of(c) for c in FakeUpstream.calls], ["tok-first", "tok-second"])
+        FakeUpstream.calls.clear()
+        self.post("git-receive-pack")
+        self.assertEqual(token_of(FakeUpstream.calls[0]), "tok-second")
+        FakeUpstream.calls.clear()
+        self.post("git-upload-pack")
+        self.assertEqual(token_of(FakeUpstream.calls[0]), "tok-first")
+
+    def test_each_repository_finds_its_own_token(self):
+        repos = {"/me/a": "tok-first", "/me/b": "tok-second"}
+        FakeUpstream.status_for = lambda call: 200 if token_of(call) == repos[call["path"].split(".git")[0]] else 404
+        prefix = "/git/203.0.113.10:9001"
+        self.get(path=f"{prefix}/me/a")
+        self.get(path=f"{prefix}/me/b")
+        FakeUpstream.calls.clear()
+        self.post(path=f"{prefix}/me/a")
+        self.post(path=f"{prefix}/me/b")
+        self.assertEqual([token_of(c) for c in FakeUpstream.calls], ["tok-first", "tok-second"])
+
+    def test_a_public_repository_works_with_no_token_that_reaches_it(self):
+        """A token that the host refuses must not hide a public repository."""
+        FakeUpstream.status_for = lambda call: 200 if token_of(call) is None else 401
+        self.assertEqual(self.get()[0], 200)
+        self.assertEqual([token_of(c) for c in FakeUpstream.calls], ["tok-first", "tok-second", None])
+        FakeUpstream.calls.clear()
+        self.post()
+        self.assertIsNone(token_of(FakeUpstream.calls[0]))
+
+    def test_a_refusal_is_not_remembered(self):
+        """A token added or fixed later works at the next git command."""
+        FakeUpstream.status_for = lambda call: 404
+        self.assertEqual(self.get()[0], 404)
+        self.assertEqual(sidecar.CFG.git_choices, {})
+
+    def test_a_token_never_goes_to_another_host(self):
+        FakeUpstream.status_for = lambda call: 404
+        self.get()
+        sent = [token_of(c) for c in FakeUpstream.calls]
+        self.assertNotIn("tok-other-host", sent)
+
+    def test_a_host_with_no_token_is_refused_with_no_upstream_call(self):
+        """A controlled pair with the tests above: this proxy is not a way out."""
+        status, _, _ = request(sidecar.Proxy, "agent", "GET", "/git/evil.example/me/app.git/info/refs",
+                               {"x-api-key": SECRET})
+        self.assertEqual(status, 403)
+        self.assertEqual(FakeUpstream.calls, [])
+
+    def test_a_final_401_reaches_git_as_a_403(self):
+        """git deletes a credential that gets a 401, here the placeholder, and
+        every later git command then fails too."""
+        FakeUpstream.status_for = lambda call: 401
+        FakeUpstream.headers = [("WWW-Authenticate", 'Basic realm="GitHub"')]
+        status, headers, _ = self.get()
+        self.assertEqual(status, 403)
+        self.assertNotIn("www-authenticate", headers)
+
+    def test_the_proxys_own_401_stays_a_401(self):
+        """git sends the placeholder only after a 401 that names a scheme."""
+        status, headers, _ = request(sidecar.Proxy, "agent", "GET", f"{self.PATH}.git/info/refs")
+        self.assertEqual(status, 401)
+        self.assertIn("Basic", headers["www-authenticate"])
+        self.assertEqual(FakeUpstream.calls, [])
+
+    def test_a_redirect_stays_under_the_prefix_it_came_in_on(self):
+        FakeUpstream.status = 301
+        FakeUpstream.headers = [("Location", f"{self.UPSTREAM}/me/app.git/info/refs?service=git-upload-pack")]
+        _, headers, _ = request(sidecar.Proxy, "agent", "GET", f"{self.PATH}/info/refs?service=git-upload-pack",
+                                {"x-api-key": SECRET})
+        self.assertEqual(headers["location"], f"{self.PATH}.git/info/refs?service=git-upload-pack")
+
+    def test_the_log_names_each_token_and_shows_no_value(self):
+        FakeUpstream.status_for = lambda call: 200 if token_of(call) == "tok-second" else 404
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.get()
+        self.assertIn("(first) -> 404", err.getvalue())
+        self.assertIn("(second) -> 200", err.getvalue())
+        self.assertNotIn("tok-", err.getvalue())
+
+    def test_a_project_token_and_a_named_token_work_together(self):
+        self.set_tokens(f"claude=\ngithub=tok-project\ngit_user=\ngit.extra={self.UPSTREAM} x-access-token tok-extra\n")
+        FakeUpstream.status_for = lambda call: 200 if token_of(call) == "tok-extra" else 404
+        status, _, _ = request(sidecar.Proxy, "agent", "GET", "/github/me/other.git/info/refs?service=git-upload-pack",
+                               {"x-api-key": SECRET})
+        self.assertEqual(status, 200)
+        self.assertEqual([token_of(c) for c in FakeUpstream.calls], ["tok-project", "tok-extra"])
+
+    def test_a_bad_line_is_ignored_and_its_value_is_not_logged(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.set_tokens("claude=\ngit.bad=only-a-secret-value\n")
+        self.assertEqual(sidecar.CFG.named_git, [])
+        self.assertIn("git.bad", err.getvalue())
+        self.assertNotIn("only-a-secret-value", err.getvalue())
+
+
+class RealGitTest(unittest.TestCase):
+    """The real git program against the real proxy, on the loopback. The claim:
+    a repository that no token reaches fails, and the next one still works."""
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("git") is None:
+            raise unittest.SkipTest("git is not installed")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        d = Path(self.tmp.name)
+        (d / "secret").write_text(SECRET + "\n")
+        self.hits: list[tuple[str, str | None]] = []
+        upstream = self.start(self.fake_host_handler())
+        self.host = f"127.0.0.1:{upstream.server_address[1]}"
+        (d / "tokens").write_text(f"claude=\ngit.first=http://{self.host} x-access-token tok-a\n"
+                                  f"git.second=http://{self.host} x-access-token tok-b\n")
+        sidecar.CFG = sidecar.Config(types.SimpleNamespace(
+            agent_addr="127.0.0.1", vm_addr="127.0.0.1", net_addr="127.0.0.1",
+            secret_file=str(d / "secret"), tokens_file=str(d / "tokens"),
+            claude_upstream=f"http://{self.host}", github_upstream=f"http://{self.host}", net_expose_port=8081))
+        proxy = self.start(sidecar.Proxy)
+        self.proxy = f"http://127.0.0.1:{proxy.server_address[1]}"
+        self.home = d / "home"
+        self.home.mkdir()
+        self.creds = self.home / ".git-credentials"
+        self.creds.write_text(f"http://sbx:{SECRET}@127.0.0.1:{proxy.server_address[1]}\n")
+        self.env = {"HOME": str(self.home), "PATH": os.environ["PATH"], "GIT_TERMINAL_PROMPT": "0",
+                    "GIT_CONFIG_NOSYSTEM": "1"}
+        self.git("config", "--global", "credential.helper", "store")
+        self.git("config", "--global", f"url.{self.proxy}/git/{self.host}/.insteadOf", "https://github.example/")
+
+    def start(self, handler):
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server
+
+    def git(self, *args) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", *args], env=self.env, capture_output=True, text=True, timeout=30)
+
+    def fake_host_handler(self):
+        """A git host: /me/a answers to tok-a, /me/b to tok-b, /me/public to
+        anyone, and anything else, or no credential, gets GitHub's 401."""
+        test = self
+        owners = {"/me/a": "tok-a", "/me/b": "tok-b"}
+
+        class Host(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                auth = self.headers.get("Authorization")
+                token = base64.b64decode(auth[6:]).decode().partition(":")[2] if auth else None
+                repo = self.path.split("/info/refs")[0].removesuffix(".git")
+                test.hits.append((repo, token))
+                if repo != "/me/public" and (token is None or owners.get(repo) != token):
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="GitHub"')
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                sha = "1" * 40
+                line = f"{sha} HEAD\0agent=fake\n"
+                data = (b"001e# service=git-upload-pack\n0000"
+                        + f"{len(line) + 4:04x}{line}".encode() + b"0000")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-git-upload-pack-advertisement")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+        return Host
+
+    def ls_remote(self, repo: str) -> subprocess.CompletedProcess:
+        return self.git("ls-remote", f"https://github.example/{repo}")
+
+    def test_git_reaches_each_repository_with_the_token_that_covers_it(self):
+        self.assertEqual(self.ls_remote("me/a").returncode, 0)
+        done = self.ls_remote("me/b")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("1" * 40, done.stdout)
+        self.assertIn(("/me/b", "tok-b"), self.hits)
+
+    def test_a_repository_that_no_token_reaches_breaks_nothing_after_it(self):
+        failed = self.ls_remote("me/private")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn(SECRET, self.creds.read_text(), "git must not delete the placeholder after a refusal")
+        self.assertNotIn(SECRET, failed.stderr, "git's error shows no placeholder")
+        done = self.ls_remote("me/b")
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_a_public_repository_needs_no_token_that_reaches_it(self):
+        done = self.ls_remote("me/public")
+        self.assertEqual(done.returncode, 0, done.stderr)
 
 
 class ExposeTest(Base):

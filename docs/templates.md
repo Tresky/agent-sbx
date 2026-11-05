@@ -51,7 +51,7 @@ A template adds **components**. A component is one shell file in
 
 | Component | What it adds |
 |---|---|
-| `ruby` | Ruby through rvm, with Bundler |
+| `ruby` | Ruby through mise, with Bundler. Needs `mise`. |
 | `rails` | the libraries that a Rails app links: Postgres, SQLite, libvips, ImageMagick, Redis. Needs `ruby`. |
 | `go` | Go, from the official tarball |
 | `rust` | Rust through rustup, with cargo, clippy and rustfmt |
@@ -59,7 +59,7 @@ A template adds **components**. A component is one shell file in
 | `odin` | Odin, with wgpu-native, premake, SDL2, Lua and software Vulkan |
 | `gis` | GEOS, GDAL and PROJ |
 | `media` | ffmpeg |
-| `mise` | mise, with its shims on the PATH of every shell. `[mise] tools` installs tools in the template, such as `["python@3.13"]`. |
+| `mise` | mise, with its shims on the PATH of every shell. `[mise] tools` installs tools in the template, such as `["python@3.13"]`. It trusts the config files under `~/code`. |
 | `postgres` | PostgreSQL from the PostgreSQL project's apt repository, with PostGIS; the sandbox user is a superuser of the local cluster |
 | `android` | a JDK, the Android SDK (command-line tools, platform-tools, a platform, build tools), and with `emulator = true` the emulator and a device, run with KVM |
 | `sidecar` | the sidecar's firewall, credential proxy, expose API and `cloudflared`; for a `bare` definition only |
@@ -72,7 +72,7 @@ file:
 ```toml
 # templates/rails.toml
 description = "Ruby on Rails"
-components  = ["ruby", "rails"]
+components  = ["mise", "ruby", "rails"]
 
 [ruby]
 versions = ["3.4.10"]
@@ -93,7 +93,7 @@ The repository has these definitions in `templates/`:
 | `minimal` | the core only |
 | `debian` | `mise`, on Debian 13 genericcloud instead of Ubuntu |
 | `sidecar` | `sidecar`, with `bare = true`: no core, on Debian 13 genericcloud (4 GB disk, 512 MB). The sidecar of each agent sandbox. `sbx setup` offers to build it. |
-| `rails` | `ruby`, `rails` |
+| `rails` | `mise`, `ruby`, `rails` |
 | `go` | `go` |
 | `rust` | `rust` |
 | `python` | `python` |
@@ -245,7 +245,7 @@ The rules:
   becomes a space-separated string. Give each setting a default with `: "${VAR:=default}"`.
 - **`step "title"`** prints a heading in the build log.
 - **`as_user '<command>'`** runs a command as the sandbox user, in zsh, with
-  rvm, nvm and the user's PATH. Use it for a tool that installs into the
+  nvm, mise's shims and the user's PATH. Use it for a tool that installs into the
   user's home.
 - **`$U`** is the user name.
 - **`CHECK_TOOLS+=" <command>"`** adds a command to the final check. The build

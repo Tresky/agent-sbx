@@ -27,6 +27,7 @@ STUBS = {
     "gem": 'if [[ "$1 $2" == "list -i" ]]; then exit 1; fi',          # the Bundler version is missing
     "bundle": 'if [[ "$1" == check ]]; then exit 1; fi',                # the gems are not installed
     "nproc": "echo 4",
+    "mise": 'echo "ruby version: ${MISE_RUBY_VERSION:-from the project}" >> "$LOG"',
     "ruby": "echo ruby-stub",
     "node": "echo node-stub",
     "docker": 'if [[ "$1" == ps ]]; then [[ -f "$STATE/$4" ]] && echo id; exit 0; fi\n'
@@ -34,7 +35,6 @@ STUBS = {
     "yarn": "", "pnpm": "", "npm": "", "corepack": "", "curl": "", "bun": "", "gunzip": "",
 }
 BASH_ENV = '''
-rvm() { echo "rvm $*" >> "$LOG"; if [[ "$1 $2" == "list strings" ]]; then printf 'ruby-3.3.6\\nruby-3.3.10\\nruby-3.4.1\\n'; fi; }
 nvm() { echo "nvm $*" >> "$LOG"; }
 '''
 
@@ -80,18 +80,17 @@ class RailsRecipeTest(unittest.TestCase):
     def test_a_rails_8_app_with_sqlite_and_tailwind(self):
         self.files(**{".ruby-version": "ruby-3.4.1\n", "Gemfile.lock": lockfile("rails", "sqlite3", "tailwindcss-rails")})
         calls = self.run_recipe()
-        for want in ("rvm install 3.4.1", "rvm use 3.4.1", "gem install bundler -v 2.6.2 --no-document",
+        for want in ("mise install ruby", "ruby version: from the project", "gem install bundler -v 2.6.2 --no-document",
                      "bundle install --jobs 4", "rails db:prepare", "rails tailwindcss:build"):
             self.assertIn(want, calls)
         self.assertFalse([c for c in calls if c.startswith(("docker", "nvm", "yarn", "npm"))], calls)
 
-    def test_postgres_redis_yarn_1_a_gemset_and_a_partial_ruby(self):
-        self.files(**{".ruby-version": "3.3\n", ".ruby-gemset": "shop\n", ".nvmrc": "22\n",
+    def test_postgres_redis_and_yarn_1(self):
+        self.files(**{".ruby-version": "3.3\n", ".nvmrc": "22\n",
                       "Gemfile.lock": lockfile("pg", "sidekiq", "jsbundling-rails"),
                       "package.json": "{}", "yarn.lock": ""})
         calls = self.run_recipe()
-        # The newest cached 3.3, by version order: 3.3.10, not 3.3.6.
-        for want in ("rvm install 3.3.10", "rvm use 3.3.10@shop --create", "nvm install 22",
+        for want in ("mise install ruby", "nvm install 22",
                      "yarn install --frozen-lockfile", "rails javascript:build"):
             self.assertIn(want, calls)
         runs = [c for c in calls if c.startswith("docker run")]
@@ -109,13 +108,19 @@ class RailsRecipeTest(unittest.TestCase):
                       "package.json": '{"packageManager": "pnpm@9.0.0"}', "pnpm-lock.yaml": "",
                       "db__seed.sql.gz": "x"})
         calls = self.run_recipe()
-        for want in ("rvm install 3.4.1", "docker compose -f compose.yaml up -d --wait",
+        # This project names its Ruby only in Gemfile.lock.
+        for want in ("mise install ruby", "ruby version: 3.4.1", "docker compose -f compose.yaml up -d --wait",
                      "pnpm install --frozen-lockfile", "rails db -p"):
             self.assertIn(want, calls)
         self.assertTrue(any(c.startswith("corepack enable") for c in calls), calls)
         # The compose file owns the services: the recipe starts no container of its own.
         self.assertFalse([c for c in calls if c.startswith("docker run")], calls)
         self.assertNotIn("rails db -p", self.run_recipe())
+
+    def test_a_mise_config_wins_over_the_ruby_of_the_lockfile(self):
+        self.files(**{"Gemfile.lock": lockfile("rails", ruby="3.4.1"), ".mise.toml": '[tools]\nruby = "3.3.6"\n'})
+        calls = self.run_recipe()
+        self.assertIn("ruby version: from the project", calls)
 
 
 if __name__ == "__main__":

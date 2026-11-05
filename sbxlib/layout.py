@@ -259,7 +259,7 @@ def build(h: Herdr, layout: Layout, clone: str, *, run: bool = True, replace: bo
 
     for name, pid in ids.items():
         h.call("pane", "rename", pid, name)
-    # The last pane's shell is still starting (zsh loads rvm and nvm); a
+    # The last pane's shell is still starting (zsh loads nvm); a
     # command typed before its prompt is buffered by the pty, but a moment
     # keeps the first screen of every pane tidy.
     time.sleep(2)

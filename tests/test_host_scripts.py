@@ -142,6 +142,63 @@ esac
         self.assertEqual(stat.S_IMODE(tokens.stat().st_mode), 0o600)
         self.assertIn("systemctl restart sbx-sidecar", self.calls.read_text())
 
+    def test_git_add_keeps_the_other_lines_and_replaces_its_own(self):
+        self.write_env()
+        tokens = self.root / "etc/sbx/sidecar/tokens"
+        tokens.write_text("claude=sk-keep\ngithub=ghp_keep\ngit.other=https://gitlab.com oauth2 glpat_keep\n")
+        out = self.apply("--git-add", "work", "github.com", "x-access-token", stdin="ghp_one\n")
+        self.assertIn("git token work added", out)
+        self.assertNotIn("ghp_one", out)
+        self.apply("--git-add", "work", "github.com", "x-access-token", stdin="ghp_two\n")
+        self.assertEqual(sorted(tokens.read_text().splitlines()),
+                         ["claude=sk-keep", "git.other=https://gitlab.com oauth2 glpat_keep",
+                          "git.work=https://github.com x-access-token ghp_two", "github=ghp_keep"])
+        self.assertEqual(stat.S_IMODE(tokens.stat().st_mode), 0o600)
+        self.assertIn("systemctl restart sbx-sidecar", self.calls.read_text())
+
+    def test_git_add_does_not_match_a_longer_name(self):
+        self.write_env()
+        tokens = self.root / "etc/sbx/sidecar/tokens"
+        tokens.write_text("git.a.b=https://github.com u keep\ngit.axb=https://github.com u keep2\n")
+        self.apply("--git-add", "a.b", "github.com", "u", stdin="new\n")
+        self.assertIn("git.axb=https://github.com u keep2", tokens.read_text(), "'.' is not a wildcard here")
+
+    def test_git_add_refuses_what_would_break_its_line(self):
+        self.write_env()
+        tokens = self.root / "etc/sbx/sidecar/tokens"
+        tokens.write_text("claude=keep\n")
+        for argv, stdin in ((["bad name", "github.com", "u"], "t\n"),
+                            (["../x", "github.com", "u"], "t\n"),
+                            (["w", "git hub.com", "u"], "t\n"),
+                            (["w", "github.com", "u x"], "t\n"),
+                            (["w", "github.com", "u"], "two words\n"),
+                            (["w", "github.com", "u"], "\n")):
+            done = subprocess.run([BASH, str(REPO / "sidecar/sbx-sidecar-apply"), "--git-add", *argv], env=self.env,
+                                  input=stdin, capture_output=True, text=True)
+            self.assertNotEqual(done.returncode, 0, argv)
+        self.assertEqual(tokens.read_text(), "claude=keep\n")
+
+    def test_git_drop_removes_one_token_only(self):
+        self.write_env()
+        tokens = self.root / "etc/sbx/sidecar/tokens"
+        tokens.write_text("github=ghp_keep\ngit.work=https://github.com u t1\ngit.other=https://gitlab.com u t2\n")
+        self.assertIn("git token work removed", self.apply("--git-drop", "work"))
+        self.assertEqual(sorted(tokens.read_text().splitlines()), ["git.other=https://gitlab.com u t2", "github=ghp_keep"])
+        self.assertEqual(stat.S_IMODE(tokens.stat().st_mode), 0o600)
+        self.calls.write_text("")
+        self.assertIn("no git token work", self.apply("--git-drop", "work"))
+        self.assertNotIn("systemctl restart", self.calls.read_text(), "nothing changed, so nothing restarts")
+
+    def test_git_hosts_lists_each_host_once_and_no_token(self):
+        self.write_env()
+        tokens = self.root / "etc/sbx/sidecar/tokens"
+        tokens.write_text("claude=sk-x\ngithub=ghp_project\ngit.a=https://github.com u tok=en1\n"
+                          "git.b=https://gitlab.example:8443 u tok2\n")
+        out = self.apply("--git-hosts")
+        self.assertEqual(out.split(), ["github.com", "gitlab.example:8443"])
+        tokens.write_text("claude=sk-x\ngithub=\n")
+        self.assertEqual(self.apply("--git-hosts").split(), [], "an empty project token counts for no host")
+
     def test_tunnel_token_starts_the_tunnel_and_an_empty_one_stops_it(self):
         self.write_env()
         env = self.root / "etc/sbx/sidecar/cloudflared.env"

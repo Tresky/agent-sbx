@@ -13,7 +13,7 @@ inside?** An AI agent with full permissions, or you.
 |---|---|---|
 | Network | Its sidecar, and the internet through it. No LAN, no tailnet, no other sandbox, not even the gateway. | The internet, the LAN, and the sidecars. No tailnet. |
 | Sidecar | A small trusted VM on the sandbox's own VLAN: it holds the credentials and the port policy, and it is the sandbox's only neighbour. | None. |
-| Git access | A token for one project, held by the sidecar. The VM presents a placeholder. Without a token, public repositories only. | Your SSH agent, forwarded for the git clones only. |
+| Git access | A token for one project, or a [named token](#a-sandbox-for-several-repositories), held by the sidecar. The VM presents a placeholder. Without a token, public repositories only. | Your SSH agent, forwarded for the git clones only. |
 | Secrets | Each input of the project needs `--with` or `--without`. Nothing goes in by default. | Each input that sbx finds goes in, and sbx prints the list. |
 | Snapshot | A `clean` snapshot after the recipe. | None by default. |
 | Claude Remote Control | Only with `sbx remote-control <name> --allow-agent`. | Yes, so claude.ai/code and the Claude phone app can drive the sandbox. |
@@ -55,6 +55,74 @@ therefore costs no VM.
 
 [projects.md](projects.md) explains how a project declares its recipe and its
 inputs.
+
+## A sandbox for several repositories
+
+Three things stay apart: a git token, a repository and a sandbox. A token names
+no repository, and a repository names no token. You give a sandbox the tokens
+that you choose. sbx checks nothing in advance: a clone works with the tokens
+that the sandbox holds, or it fails and says so.
+
+1. Store each token under a name, and paste it at the hidden prompt:
+
+   ```
+   sbx git-token --name work
+   sbx git-token --name oss --host gitlab.com
+   ```
+
+   [projects.md](projects.md#a-github-token) shows how to make a token.
+
+2. Register the repositories that you use often. This step needs no token, and
+   you can skip it:
+
+   ```
+   sbx repo add git@github.com:me/api.git
+   sbx repo add me/web
+   ```
+
+3. Make the sandbox with its tokens and its repositories. `--repo` takes a
+   registered name, a git URL, or `owner/repo`. A clone that fails gives a
+   warning, and the sandbox still comes up:
+
+   ```
+   sbx new lab --git work --git oss --repo api --repo web
+   ```
+
+To change a sandbox that runs already:
+
+```
+sbx git-token --name work --push lab     give it this token
+sbx git-token --name work --drop lab     take this token out
+sbx repo clone lab api me/docs           try to clone into ~/code
+```
+
+Inside the sandbox, a plain `git clone`, `git fetch` or `git push` uses the same
+tokens, with an HTTPS or an SSH remote URL.
+
+- **The tokens stay out of the VM.** The sidecar holds them, and the VM holds a
+  placeholder, as for a project.
+- **The sidecar finds the token.** For each repository, it tries each token for
+  that host, then no token, because a public repository needs none. A token
+  that can only read does not stop a push: a token that can write is tried too.
+- **A failed clone breaks nothing.** The next git command works as before.
+- **The reach is the sum of the tokens.** An agent in the sandbox can use every
+  repository that any of its tokens covers. Give a sandbox only what its work
+  needs.
+- **Other hosts.** Git on a host with no token goes straight to that host, so
+  it reaches public repositories only.
+- **Git only.** The proxy carries git. A call to the host's API, as `gh` makes,
+  gets no token.
+- **A push or a drop restarts the sidecar's proxy.** A Claude reply that is in
+  progress at that moment can stop.
+- **Later changes.** `sbx fork` gives the copy the same tokens. A rollback to a
+  snapshot from before a push removes that token, so push it again. After you
+  replace a token, push it to each sandbox that holds it.
+- **No sidecar, one token.** A personal sandbox, or an agent sandbox with
+  `agent_sidecar = false`, keeps one token, in the VM.
+- **The lists.** `sbx git-token --list` shows each token and the sandboxes that
+  hold it. `sbx repo list` shows the repositories, which are the same list as
+  `sbx projects`. `sbx git-token --name work --remove` forgets a token on your
+  machine. A sidecar that has it keeps it, so also revoke the token at the host.
 
 ## Reach a sandbox
 
@@ -235,9 +303,11 @@ application with the hostname, so a bypass never outlives its preview.
 - Rails and Vite accept the sandbox's name as a `Host` header with no change
   in the project. A preview's hostname needs the step in
   [Previews](#previews).
-- A template may have mise (the `debian` template does): a project's
-  `.tool-versions` or `mise.toml` picks its versions, and `mise install`
-  fetches them.
+- A template with the `ruby` component has mise, and so does `debian`. A
+  project's `.ruby-version`, `.tool-versions` or `mise.toml` picks its versions.
+  `mise install ruby` fetches the Ruby only. `mise install` with no name fetches
+  every tool of the project, and their shims come before nvm's Node and the
+  template's Go on the PATH.
 
 ### herdr
 

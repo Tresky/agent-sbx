@@ -82,6 +82,8 @@ The sidecar's own sshd is on port 2222 (`sbx ssh <name> --sidecar`).
 
 ## Limits
 
+- **Several git tokens** can sit in one sidecar. The proxy finds the one for
+  each repository ([architecture.md](../docs/architecture.md#the-sidecar-one-agent-one-wire-one-trusted-neighbour)).
 - **The proxy streams** requests and answers in 64 KB pieces, chunked ones
   too, so a sidecar's 512 MB is enough for a clone or a push of any size.
   (It buffered them once: a 300 MB pack of a large clone ran a sidecar out
