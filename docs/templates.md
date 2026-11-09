@@ -14,7 +14,7 @@ flowchart LR
     fp{{"fingerprint<br/><small>definition + core + components</small>"}}
     subgraph build["30-template-build.sh on the host"]
         direction TB
-        img["cloud image<br/><small>Ubuntu 24.04 or<br/>Debian 13 genericcloud</small>"]
+        img["cloud image<br/><small>Ubuntu 26.04 or<br/>Debian 13 genericcloud</small>"]
         vm["build VM<br/><small>cloud-init + payload</small>"]
         core["provision.sh: the core<br/><small>Docker · Node · Chrome<br/>Claude Code · herdr · mirror</small>"]
         comps["components<br/><small>ruby · rails · go · rust<br/>python · mise · sidecar …</small>"]
@@ -42,7 +42,7 @@ Every template has the **core**: the base tools, git, Docker, Node, Chrome
 the port mirror. sbx itself needs these. The one exception is a `bare`
 definition, which gets none of it: the sidecar.
 
-A template starts from Ubuntu 24.04, or from the cloud image that its
+A template starts from Ubuntu 26.04, or from the cloud image that its
 definition names (`image_url`): the `debian` and `sidecar` definitions use
 Debian 13's genericcloud image, which has no drivers or firmware.
 

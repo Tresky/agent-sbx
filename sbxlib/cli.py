@@ -336,7 +336,7 @@ ON THE PROXMOX HOST
                   comes from a DHCP request, nothing else), their route out,
                   the firewall, and the Tailscale route that reaches them.
   sbx-tpl-*       the templates, in the pool {template_pool}: one VM per
-                  definition and version (Ubuntu 24.04, or Debian 13 for
+                  definition and version (Ubuntu 26.04, or Debian 13 for
                   `debian` and `sidecar`). A sandbox is a copy of one. They
                   never run.
   {agent_bridge}, {personal_bridge}  two bridges with no physical port: the agent subnet

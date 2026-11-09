@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Behaviour test for template/files/sbx_mirror.py with a real Caddy. Runs INSIDE
-# an Ubuntu 24.04 container (tests/run-mirror-test.sh starts it).
+# an Ubuntu 26.04 container (tests/run-mirror-test.sh starts it).
 #
 # Each claim is a controlled pair: the same request is made before the thing
 # that should enable it exists, and after.

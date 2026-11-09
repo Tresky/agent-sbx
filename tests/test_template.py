@@ -133,6 +133,30 @@ class DefinitionTest(Repo):
         rust.write_text(rust.read_text() + "\n# changed\n")
         self.assertEqual(templates.fingerprint(d), after)
 
+    def test_a_new_default_image_marks_a_template_out_of_date(self):
+        d = templates.load("rails")
+        (self.root / "host").mkdir()
+        defaults = self.root / "host" / "defaults.conf"
+        defaults.write_text("# the image\nSBX_UBUNTU_IMAGE_URL=https://example.invalid/old.img\n")
+        old = templates.fingerprint(d)
+        self.assertEqual(templates.build_env(d)["SBX_UBUNTU_IMAGE_URL"], "https://example.invalid/old.img")
+        defaults.write_text("SBX_UBUNTU_IMAGE_URL=https://example.invalid/new.img\n")
+        self.assertNotEqual(templates.fingerprint(d), old)
+        # host/local.conf wins over the default, as in host/lib.sh.
+        local = self.root / "host" / "local.conf"
+        local.write_text("SBX_UBUNTU_IMAGE_URL='https://example.invalid/mine.img'\n")
+        with mock.patch.dict(os.environ, {"SBX_LOCAL_CONF": str(local)}):
+            self.assertEqual(templates.build_env(d)["SBX_UBUNTU_IMAGE_URL"], "https://example.invalid/mine.img")
+
+    def test_a_definition_that_names_its_image_ignores_the_default(self):
+        self.define("mine", 'description = "x"\ncomponents = []\nimage_url = "https://example.invalid/own.img"\n')
+        d = templates.load("mine")
+        before = templates.fingerprint(d)
+        (self.root / "host").mkdir()
+        (self.root / "host" / "defaults.conf").write_text("SBX_UBUNTU_IMAGE_URL=https://example.invalid/new.img\n")
+        self.assertEqual(templates.build_env(d)["SBX_UBUNTU_IMAGE_URL"], "https://example.invalid/own.img")
+        self.assertEqual(templates.fingerprint(d), before)
+
     def run_component(self, name: str, settings: str = "") -> list[str]:
         """Source a real component, with helpers that record each command."""
         log = Path(self._tmp.name) / f"{name}.log"

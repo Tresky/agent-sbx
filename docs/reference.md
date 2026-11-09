@@ -162,7 +162,7 @@ layer 2: sbx stops with an error.
 | `SBX_VM_USER` | `vm_user` | `dev` | the user in each sandbox |
 | `SBX_SIDECAR_LINK` | `sidecar_link` | `10.79.0` | the first three octets of the /30 wire between an agent sandbox and its sidecar: the sidecar is `.1`, the sandbox `.2`. Every pair uses it, on its own VLAN. |
 | `SBX_SIDECAR_TEMPLATE` | `sidecar_template` | `sidecar` | the template definition that the sidecars are cloned from |
-| `SBX_UBUNTU_IMAGE_URL` | | Ubuntu 24.04 cloud image | the image that each template starts from. A definition can name another. |
+| `SBX_UBUNTU_IMAGE_URL` | | Ubuntu 26.04 cloud image | the image that each template starts from. A definition can name another. |
 
 ### Mac settings (`~/.config/sbx/config.toml`)
 

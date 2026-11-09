@@ -283,6 +283,18 @@ def _env_value(value: object) -> str:
     return str(value)
 
 
+def _default_image(root: Path) -> str:
+    """The image of a definition with no image_url. host/lib.sh reads the same
+    two files, in this order."""
+    local = os.environ.get("SBX_LOCAL_CONF") or root / "host" / "local.conf"
+    image = ""
+    for path in (root / "host" / "defaults.conf", Path(local)):
+        if path.is_file():
+            for value in re.findall(r"^SBX_UBUNTU_IMAGE_URL=(.*)$", path.read_text(), re.M):
+                image = value.strip().strip("\"'")
+    return image
+
+
 def build_env(defn: Definition, root: Path | None = None) -> dict[str, str]:
     """The variables that template/provision.sh and the components read. A
     setting `[ruby] versions` becomes SBX_RUBY_VERSIONS."""
@@ -296,8 +308,11 @@ def build_env(defn: Definition, root: Path | None = None) -> dict[str, str]:
         "SBX_TEMPLATE_DISK_GB": str(defn.disk_gb),
         "SBX_TEMPLATE_BARE": "1" if defn.bare else "0",
     }
-    if defn.image_url:
-        env["SBX_UBUNTU_IMAGE_URL"] = defn.image_url
+    # A build variable counts in the fingerprint: a new default image marks each
+    # template that uses it out of date.
+    image = defn.image_url or _default_image(root)
+    if image:
+        env["SBX_UBUNTU_IMAGE_URL"] = image
     for table, keys in effective_settings(defn, root).items():
         for key, value in keys.items():
             env[f"SBX_{table.upper().replace('-', '_')}_{key.upper()}"] = _env_value(value)

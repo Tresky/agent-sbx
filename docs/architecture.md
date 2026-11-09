@@ -76,7 +76,7 @@ Three things on the host are not sandboxes. `sbx setup` makes them one time:
 | Thing | What it is |
 |---|---|
 | `sbx-gw`, one unprivileged container | The DHCP and DNS server of the sandboxes, their NAT route to the internet, the firewall, and the Tailscale subnet router. It runs only dnsmasq, nftables and Tailscale, and installs security updates by itself. |
-| The templates, `sbx-tpl-<name>-<date>` | One VM for each template definition and each version (Ubuntu 24.04, or the definition's `image_url`: Debian 13 for `debian` and `sidecar`), converted to a Proxmox template, in its own pool. A sandbox is a copy of one: sbx asks Proxmox for its default clone, which on the reference host (LVM-thin) is a full copy. |
+| The templates, `sbx-tpl-<name>-<date>` | One VM for each template definition and each version (Ubuntu 26.04, or the definition's `image_url`: Debian 13 for `debian` and `sidecar`), converted to a Proxmox template, in its own pool. A sandbox is a copy of one: sbx asks Proxmox for its default clone, which on the reference host (LVM-thin) is a full copy. |
 | Two bridges | Linux bridges with no physical port. The host holds no address on them, so a sandbox cannot reach the hypervisor. The agent bridge is VLAN-aware: each agent sandbox and its sidecar share a VLAN of their own. |
 
 The `sbx` command on the Mac makes and destroys everything else. The default
@@ -834,7 +834,8 @@ names; each settings table belongs to a listed component or to `node` or
 `docker`. It turns a setting `[ruby] versions = [...]` into the build variable
 `SBX_RUBY_VERSIONS`.
 
-**The fingerprint** is a hash of the build variables, `provision.sh`,
+**The fingerprint** is a hash of the build variables, with the image's URL,
+`provision.sh`,
 `seal.sh`, the files in `template/files/`, and each component that the
 definition lists. The build tags the template with it (`sbx-h-<hash>`), and
 `sbx template list` compares the tag with the definition on the Mac. The three
@@ -852,7 +853,7 @@ sandboxes use, and `--write` saves each group in `templates/local/versions.toml`
 A build adds those after the definition's own versions, so the definition's
 first version stays the default.
 
-**What is in a template.** The definition's image (Ubuntu 24.04 by default,
+**What is in a template.** The definition's image (Ubuntu 26.04 by default,
 Debian 13 for `debian` and `sidecar`) and the **core**, which every template
 has unless its definition is `bare`:
 
@@ -966,7 +967,7 @@ Each of these cost real time. Keep them in mind when you change the code.
 | mise and `.ruby-version` | mise ignores the file unless a setting names Ruby | the `ruby` component sets `idiomatic_version_file_enable_tools` |
 | mise's trust and a shim | a shim has no terminal in which to ask; a `mise.toml` with `[env]`, a template or a hook stops the shims with "not trusted", and `[tools]` alone needs no trust | the `mise` component sets `trusted_config_paths` to `~/code` |
 | `qm destroy` | removes every ACL on the destroyed VM's path | apply the token's ACLs again after a template rebuild |
-| Ubuntu 24.04 and Chromium | AppArmor blocks unprivileged user namespaces: "No usable sandbox" | `kernel.apparmor_restrict_unprivileged_userns=0` |
+| Ubuntu and Chromium | AppArmor blocks unprivileged user namespaces: "No usable sandbox" | `kernel.apparmor_restrict_unprivileged_userns=0` |
 | one machine ID across clones | one DHCP client ID, one address for every clone | an empty `/etc/machine-id` in the seal |
 | a veth named `eth0` made in a container | collides with the container's own `eth0` | throwaway names, renamed on the move into a namespace |
 | a probe harness written for bash, run by zsh | zsh does not word-split `$VAR`; every probe runs nothing | run it with bash; keep a control that must pass |

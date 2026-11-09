@@ -106,7 +106,7 @@ cat > /etc/sysctl.d/90-sbx.conf <<'EOF'
 fs.inotify.max_user_watches = 524288
 fs.inotify.max_user_instances = 1024
 EOF
-# Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor, which
+# Ubuntu restricts unprivileged user namespaces through AppArmor, which
 # is what the Chromium sandbox is built on: without this every headless browser
 # dies with "No usable sandbox". Debian has no such switch.
 if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
