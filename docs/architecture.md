@@ -858,13 +858,14 @@ Debian 13 for `debian` and `sidecar`) and the **core**, which every template
 has unless its definition is `bare`:
 
 - build tools, shells (zsh, tmux), and command-line tools (jq, ripgrep, fd,
-  fzf, direnv, gh);
+  fzf, direnv, gh, aws);
 - the OpenSSL, zlib and ffi headers that most native builds need;
 - Docker with compose (from Docker's repository for the image's
   distribution), Caddy, and the Docker images of `[docker] images`;
 - Node through nvm, with yarn and pnpm, at the versions of `[node] versions`;
 - Chrome through `agent-browser`, with Playwright's system libraries;
 - Claude Code and herdr;
+- oh-my-zsh, as a plain clone in `~/.oh-my-zsh`;
 - `sbx-mirror`, the DHCP-hostname unit, `sbx-recipe-run`, and a `~/.zshenv`
   that loads `nvm` and the PATH for every shell, including the
   non-interactive one of `ssh host command` and an agent's tool call;
@@ -874,6 +875,21 @@ Then the definition's apt packages, and its components in order. A component
 is sourced by `provision.sh` as root, with its helpers (`step`, `as_user`,
 `$U`) and its error trap. It adds its commands to `CHECK_TOOLS`, and the final
 check proves that each one is on the user's PATH in a non-interactive shell.
+
+**oh-my-zsh.** Only `~/.zshrc` loads it, so a non-interactive shell and a
+recipe do not have it. `sbx new` also writes that file into the sandboxes of an
+older template. The file therefore falls back to the plain prompt when
+`~/.oh-my-zsh` is missing, and the final check of a build starts an interactive
+shell, because the fallback hides a bad install. The update check is off: a
+rebuild updates oh-my-zsh, and the check can stop a new shell with a question.
+The theme does not show the host, so `~/.zshrc` adds the sandbox's name to it.
+
+**The AWS CLI.** The core installs version 2 from the zip that AWS publishes,
+because the `awscli` packages of the distributions are older. It has no
+credentials. A sandbox
+has no metadata service, and the sidecar's firewall drops its address, so a call
+with no key or no region waits 2 to 4 s for it. `/etc/environment` therefore
+sets `AWS_EC2_METADATA_DISABLED=true`.
 
 The user `dev` has zsh, sudo with no password, `~/code`, and lingering on,
 because herdr and an agent run for hours with no login session.

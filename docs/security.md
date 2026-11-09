@@ -260,7 +260,8 @@ Mac trusts.
   An agent sandbox with a sidecar has no path to the gateway's DHCP.
 - **A secret that you send in is readable by the agent.** An input is. The
   git and Claude tokens stay in the sidecar; without a sidecar, or with
-  `sidecar_claude = "direct"`, they are in the VM too. Send only what the
+  `sidecar_claude = "direct"`, they are in the VM too. The sidecar holds no
+  AWS key, so an AWS key that you send in is in the VM. Send only what the
   task needs, and use tokens that you can revoke.
 - **A full claude.ai login in an agent sandbox** (`--allow-agent`) is in the
   VM, where the agent can read it, and it can make API keys on your

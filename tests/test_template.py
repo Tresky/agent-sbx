@@ -3,6 +3,7 @@ definition may say, what the build reads from it, when a template is out of
 date, and the order of the host steps. Each test works on a copy of the
 repository's template files, so nothing here writes into the checkout."""
 import os
+import pty
 import shutil
 import subprocess
 import tempfile
@@ -182,6 +183,25 @@ class DefinitionTest(Repo):
         self.assertIn("gem install bundler --no-document", calls)
         self.assertEqual(calls[-1], "check: ruby bundle")
 
+    def test_the_core_has_oh_my_zsh_and_a_bare_template_does_not(self):
+        text = (self.root / "template" / "provision.sh").read_text()
+        core = text[text.index('step "docker"'):text.index("fi  # the core")]
+        self.assertIn("ohmyzsh/ohmyzsh.git ~/.oh-my-zsh", core)
+        # A retry after a stopped clone finds no partial directory.
+        self.assertIn("rm -rf ~/.oh-my-zsh && git clone", core)
+
+    def test_the_core_has_the_aws_cli_and_a_bare_template_does_not(self):
+        text = (self.root / "template" / "provision.sh").read_text()
+        core = text[text.index('step "docker"'):text.index("fi  # the core")]
+        self.assertIn('sudo "$d/aws/install" --update', core)
+        self.assertRegex(text, r'(?m)^CHECK_TOOLS="[^"]*\baws\b[^"]*"$')
+        # The bare branch empties the list, and it has its own apt line.
+        self.assertIn('[[ "$BARE" == 1 ]] && CHECK_TOOLS=""', text)
+        full = text[text.index("else\n  apt-get install"):text.index('if [[ -n "${SBX_APT_PACKAGES')]
+        for package in ("less", "groff-base", "unzip"):
+            self.assertRegex(full, rf"\b{package}\b")
+        self.assertIn('echo "AWS_EC2_METADATA_DISABLED=true" >> /etc/environment', text)
+
     def test_the_host_entry_point_prints_what_bash_reads(self):
         # The host runs the module as a script: no sbxlib import may be needed.
         (self.root / "sbxlib").mkdir()
@@ -197,6 +217,52 @@ class DefinitionTest(Repo):
                               capture_output=True, text=True)
         self.assertEqual(done.returncode, 1)
         self.assertIn("no template definition 'nope'", done.stderr)
+
+
+@unittest.skipUnless(shutil.which("zsh"), "needs zsh")
+class ZshrcTest(unittest.TestCase):
+    """The real ~/.zshrc in a real interactive zsh. A stub stands for oh-my-zsh."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name)
+        shutil.copy(REPO / "template" / "files" / "zshrc", self.home / ".zshrc")
+
+    def start_shell(self, stdin=subprocess.DEVNULL, path="/usr/bin:/bin") -> subprocess.CompletedProcess:
+        return subprocess.run(["zsh", "-ic", 'print -r -- "PROMPT=$PROMPT"'], capture_output=True, text=True,
+                              cwd=self.home, stdin=stdin, timeout=30,
+                              env={"HOME": str(self.home), "PATH": path})
+
+    def test_fzf_loads_only_with_a_terminal(self):
+        bin_dir = self.home / "bin"
+        bin_dir.mkdir()
+        fzf = bin_dir / "fzf"
+        fzf.write_text("#!/bin/sh\necho 'print -r -- fzf-loaded'\n")
+        fzf.chmod(0o755)
+        path = f"{bin_dir}:/usr/bin:/bin"
+        self.assertNotIn("fzf-loaded", self.start_shell(path=path).stdout)
+        main, terminal = pty.openpty()
+        self.addCleanup(os.close, main)
+        self.addCleanup(os.close, terminal)
+        self.assertIn("fzf-loaded", self.start_shell(stdin=terminal, path=path).stdout)
+
+    def test_a_shell_loads_it_with_no_update_check_and_shows_the_host(self):
+        (self.home / ".oh-my-zsh").mkdir()
+        (self.home / ".oh-my-zsh" / "oh-my-zsh.sh").write_text(
+            "zstyle -s ':omz:update' mode mode\n"
+            'print -r -- "loaded mode=$mode theme=$ZSH_THEME plugins=$plugins"\n'
+            "PROMPT='theme> '\n")
+        shell = self.start_shell()
+        # The stub reads the setting as it loads: a later zstyle comes too late.
+        self.assertIn("loaded mode=disabled theme=robbyrussell plugins=git\n", shell.stdout)
+        self.assertIn("PROMPT=%F{cyan}%m%f theme> \n", shell.stdout)
+        self.assertEqual(shell.stderr, "")
+
+    def test_a_sandbox_of_an_older_template_keeps_the_plain_prompt(self):
+        shell = self.start_shell()
+        self.assertEqual(shell.stdout, "PROMPT=%F{cyan}%m%f %F{blue}%~%f %# \n")
+        self.assertEqual(shell.stderr, "")
 
 
 class BuildConfTest(unittest.TestCase):

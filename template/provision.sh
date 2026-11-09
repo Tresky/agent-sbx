@@ -30,7 +30,7 @@ trap 'code=$?; [[ $code -eq 0 || -e /var/lib/sbx/provision.ok || -e /var/lib/sbx
 # user and its components, and none of the core. The sidecar template is bare.
 BARE="${SBX_TEMPLATE_BARE:-0}"
 # The tools that the final check requires. A component adds its own.
-CHECK_TOOLS="node claude herdr agent-browser"
+CHECK_TOOLS="node claude herdr agent-browser aws"
 [[ "$BARE" == 1 ]] && CHECK_TOOLS=""
 
 step() { printf '\n\033[1m=== %s ===\033[0m\n' "$*"; }
@@ -90,7 +90,7 @@ else
   apt-get install -y -q --no-install-recommends \
     qemu-guest-agent ca-certificates curl wget gnupg unzip zip git git-lfs make pkg-config \
     build-essential clang lld g++ python3 python3-venv \
-    zsh tmux htop jq ripgrep fd-find fzf direnv rsync openssh-client \
+    zsh tmux htop jq ripgrep fd-find fzf direnv rsync openssh-client less groff-base \
     libssl-dev zlib1g-dev libffi-dev \
     fonts-liberation fonts-dejavu fonts-noto-color-emoji
 fi
@@ -126,6 +126,9 @@ if [[ "$BARE" != 1 ]]; then
 RAILS_DEVELOPMENT_HOSTS=.$SBX_DOMAIN
 __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=.$SBX_DOMAIN
 EOF
+  # A sandbox has no metadata service, and the sidecar's firewall drops its
+  # address. With no key or no region, each `aws` call would wait 2 to 4 seconds.
+  echo "AWS_EC2_METADATA_DISABLED=true" >> /etc/environment
   ssh-keyscan -t ed25519,rsa github.com gitlab.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
 fi
 
@@ -217,6 +220,18 @@ as_user_retry 'curl -fsSL --retry 5 --retry-delay 5 https://claude.ai/install.sh
 # remote PATH and starts the server side itself; no service is needed.
 as_user_retry 'curl -fsSL --retry 5 --retry-delay 5 https://herdr.dev/install.sh | sh'
 
+step "aws cli"
+# The zip from AWS: the packages of the distributions are older. --update lets a
+# retry finish a partial install. `aws help` needs the core's groff-base and less.
+as_user_retry 'd="$(mktemp -d)" && curl -fsSL --retry 5 --retry-delay 5 "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "$d/aws.zip" && unzip -q "$d/aws.zip" -d "$d" && sudo "$d/aws/install" --update && rm -rf "$d"'
+as_user 'aws --version'
+
+step "oh-my-zsh"
+# A plain clone: the official installer replaces ~/.zshrc and changes the login
+# shell, and the core sets both. ~/.zshrc loads it, and a rebuild updates it. A
+# stopped clone leaves a partial directory, so each try starts clean.
+as_user_retry 'rm -rf ~/.oh-my-zsh && git clone -q --depth 1 https://github.com/ohmyzsh/ohmyzsh.git ~/.oh-my-zsh'
+
 fi  # the core
 
 # The components, in the order of the definition. A local component (not in
@@ -235,6 +250,8 @@ printf 'SBX_TEMPLATE_NAME=%s\nSBX_TEMPLATE_HASH=%s\nSBX_COMPONENTS="%s"\n' \
 
 step "checks"
 [[ "$BARE" == 1 ]] || { docker --version; caddy version; }
+# ~/.zshrc skips a missing oh-my-zsh, so only this check sees a bad install.
+[[ "$BARE" == 1 ]] || as_user 'zsh -ic "whence omz >/dev/null"'
 for tool in $CHECK_TOOLS; do
   as_user "command -v $tool >/dev/null && echo \"$tool: \$(command -v $tool)\""
 done

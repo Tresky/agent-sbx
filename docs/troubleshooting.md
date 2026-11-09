@@ -77,6 +77,9 @@ The tables below list the problems that `sbx doctor` does not explain.
 | you fixed the recipe and want to run it again | | `ssh sbx-<name> sbx-recipe-run code/<project> .sandbox/setup.sh <env-file>` |
 | `rvm: command not found` in a recipe | the `ruby` component now uses mise, and the recipe still calls `rvm` | replace `rvm install` and `rvm use` with `mise install ruby` |
 | `mise: command not found` in a recipe | the template was built when the `ruby` component used rvm | `sbx template rebuild <name>` |
+| `omz: command not found`, and a plain prompt | the template was built before the core had oh-my-zsh | `sbx template rebuild <name>`, then make a new sandbox |
+| `aws: command not found` | the template was built before the core had the AWS CLI | `sbx template rebuild <name>`, then make a new sandbox |
+| `Unable to locate credentials` from `aws` | the core has the AWS CLI with no credentials | send a key as an input, and let the recipe install it in `~/.aws` (`projects.md`, "Where a value comes from") |
 | `Config files in ... are not trusted` | a project outside `~/code` has a `mise.toml` with `[env]`, a template or a hook | `mise trust <file>`, or move the project under `~/code` |
 | a recipe dies on an unset variable | `set -u` breaks nvm | remove `-u` from the recipe's `set` line |
 | a second run of the recipe fails | a step is not safe to repeat | see "Write a recipe that can run again" in [projects.md](projects.md) |

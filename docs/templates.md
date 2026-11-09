@@ -301,7 +301,8 @@ every person who pulls it, and marks every template `OUT OF DATE`. Put a
 change in a component when only some templates need it.
 
 `template/files/zshenv`, `zshrc` and `sbx_mirror.py` need no rebuild: `sbx
-new` copies them from your checkout into each new sandbox.
+new` copies them from your checkout into each new sandbox. `zshrc` names the
+oh-my-zsh theme and plugins.
 
 ## A setup from before named templates
 
