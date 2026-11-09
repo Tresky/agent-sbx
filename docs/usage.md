@@ -56,6 +56,34 @@ therefore costs no VM.
 [projects.md](projects.md) explains how a project declares its recipe and its
 inputs.
 
+### The git author
+
+`sbx new` sets `user.name` and `user.email` in the sandbox, before the recipe
+runs. Each value comes from the first of these that has one:
+
+1. `git_author_name` and `git_author_email` in `~/.config/sbx/config.toml`:
+
+   ```toml
+   git_author_name  = "Ada Lovelace"
+   git_author_email = "ada@example.com"
+   ```
+
+2. `git config` on your machine. sbx runs it in the project's checkout when
+   there is one, so the checkout's own config and an `includeIf` apply. One
+   project can therefore have its own author.
+
+An agent sandbox gets the same author, so the agent can read that name and
+email. `sbx new` prints the author that it set, and warns when a value is
+missing.
+
+A sandbox that runs already keeps its author. To change it, run this. The inner
+quotes keep a name with a space in one piece:
+
+```
+sbx ssh <name> -- git config --global user.name "'Ada Lovelace'"
+sbx ssh <name> -- git config --global user.email ada@example.com
+```
+
 ## A sandbox for several repositories
 
 Three things stay apart: a git token, a repository and a sandbox. A token names

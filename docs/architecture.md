@@ -558,7 +558,9 @@ sequenceDiagram
 8. **Claude Code.** The Claude token goes into `~/.config/sbx/claude.env`;
    with `sidecar_claude = proxy`, the sidecar's base URL and the placeholder
    go there instead, and the token stays in the sidecar.
-9. **Git access.** For `personal`, the SSH agent is forwarded for the clones.
+9. **Git access.** `user.name` and `user.email` go into the global git config,
+   from `git_author_name` and `git_author_email`, or from `git config` on the
+   Mac. For `personal`, the SSH agent is forwarded for the clones.
    For `agent`, the placeholder goes into `~/.git-credentials` for the
    sidecar's proxy, and every URL of the git host is rewritten to
    `http://<sidecar>:8080/github/`; the sidecar adds the token and the

@@ -3,14 +3,16 @@ which order, and what never appears on a command line."""
 import datetime as dt
 import io
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from sbxlib import cli, gittoken, names
-from sbxlib.config import ConfigError, load, parse_env_file
+from sbxlib.config import Config, ConfigError, load, parse_env_file
 from sbxlib.pve import PveError
 from sbxlib.run import Result, Runner
 
@@ -351,6 +353,20 @@ class NewTest(unittest.TestCase):
         snapshot = next(i for i, e in enumerate(events) if e[0] == "api" and e[2].endswith("/qemu/9101/snapshot"))
         self.assertLess(clones[-1], snapshot, "a rollback keeps what was cloned")
 
+    def test_the_author_goes_in_before_the_recipe_and_the_snapshot(self):
+        (self.tmp / "cfg/config.toml").write_text('git_author_name = "Ada"\ngit_author_email = "ada@example.com"\n')
+        code, events, _ = self.run_new("myapp", "--project", str(self.app), "--with", "key")
+        self.assertEqual(code, 0)
+        author = self.pos(events, "cmd", "git config --global user.name Ada", "user.email ada@example.com")
+        self.assertLess(author, self.pos(events, "cmd", "sbx-recipe-run code/app"), "a recipe can commit")
+        self.assertLess(author, self.pos(events, "api", "POST", "/nodes/pve/qemu/9101/snapshot"),
+                        "a rollback keeps the author")
+
+    def test_a_plain_sandbox_with_no_author_anywhere_still_starts(self):
+        code, events, _ = self.run_new("lab")
+        self.assertEqual(code, 0)
+        self.assertFalse([e for e in events if e[0] == "cmd" and "git config --global user." in e[1]])
+
     def test_a_clone_that_fails_still_makes_the_sandbox(self):
         self.clone_fails = {"web"}
         code, events, _ = self.run_new("lab", "--repo", "me/web", "--repo", "me/api")
@@ -688,6 +704,93 @@ class NewTest(unittest.TestCase):
         deleted = [e[2] for e in events if e[0] == "api" and e[1] == "DELETE"]
         # A VM with a matching NAME but no `sbx` tag is not ours to destroy.
         self.assertEqual(deleted, ["/nodes/pve/qemu/9101"])
+
+
+class GitAuthorTest(unittest.TestCase):
+    """Real git and a real shell: where the author comes from, and what a commit
+    in the sandbox records."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name)
+        env = mock.patch.dict(os.environ, {"HOME": str(self.home), "GIT_CONFIG_NOSYSTEM": "1",
+                                           "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.checkout = self.home / "app"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.checkout)], check=True)
+
+    def git(self, *args, cwd=None):
+        return subprocess.run(["git", *args], check=True, capture_output=True, text=True, cwd=cwd).stdout.strip()
+
+    def author(self, project=None, **settings):
+        return cli._git_author(Config(**settings), Runner(), project)
+
+    def in_checkout(self):
+        return SimpleNamespace(checkout=self.checkout)
+
+    def test_config_wins_over_git(self):
+        self.git("config", "--global", "user.name", "Global")
+        self.git("config", "--global", "user.email", "global@example.com")
+        self.assertEqual(self.author(self.in_checkout(), git_author_name="Ada", git_author_email="ada@example.com"),
+                         ("Ada", "ada@example.com"))
+
+    def test_each_value_falls_back_alone(self):
+        self.git("config", "--global", "user.email", "global@example.com")
+        self.assertEqual(self.author(git_author_name="Ada"), ("Ada", "global@example.com"))
+
+    def test_with_no_checkout_git_gives_the_global_values(self):
+        self.git("config", "--global", "user.name", "Global")
+        self.git("config", "--global", "user.email", "global@example.com")
+        self.assertEqual(self.author(), ("Global", "global@example.com"))
+        self.assertEqual(self.author(SimpleNamespace(checkout=None)), ("Global", "global@example.com"))
+
+    def test_a_checkout_can_have_its_own_author(self):
+        self.git("config", "--global", "user.name", "Global")
+        self.git("config", "--global", "user.email", "global@example.com")
+        self.git("-C", str(self.checkout), "config", "user.email", "local@example.com")
+        self.assertEqual(self.author(self.in_checkout()), ("Global", "local@example.com"))
+
+    def test_an_include_if_of_the_checkout_counts(self):
+        (self.home / "work.inc").write_text("[user]\n\temail = work@example.com\n")
+        self.git("config", "--global", "user.email", "global@example.com")
+        self.git("config", "--global", f"includeIf.gitdir:{self.checkout.resolve()}/.path", str(self.home / "work.inc"))
+        self.assertEqual(self.author(self.in_checkout())[1], "work@example.com")
+
+    def test_no_git_on_this_machine_is_no_author(self):
+        def responder(argv, data):
+            raise cli.CommandError(argv, 127, "git: command not found")
+        self.assertEqual(cli._git_author(Config(), Runner(responder=responder), None), ("", ""))
+
+    def test_a_commit_in_the_sandbox_records_the_author_and_the_shell_runs_nothing_from_it(self):
+        name = "Ada O'Neil \"$(touch pwned)\" Jr"
+        home = self.home
+
+        class LocalVm:
+            def __init__(self, shell):
+                self.shell = shell
+
+            def run(self, cmd, **k):
+                done = subprocess.run([self.shell, "-c", cmd], capture_output=True, text=True, cwd=home)
+                assert done.returncode == 0, done.stderr
+
+        for shell in ("sh", "zsh"):
+            if shutil.which(shell) is None:
+                continue
+            with self.subTest(shell=shell):
+                cli._install_git_author(Config(git_author_name=name, git_author_email="ada@example.com"),
+                                        Runner(), LocalVm(shell), None)
+                self.git("commit", "-q", "--allow-empty", "-m", "one", cwd=self.checkout)
+                self.assertEqual(self.git("log", "-1", "--format=%an|%ae|%cn|%ce", cwd=self.checkout),
+                                 f"{name}|ada@example.com|{name}|ada@example.com")
+                self.assertFalse((home / "pwned").exists())
+
+    def test_with_no_author_nothing_goes_into_the_sandbox(self):
+        class NoVm:
+            def run(self, cmd, **k):
+                raise AssertionError(cmd)
+        cli._install_git_author(Config(), Runner(), NoVm(), None)
 
 
 class GuideTest(unittest.TestCase):

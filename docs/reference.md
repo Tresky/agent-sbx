@@ -181,6 +181,8 @@ layer 2: sbx stops with an error.
 | `agent_ttl_days` | `3` | the expiry of a new agent sandbox. `0` = none. |
 | `git_token_command` | | a command that prints a git token for EVERY project. Prefer one token per project. |
 | `git_token_host` | `github.com` | the host of that token |
+| `git_author_name` | | the name on commits in a new sandbox. Empty: `git config user.name` on your machine, in the project's checkout when there is one. |
+| `git_author_email` | | the email on commits in a new sandbox. Empty: `git config user.email` on your machine, in the same way. |
 | `remote_control_mode` | `acceptEdits` | the permission mode of Remote Control sessions. `""` turns the server off. |
 | `ssh_key` | `~/.config/sbx/id_ed25519` | the key for the sandboxes. With `ssh_agent`, only its `.pub` is read, and no private file is needed. |
 | `ssh_agent` | | the path of a 1Password SSH agent socket. Empty: off, and sbx uses the key file. Set: sbx runs ssh with `IdentityAgent=<socket>` and the `.pub` as `IdentityFile`, and a personal sandbox with forwarding gets `ForwardAgent=$SSH_AUTH_SOCK`. `sbx setup` sets it ([setup.md](setup.md#the-sandbox-key)). Mac and Linux machine only. |

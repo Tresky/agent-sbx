@@ -98,7 +98,10 @@ class Config:
     # never in a manifest: a manifest must not be able to run a command.
     git_token_command: list[str] = field(default_factory=list)
     git_token_host: str = "github.com"
-    gpu_mapping: str = ""              # name of a PCI Resource Mapping; empty = --gpu is refused
+    # The author of commits in a new sandbox. Empty: `git config` on this machine.
+    git_author_name: str = ""
+    git_author_email: str = ""
+    gpu_mapping: str = ""            # name of a PCI Resource Mapping; empty = --gpu is refused
     # Claude Code Remote Control in a PERSONAL sandbox: "" = off, else the
     # permission mode of the server's sessions. An agent sandbox gets it only through `sbx remote-control --allow-agent`:
     # a full claude.ai login can make API keys on the organization.

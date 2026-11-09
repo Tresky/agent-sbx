@@ -1571,6 +1571,36 @@ def _install_git_token(vm: Vm, username: str, host: str, token: str) -> None:
            f"git config --global --add url.{https}.insteadOf {q(f'ssh://git@{host}/')}")
 
 
+def _git_author(cfg: Config, runner: Runner, project: "Project | None") -> tuple[str, str]:
+    """The name and the email of commits in a new sandbox: config.toml, then git
+    on this machine. git runs in the project's checkout when there is one, so the
+    checkout's own config and an includeIf can give one project its own author."""
+    where = ["-C", str(project.checkout)] if project is not None and project.checkout else []
+
+    def value(setting: str, key: str) -> str:
+        if setting:
+            return setting
+        try:
+            found = runner.run(["git", *where, "config", key], check=False)
+        except CommandError:  # no git on this machine
+            return ""
+        return found.stdout.strip() if found.code == 0 else ""
+
+    return value(cfg.git_author_name, "user.name"), value(cfg.git_author_email, "user.email")
+
+
+def _install_git_author(cfg: Config, runner: Runner, vm: Vm, project: "Project | None") -> None:
+    q = shlex.quote
+    name, email = _git_author(cfg, runner, project)
+    steps = [f"git config --global user.{key} {q(value)}" for key, value in (("name", name), ("email", email)) if value]
+    if steps:
+        vm.run(" && ".join(steps))
+    if name and email:
+        info(f"git commits in this sandbox use {name} <{email}>")
+    else:
+        warn("git has no full author in this sandbox: set git_author_name and git_author_email in config.toml")
+
+
 def _setup_project(vm: Vm, project: Project, decisions, forward_agent: bool, profile: str = "agent") -> int:
     q = shlex.quote
     proj_dir = f"code/{project.name}"
@@ -1739,6 +1769,8 @@ def cmd_new(args, cfg: Config, runner: Runner, api=None) -> int:
         else:
             _install_claude(vm, claude)
             info("Claude Code is signed in to your Claude subscription")
+    # Before the recipe, which can commit, and before the 'clean' snapshot.
+    _install_git_author(cfg, runner, vm, project)
     code = 0
     if project is not None:
         try:
